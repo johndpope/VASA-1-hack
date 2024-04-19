@@ -1,0 +1,1571 @@
+MetaPortrait: Identity-Preserving Talking Head Generation with Fast Personalized Adaptation
+Bowen Zhang1∗   Chenyang Qi2∗   Pan Zhang1   Bo Zhang32   HsiangTao Wu3
+  Dong Chen2   Qifeng Chen22   Yong Wang1   Fang Wen3
+1USTC   2HKUST   3Microsoft
+Abstract
+In this work, we propose an ID-preserving talking head generation framework, which advances previous methods in two aspects. First, as opposed to interpolating from sparse flow, we claim that dense landmarks are crucial to achieving accurate geometry-aware flow fields. Second, inspired by face-swapping methods, we adaptively fuse the source identity during synthesis, so that the network better preserves the key characteristics of the image portrait. Although the proposed model surpasses prior generation fidelity on established benchmarks, personalized fine-tuning is still needed to further make the talking head generation qualified for real usage. However, this process is rather computationally demanding that is unaffordable to standard users. To alleviate this, we propose a fast adaptation model using a meta-learning approach. The learned model can be adapted to a high-quality personalized model as fast as 30 seconds. Last but not least, a spatial-temporal enhancement module is proposed to improve the fine details while ensuring temporal coherency. Extensive experiments prove the significant superiority of our approach over the state of the arts in both one-shot and personalized settings.
+
+[Uncaptioned image]
+Figure 1:Our method yields identity-preserving talking head generation. See the webpage for video demos.
+1
+1Introduction
+Talking head generation [35, 38, 28, 9, 56, 49, 2, 8, 47, 31] has found extensive applications in face-to-face live chat, virtual reality and virtual avatars in games and videos. In this paper, we aim to synthesize a realistic talking head with a single source image (one-shot) that provides the appearance of a given person while being animatable according to the motion of the driving person. Recently, considerable progress has been made with neural rendering techniques, bypassing the sophisticated 3D human modeling process and expensive driving sensors. While these works attain increasing fidelity and higher rendering resolution, identity preserving remains a challenging issue since the human vision system is particularly sensitive to any nuanced deviation from the person’s facial geometry.
+
+Prior arts mainly focus on learning a geometry-aware warping field, either by interpolating from sparse 2D/3D landmarks or leveraging 3D face prior, e.g., 3D morphable face model (3DMM) [4, 3]. However, fine-grained facial geometry may not be well described by a set of sparse landmarks or inaccurate face reconstruction. Indeed, the warping field, trained in a self-supervised manner rather than using accurate flow ground truth, can only model coarse geometry deformation, lacking the expressivity that captures the subtle semantic characteristics of the portrait.
+
+In this paper, we propose to better preserve the portrait identity in two ways. First, we claim that dense facial landmarks are sufficient for an accurate warping field prediction without the need for local affine transformation. Specifically, we adopt a landmark prediction model [51] trained on synthetic data [50], yielding 669 head landmarks that offer significantly richer information on facial geometry. In addition, we build upon the face-swapping approach [27] and propose to enhance the perceptual identity by attentionally fusing the identity feature of the source portrait while retaining the pose and expression of the intermediate warping. Equipped with these two improvements, our one-shot model demonstrates a significant advantage over prior works in terms of both image quality and perceptual identity preservation when animating in-the-wild portraits.
+
+While our one-shot talking head model has achieved state-of-the-art quality, it is still infeasible to guarantee satisfactory synthesis results because such a one-shot setting is inherently ill-posed—one may never hallucinate the person-specific facial shape and occluded content from a single photo. Hence, ultimately we encounter the uncanny valley [37] that a user becomes uncomfortable as the synthesis results approach to realism. To circumvent this, one workaround is to finetune the model using several minutes of a personal video. Such personalized training has been widely adopted in industry to ensure product-level quality, yet this process is computationally expensive, which greatly limits its use scenarios. Thus, speeding up this personalized training, a task previously under-explored, is of great significance to the application of talking head synthesis.
+
+We propose to achieve fast personalization with meta-learning. The key idea is to find an initialization model that can be easily adapted to a given identity with limited training iterations. To this end, we resort to a meta-learning approach [11, 30] that finds success in quickly learning discriminative tasks, yet is rarely explored in generative tasks. Specifically, we optimize the model for specific personal data with a few iterations. In this way, we get a slightly fine-tuned personal model towards which we move the initialization model weight a little bit. Such meta-learned initialization allows us to train a personal model within 30 seconds, which is 3 times faster than a vanilla pretrained model while requiring less amount of personal data.
+
+Moreover, we propose a novel temporal super-resolution network to enhance the resolution of the generated talking head video. To do this, we leverage the generative prior to boost the high-frequency details for portraits and meanwhile take into account adjacent frames that are helpful to reduce temporal flickering. Finally, we reach temporally coherent video results of 
+512
+×
+512
+ resolution with compelling facial details. In summary, this work innovates in the following aspects:
+
+• We propose a carefully designed framework to significantly improve the identity-preserving capability when animating a one-shot in-the-wild portrait.
+• To the best of our knowledge, we are the first to explore meta-learning to accelerate personalized training, thus obtaining ultra-high-quality results at affordable cost.
+• Our novel video super-resolution model effectively enhances details without introducing temporal flickering.
+2Related Work
+2D-based talking head synthesis. Methods along this line [39, 38, 47, 28, 32] predict explicit warping flow by interpolating the sparse flow defined by 2D landmarks. FOMM [38] assumes local affine transformation for flow interpolation. Recently, Mallya  et al. [28] computes landmarks from multiple source images using an attention mechanism. However, the landmarks learned in an unsupervised manner are too sparse (e.g., 20 in Face-Vid2Vid [47]) to be interpolated into dense flows. Using predefined facial landmarks [14] is also a straightforward approach [43, 15, 57, 62] to represent the motion of driving images. For example, PFLD [14] uses 98 facial landmarks. However, they could not generate an accurate warping flow since the landmarks are not dense enough.
+
+Talking head synthesis with 3D face prior. 3D Morphable Models [4, 3] represent a face image as PCA coefficients relating to identity, expression, and pose, which provides an easy tool to edit and render portrait images [24, 23, 13, 12, 52, 40]. Some attempts [24, 23] render the animated faces by combining the identity coefficients of the source image and the motion coefficients of the driving video. Recent works [35, 8] predict a warping flow field for talking head synthesis using 3DMM. Although 3DMM-based methods allow explicit face control, using these coefficients to represent detailed face geometry and expression remains challenging.
+
+Refer to caption
+Figure 2:Overview of our one-shot framework. (a) Given a source image 
+𝑰
+�
+ and a driving video {
+𝑰
+�
+1
+, 
+𝑰
+�
+2
+, 
+⋯
+, 
+𝑰
+�
+�
+}, we first extract their dense landmarks 
+(
+𝑰
+�
+ldmk
+,
+𝑰
+d
+ldmk
+)
+ using a pretrained landmark detector. (b) Then, we estimate warping flows 
+𝒘
+ between the source image and each driving frame according to concatenated input 
+𝒙
+in
+. (c) We further refine the warped source input 
+𝑰
+~
+�
+ using an ID-preserving network. (d) Finally, we enhance and upsample the 
+256
+×
+256
+ results {
+𝑰
+~
+�
+1
+, 
+𝑰
+~
+�
+2
+, 
+⋯
+, 
+𝑰
+~
+�
+�
+} to high-fidelity output {
+𝑰
+′
+�
+1
+, 
+𝑰
+′
+�
+2
+, 
+⋯
+, 
+𝑰
+′
+�
+�
+} in 
+512
+×
+512
+.
+Towards higher-resolution talking head. The video resolution of most talking head methods [35, 38, 2, 49] is 
+256
+×
+256
+, bounded by the available video datasets [6, 29]. To enhance the visual quality of output videos, previous literature trains an additional single-image super-resolution network [9, 54, 48] or utilizes pretrained 2D StyleGAN [56, 48]. However, these methods upsample the original video in a frame-by-frame manner and ignore the temporal consistency of adjacent video frames. In this work, we propose a novel temporal super-resolution module to boost temporal consistency while preserving per-frame quality.
+
+Meta learning and fast adaptation. The goal of meta-learning methods [11, 30, 58, 46] is to achieve good performance with a limited amount of training data. In this paper, we aim to quickly build a personalized model given a new identity, which correlates with the goal of meta-learning. Zakharov et al. [58] propose to improve GAN inversion using a hyper-network. We leverage the idea of model-agnostic meta-learning (MAML) [11] to obtain the best initialization that can be easily adapted to different persons.
+
+3Method
+Figure 2 illustrates an overview of our synthesis framework. Given an image 
+𝑰
+�
+ of a person which we refer as source image and a sequence of 
+�
+ driving video frames {
+𝑰
+�
+1
+, 
+𝑰
+�
+2
+, 
+⋯
+, 
+𝑰
+�
+�
+}, we aim to generate an output video {
+𝑰
+′
+�
+1
+, 
+𝑰
+′
+�
+2
+, 
+⋯
+, 
+𝑰
+′
+�
+�
+} with the motions derived from the driving video while maintaining the identity of the source image. Section 3.1 introduces our one-shot model (Figure 2(a, b, c)) for identity-preserving talking head generation 
+𝑰
+~
+�
+ at 
+256
+×
+256
+ resolution. We describe our meta-learning scheme in Section 3.2, which allows fast adaption using a few images. In Section 3.3, we propose a spatial-temporal enhancement network that generally improves the perceptual quality for both the one-shot and personalized models, yielding video frames with 
+512
+×
+512
+ resolution, as shown in Figure 2(d).
+
+3.1ID-preserving One-shot Base Model
+In this section, we will introduce our warping network using dense facial landmarks and an identity-aware refinement network for one-shot talking head synthesis.
+
+Warping prediction with dense landmarks. To predict an accurate geometry-aware warping field, we claim that dense landmark prediction [51] is the key to a geometry-aware warping field estimation. While dense facial landmarks are tedious to annotate, our dense landmark prediction is trained on synthetic faces [50], which reliably produces 669 points covering the entire head, including the ears, eyeballs, and teeth, for in-the-wild faces. These dense landmarks capture rich information about the person’s facial geometry and considerably ease the flow field prediction.
+
+However, it is non-trivial to fully make use of these dense landmarks. A naive approach is to channel-wise concatenate the landmarks before feeding into the network, as previous works [38, 39, 47]. However, processing such input is computationally demanding due to the inordinate number of input channels. Hence, we propose an efficient way to digest these landmarks. Specifically, We draw the neighboring connected landmark points, with each connection encoded in different colors as shown in Figure 2(a).
+
+One can thus take the landmark images of the source and driving, along with the source image, i.e., 
+𝒙
+in
+=
+Concat
+​
+(
+𝑰
+�
+,
+𝑰
+�
+ldmk
+,
+𝑰
+�
+ldmk
+)
+, for warping field prediction. To ensure a globally coherent prediction, we strengthen the warping capability using the condition of a latent motion code 
+𝒛
+�
+ which is derived from the input, i.e., 
+𝒛
+�
+=
+�
+�
+​
+(
+𝒙
+in
+)
+, where 
+�
+�
+ is a CNN encoder. The motion code 
+𝒛
+�
+ is injected into the flow estimation network 
+�
+�
+ through AdaIN [18]. By modulating the mean and variance of the normalized feature map, the network could be effectively guided by the motion vector which induces a globally coherent flow prediction. Formally, we obtain the prediction of a dense flow field through 
+𝒘
+=
+�
+�
+​
+(
+𝒙
+in
+,
+𝒛
+�
+)
+.
+
+ID-preserving refinement network. Directly warping the source image with the predicted flow field inevitably introduces artifacts and the loss of subtle perceived identity. Therefore, an ID-preserving refinement network is needed to produce a photo-realistic result while maintaining the identity of the source image. Prior works primarily focus on the geometry-aware flow field prediction, whereas such deformation may not well characterize the fine-grained facial geometry. In this work, we resolve the identity loss via a well-designed identity-preserving refinement network.
+
+We propose to attentionally incorporate the semantic identity vector with the intermediate warping results. Let 
+𝒉
+in
+�
+ be the 
+�
+-th layer feature map of the refinement network. We obtain the identity-aware feature output 
+𝒉
+id
+�
+ by modulating 
+𝒉
+in
+�
+ with the identity embedding 
+𝒛
+id
+ through AdaIN, where 
+𝒛
+id
+ is extracted using a pre-trained face recognition model 
+�
+id
+ [7]. Meanwhile, we obtain a motion-aware feature 
+𝒉
+motion
+�
+, which keeps the head motion and expression of the driving video. Specifically, 
+𝒉
+motion
+�
+ is obtained via a Feature-wise Linear Modulate (FiLM) [10, 34, 33] according to the warped image 
+𝑰
+~
+�
+=
+𝒘
+​
+(
+𝑰
+�
+)
+, i.e., 
+𝒉
+motion
+�
+=
+Conv
+​
+(
+𝑰
+~
+�
+)
+×
+𝒉
+id
+�
++
+Conv
+​
+(
+𝑰
+~
+�
+)
+.
+
+With both the identity-aware and motion-aware features, we adaptively fuse the features through an attention-based fusion block. Inspired by recent face-swapping approaches [27], we suppose that the driving motions and source identity should be fused in a spatially-adaptive manner, in which the facial parts that mostly characterize the key facial features express the identity should rely more on the identity-aware feature, whereas other parts (e.g. hair and clothes) should make greater use of the motion-aware feature. A learnable fusion mask 
+𝑴
+�
+ is used for the fusion of these two parts, which is predicted by,
+
+𝑴
+�
+=
+�
+​
+(
+Conv
+​
+(
+𝒉
+in
+�
+)
+)
+,
+(1)
+where 
+�
+ indicates the sigmoid activation function. In this way, the model learns to properly inject the identity-aware features into identity-related regions. The output of layer 
+�
+ can be derived by fusing features according to the mask 
+𝑴
+�
+, which is,
+
+𝒉
+out
+�
+=
+𝑴
+�
+⊗
+𝒉
+motion
+�
++
+(
+1
+−
+𝑴
+�
+)
+⊗
+𝒉
+id
+�
+,
+(2)
+where 
+⊗
+ denotes the Hadamard product. Through a cascade of such blocks, we obtain the final output image 
+𝑰
+~
+�
+, which well preserves the source identity while accurately following the head motion and expression as the driving person.
+
+Training objective. Perceptual loss [19] is computed between the warped source image 
+𝑰
+~
+�
+ and ground-truth driving image 
+𝑰
+�
+ for accurate warping prediction. The same loss is also applied to enforce the refinement output 
+𝑰
+~
+�
+.
+
+We also extract the feature using face recognition model 
+�
+id
+ [7], and penalize the dissimilarity between the ID vectors of the output image 
+𝑰
+~
+�
+ and source 
+𝑰
+�
+, using
+
+ℒ
+id
+=
+1
+−
+cos
+⁡
+(
+�
+id
+​
+(
+𝑰
+~
+�
+)
+,
+�
+id
+​
+(
+𝑰
+�
+)
+)
+.
+(3)
+A multi-scale patch discriminator 
+ℒ
+adv
+ [33] is adopted to enhance the photo-realism of the outputs. To further improve the generation quality on the hard eye and mouth areas, we add additional 
+ℒ
+1
+ reconstruction losses, i.e., 
+ℒ
+eye
+,
+ℒ
+mouth
+, for these parts.
+
+The overall training loss can be formulated as
+
+ℒ
+=
+ℒ
+w
+VGG
++
+�
+r
+​
+ℒ
+r
+VGG
++
+�
+id
+​
+ℒ
+id
++
+�
+eye
+​
+ℒ
+eye
++
+�
+mouth
+​
+ℒ
+mouth
++
+�
+adv
+​
+ℒ
+adv
+,
+(4)
+where 
+�
+r
+,
+�
+id
+,
+�
+eye
+,
+�
+mouth
+, and 
+�
+adv
+ are the loss weights.
+
+3.2Meta-learning based Faster Personalization
+\begin{overpic}[width=184.28981pt]{images/method/Meta_vis.pdf} \end{overpic}
+Figure 3:Visualization of meta-learning. Compared with the one-shot pre-trained model 
+�
+, the meta-learned model 
+�
+^
+ can be rapidly adapted to a unique personal model 
+�
+^
+�
+�
+ in 
+�
+ steps.
+While achieving state-of-the-art generation quality using our one-shot model, there always exists challenging cases that are intractable since the one-shot setting is inherently ill-posed. Person-specific characteristics and occlusion would never be faithfully recovered using a one-shot general model. Thus, personalized fine-tuning is necessary to achieve robust and authentic results that are truly usable. Nonetheless, fine-tuning the one-shot pre-trained model on a long video is computationally prohibitive for common users. To solve this, we propose a meta-learned model whose initialization weights can be easily adapted according to low-shot personal data within a few training steps, as illustrated in Figure 3.
+
+Formally, given a person 
+�
+, the personalized adaptation starts from the pre-trained model weight 
+�
+ and aims to reach the optimal personal model weight 
+�
+^
+�
+ by minimizing the error against the personal images 
+𝑿
+^
+�
+:
+
+�
+^
+�
+=
+min
+�
+�
+⁡
+ℒ
+​
+(
+�
+�
+�
+​
+(
+𝑿
+^
+�
+)
+)
+,
+(5)
+where 
+�
+�
+�
+ denotes the whole generator with weight 
+�
+�
+. Usually we perform 
+�
+ steps of stochastic gradient descent (SGD) from initialization 
+�
+ to approach 
+�
+^
+�
+, so the weight updating process can be formulated as:
+
+�
+�
+�
+=
+SGD
+�
+​
+(
+�
+,
+𝑿
+^
+�
+)
+.
+(6)
+Our goal is to find an optimal initialization 
+�
+^
+�
+ which could approach any personal model after 
+�
+ steps of SGD update, even for a small 
+�
+, i.e.,
+
+�
+^
+�
+=
+min
+�
+​
+∑
+�
+=
+1
+�
+‖
+�
+^
+�
+−
+�
+�
+�
+‖
+.
+(7)
+Indeed, the general one-shot pretrained model 
+�
+ is a special case in the above formulation, which essentially learns the model weight in Equation 7 when 
+�
+=
+0
+. When we are allowed to perform a few adaption steps (
+�
+>
+0
+), there is a gap between 
+�
+ and desired 
+�
+^
+�
+, since the optimization target of the standard pre-training is to minimize the overall error across all training data, it does not necessarily find the best weight suitable for personalization.
+
+Compared with general one-shot models, we leverage the idea of Model-Agnostic Meta-Learning (MAML) to bridge this gap and enable surprisingly fast personalized training. The goal of MAML-based methods is to optimize the initialized weights such that they could be fast adapted to a new identity within a few steps of gradient descent, which directly matches our goal. Directly optimizing the initialization weight using Equation (7) involves the computation of second-order derivatives, which is computationally expensive on large-scale training. Therefore, we utilize Reptile [30], a first-order MAML-based approach to obtain suitable initialization for fast personalization.
+
+To be more specific, our meta-learning model explicitly considers the personalized adaptation during training. For each person 
+�
+, we start from the 
+�
+�
+0
+=
+�
+, which is the initialization to be optimized. Formally, we sample a batch of personal training data 
+𝑿
+^
+�
+, the 
+�
+ steps of personalized training yield the finetuned model weights as:
+
+�
+�
+�
+=
+SGD
+​
+(
+�
+�
+�
+−
+1
+,
+𝑿
+^
+�
+)
+,
+ 
+​
+�
+=
+1
+,
+⋯
+,
+�
+.
+(8)
+Finally, the personal update, i.e., the difference of 
+�
+�
+�
+ and 
+�
+�
+0
+, is used as the gradient to update our initialization 
+�
+:
+
+�
+←
+�
+−
+�
+​
+(
+�
+�
+�
+−
+�
+)
+,
+(9)
+where 
+�
+ is the meta-learning rate. The full algorithm is shown in Algorithm 1. Our model progressively learns a more suitable initialization through meta-training as visualized in Figure 3, which could fast adapt to personalized models after limited steps of adaptation.
+
+Algorithm 1 Optimization of Initial Weights with Reptile
+1:Input: weights 
+�
+ of generation network 
+�
+, inner loop learning rate 
+�
+, meta-learning rate 
+�
+, number of training iterations 
+�
+, number of training persons 
+�
+, number of inner loop iterations 
+�
+2:for 
+�
+=
+1
+,
+⋯
+,
+�
+ do
+3:    for 
+�
+=
+1
+,
+⋯
+,
+�
+ do
+4:         
+�
+�
+0
+=
+Clone
+​
+(
+�
+)
+5:         Sample a training batch 
+𝑿
+^
+�
+ of person 
+�
+6:         for 
+�
+=
+1
+,
+⋯
+,
+�
+ do
+7:             
+�
+�
+�
+=
+�
+�
+�
+−
+1
+−
+�
+​
+∇
+�
+ℒ
+​
+(
+�
+�
+​
+(
+𝑿
+^
+�
+)
+)
+8:         end for
+9:    end for
+10:    
+�
+←
+�
+−
+�
+�
+∑
+�
+=
+1
+�
+(
+�
+�
+�
+−
+�
+)
+11:end for
+Refer to caption	Refer to caption	Refer to caption	Refer to caption	Refer to caption	Refer to caption	Refer to caption
+Refer to caption	Refer to caption	Refer to caption	Refer to caption	Refer to caption	Refer to caption	Refer to caption
+Refer to caption	Refer to caption	Refer to caption	Refer to caption	Refer to caption	Refer to caption	Refer to caption
+Source	Driving	X2Face	Bi-layer	FOMM	PIRender	Ours
+Figure 4:Qualitative results of our self-reconstruction (top row) and cross-identity reenactment (bottom two rows) at 
+256
+×
+256
+ resolution. Our method synthesizes more faithful expression and motion, while better preserving the identity of the source portrait.
+3.3Temporal-consistent Super-resolution Network
+To further enhance the generation resolution and improve the high-fidelity details of our output, a video super-resolution network is needed as the final stage of the generation framework. Previous talking head synthesis works [56, 9] utilize single-frame super-resolution as the last stage and ignore the quality of temporal consistency and stability. Performing super-resolution in frame-by-frame manner tends to produce texture flickering which severely hampers the visual quality. In this work, we consider multiple adjacent frames to ensure temporal coherency.
+
+Inspired by previous 2D face restoration works [48, 55], the pre-trained generative models [20, 21, 59] like StyleGAN contain rich face prior and could significantly help to enhance the high-frequency details. Moreover, the disentangled 
+𝒲
+ space in StyleGAN provides desirable temporal consistency during manipulation [44], which also benefits our framework. Therefore, we propose a temporally consistent super-resolution module by leveraging pretrained StyleGAN and 3D convolution, where the latter brings quality enhancement in spatio-temporal domain. As shown in Fig. 2, we feed the concatenated sequence of 
+�
+ video frames 
+{
+𝑰
+~
+�
+1
+,
+𝑰
+~
+�
+2
+,
+…
+,
+𝑰
+~
+�
+�
+}
+ into a U-Net composed of 3D convolution with reflection padding on the temporal dimension. To ensure pre-trained per-frame quality while improving temporal consistency, we initialize the 3D convolution weight in U-Net with a pretrained 2D face restoration network [48].
+
+These spatio-temporally enhanced features from the U-Net decoder further modulate the pretrained StyleGAN features through FiLM. Thus, the super-resolution frames 
+{
+𝑰
+′
+�
+1
+,
+𝑰
+′
+�
+2
+,
+…
+,
+𝑰
+′
+�
+�
+}
+ are obtained as:
+
+{
+𝑰
+′
+�
+1
+,
+𝑰
+′
+�
+2
+,
+…
+,
+𝑰
+′
+�
+�
+}
+=
+�
+StyleGAN
+​
+(
+�
+3D
+​
+(
+{
+𝑰
+~
+�
+1
+,
+𝑰
+~
+�
+2
+,
+…
+,
+𝑰
+~
+�
+�
+}
+)
+)
+.
+(10)
+During training, we optimize the output 
+𝑰
+′
+�
+ towards the 
+512
+×
+512
+ ground truth 
+𝑰
+�
+ using 
+ℓ
+1
+ and perceptual loss.
+
+Refer to caption	Refer to caption	Refer to caption	Refer to caption	Refer to caption
+Refer to caption	Refer to caption	Refer to caption	Refer to caption	Refer to caption
+Source	Driving	StyleHEAT	Base w/ bicubic	Ours
+Figure 5:Qualitative results of self reconstruction and cross-identity reenactment at 
+512
+×
+512
+ resolution. Our spatial-temporal super-resolution module further enhances more high-frequency details on teeth, eyes, and hair.
+Methods	Self Reconstruction (
+256
+×
+256
+)	Cross Reenactment (
+256
+×
+256
+)
+FID
+↓
+ 	LPIPS
+↓
+ID Loss
+↓
+AED
+↓
+APD
+↓
+FID
+↓
+ID Loss
+↓
+AED
+↓
+APD
+↓
+X2Face[49] 	45.2908	0.6806	0.9632	0.2147	0.1007	91.1485	0.6496	0.3112	0.1210
+Bi-layer[57] 	100.9196	0.5881	0.5280	0.1258	0.0139	127.7823	0.6336	0.2330	0.0208
+FOMM[38] 	12.1979	0.2338	0.2096	0.0964	0.0100	80.1637	0.5760	0.2340	0.0239
+PIRender[35] 	14.4065	0.2639	0.3024	0.1080	0.0162	78.8430	0.5440	0.2113	0.0214
+Ours	11.9528	0.2262	0.1296	0.0942	0.0124	77.5048	0.2944	0.2524	0.0258
+Methods	Self Reconstruction (
+512
+×
+512
+)	Cross Reenactment (
+512
+×
+512
+)
+StyleHEAT[56] 	44.5207	0.2840	0.4112	0.1155	0.0131	111.3450	0.4720	0.2505	0.0218
+Ours	21.4974	0.2079	0.0832	0.0904	0.0121	49.6020	0.1952	0.2737	0.0242
+Table 1:Quantitative results for self-reconstruction and cross-reenactment. We evaluate both 
+256
+×
+256
+ results and 
+512
+×
+512
+ results. Our method outperforms all baselines on both resolutions across image fidelity metrics with comparable motion transfer results.
+4Experiments
+Refer to caption
+Figure 6:A comparison of different personalized models at the same epochs. Our personalized base model without reptile adaptation reconstructs more accurate skin color and source identity than the personalized FOMM method. For the model personalized from a reptile learning stage, finer detail on teeth and eye colors could be further generated.
+4.1Experiment Setup
+Dataset. Following [9], we train our warping and refinement networks on cropped VoxCeleb2 dataset [6] at 
+256
+2
+ resolution. We randomly select 500 videos from the test set for evaluation. For our meta-learning-based fast personalization, we finetune our base model on HDTF dataset [61], which is composed of 410 videos from 300 different identities. We downsample cropped faces to 
+256
+2
+ resolution and split the original HDTF dataset into 400 training videos and 10 test videos. After the convergence of our meta-training, we further evaluate the personalization speed of our model on the HDTF test set. Our temporal super-resolution module 
+�
+3
+​
+�
+ is trained on the HDTF dataset [61] which has 300 frames per video with 
+512
+2
+ resolution. We feed downsampled 
+256
+2
+ frames into fixed warping and refinement network and use the outputs of the refinement network as inputs for the next temporal super-resolution module. More training details are provided in the supplementary.
+
+Metrics We evaluate the fidelity of self-reconstruction using FID [16] and LPIPS [60]. Our motion transfer quality is measured using average expression distance (AED) and average pose distance (APD) with driving videos. For our meta-learning-based fast personalization, we illustrate the LPIPS at different personalization epochs for each fine-tuning approach. Following previous works [26, 25], we evaluate our temporal consistency using warping error 
+�
+warp 
+. For each frame 
+𝑰
+~
+�
+�
+, we calculate the warping error with the previous frame 
+𝑰
+~
+�
+�
+−
+1
+ warped by the estimated optical flow in the occlusion map.
+
+4.2Comparison with State-of-the-art Methods
+We compare our warping and refinement models at 
+256
+×
+256
+ resolution against several state-of-the-art face reenactment works: X2Face [49], Bi-Layer [2], First-Order Motion Model [38], and PIRender [35]. The top row of Figure 4 presents our qualitative results of self-reconstruction. Different from sparse landmarks in unsupervised learning [38] or 1D 3DMM [35], our dense landmarks provide strong guidance to accurate and fine-detailed synthesis on gaze, mouth, and expressions. The last two rows show the results of our cross-identity reenactment. Since our landmarks have a better decomposition of identity and motion and our refinement network is identity-aware, our method is the only one that well preserves the identity of source image. In contrast, previous methods suffer from appearance data leakage directly from the driver and generate faces with a similar identity to the driving image. Note that the 3DMM coefficients of AED and APD evaluation are not fully decomposed. Thus, other baselines with identity leakage may have better quantitative metrics. We compare our full framework with the proposed temporal super-resolution module at 
+512
+×
+512
+ resolution against StyleHEAT [56], which is the only open-sourced method that generates high-resolution talking heads. StyleHEAT [56] fails to synthesize sharp and accurate teeth in our experiment, and the identity of the output image is quite different from the source portrait due to the limitations of GAN inversion. In contrast, our refinement network is identity-aware and we leverage pretrained StyleGAN in our temporal super-resolution module to fully exploit its face prior knowledge. Figure 5 shows that our method produces sharp teeth and hairs, while bicubic-upsampled results are blurry with artifacts.
+
+Table 1 demonstrates that our method achieves the best quantitative fidelity and comparable motion transfer quality on both self-reconstruction and cross-identity reenactment.
+
+0
+1
+2
+3
+0.12
+0.14
+0.16
+0.18
+Fine-tuning epochs
+LPIPS
+Ours w/o Reptile
+Ours w/ Reptile
+FOMM Pretrain
+Figure 7:Comparison of test LPIPS at fine-tuning epochs for different approaches. Our reptile-based model achieves more than 
+3
+×
+ speedup compared with the base model and previous baseline.
+4.3Evaluation of Fast Personalization
+Although our base model achieves state-of-the-art quality as a general model, there still exists ill-posedness in some cases. For example, it is very difficult to synthesize teeth according to a closed source mouth. Thus, industry products typically conduct personalization using fine-tuning strategy, which can be computationally expensive. To achieve faster convergence, we finetune our base model using a meta-learning strategy to provide a better weight initialization for the following personalization. In Fig 7, we evaluate the personalization speed of our meta-learned model against our base model and previous baseline FOMM [38]. It takes our meta-learned model 0.5 epoch to decrease LPIPS to 0.14, which is 
+3
+×
+ speedup against our base model, and 
+4
+×
+ against FOMM. Figure 6 compares the personalization of our method and FOMM [38] at the same epoch, which illustrates our fast adaptation speed on ambiguous areas (e.g., teeth, eyes, and wrinkle details).
+
+Methods	FID
+↓
+LPIPS
+↓
+�
+�
+​
+�
+​
+�
+​
+�
+↓
+Ground Truth	-	-	0.0182
+Base w/ bicubic	25.5762	0.2285	0.0184
+Base w/ GFPGAN [48] 	22.6351	0.2178	0.0242
+Ours	21.4974	0.2079	0.0213
+Table 2:Quantitative evaluation of our temporal super-resolution on self-reconstruction at 
+512
+×
+512
+ resolution.
+4.4Evaluation of Temporal Super-resolution
+In Table 4, we also evaluate the performance of our temporal super-resolution using 2D image fidelity and warping error 
+�
+�
+​
+�
+​
+�
+​
+�
+. We train a 2D super-resolution baseline using GFPGAN [48]. The quantitative result in Table 4 shows that although naive 2D super-resolution improves per-frame fidelity, it also brings more flickering and larger warping error (0.0242) than simple bicubic upsampling (0.0184). To achieve temporally coherent results, we combine a U-Net composed of 3D convolution with facial prior [21], which significantly reduces 
+�
+�
+​
+�
+​
+�
+​
+�
+ of our final videos from 0.0242 to 0.0213, and preserves compelling 2D facial details.
+
+4.5Ablation Study of Base Model
+Methods	FID
+↓
+LPIPS
+↓
+ID Loss
+↓
+Ours Sparse Landmark	14.3190	0.2485	0.1424
+Ours w/o ID	12.2736	0.2256	0.2144
+Ours	11.9528	0.2262	0.1296
+Table 3:Quantitative ablation study of landmarks and ID coefficients in our base model.
+We conduct ablation studies to validate the effectiveness of our driving motion and source identity representation in our base model. If we replace our 669 dense landmarks with sparse landmarks, the LPIPS of warped source images degrades by 0.2. To evaluate our identity-aware refinement, the removal of the identity input causes significant increase of identity loss from 0.1296 to 0.2144.
+
+5Conclusion
+We present a novel framework for identity-preserving one-shot talking head generation. To faithfully maintain the source ID, we propose to leverage accurate dense landmarks in the warping network and explicit source identity during refinement. Further, we significantly advance the applicability of personalized model by reducing its training to 30 seconds with meta-learning. Last but not least, we enhance the final resolution and temporal consistency with 3D convolution and generative prior. Comprehensive experiments demonstrate the state-of-the-art performance of our system.
+
+References
+[1]Abien Fred Agarap.Deep learning using rectified linear units (relu).arXiv preprint arXiv:1803.08375, 2018.
+[2]Jimmy Lei Ba, Jamie Ryan Kiros, and Geoffrey E Hinton.Layer normalization.arXiv preprint arXiv:1607.06450, 2016.
+[3]Volker Blanz and Thomas Vetter.A morphable model for the synthesis of 3d faces.international conference on computer graphics and interactive techniques, 1999.
+[4]James Booth, Anastasios Roussos, Stefanos Zafeiriou, Allan Ponniahy, and David Dunaway.A 3d morphable model learnt from 10,000 faces.In CVPR, 2016.
+[5]James Booth, Anastasios Roussos, Stefanos Zafeiriou, Allan Ponniahy, and David Dunaway.A 3d morphable model learnt from 10,000 faces.In CVPR, 2016.
+[6]Joon Son Chung, Arsha Nagrani, and Andrew Zisserman.Voxceleb2: Deep speaker recognition.conference of the international speech communication association, 2018.
+[7]Jiankang Deng, Jia Guo, Evangelos Ververas, Irene Kotsia, and Stefanos Zafeiriou.Retinaface: Single-shot multi-level face localisation in the wild.In CVPR, 2020.
+[8]Michail Christos Doukas, Stefanos Zafeiriou, and Viktoriia Sharmanska.Headgan: One-shot neural head synthesis and editing.In ICCV, 2021.
+[9]Nikita Drobyshev, Jenya Chelishev, Taras Khakhulin, Aleksei Ivakhnenko, Victor Lempitsky, and Egor Zakharov.Megaportraits: One-shot megapixel neural head avatars.In ACM Multimedia, 2022.
+[10]Vincent Dumoulin, Ethan Perez, Nathan Schucher, Florian Strub, Harm de Vries, Aaron Courville, and Yoshua Bengio.Feature-wise transformations.Distill, 2018.https://distill.pub/2018/feature-wise-transformations.
+[11]Chelsea Finn, Pieter Abbeel, and Sergey Levine.Model-agnostic meta-learning for fast adaptation of deep networks.In ICML, 2017.
+[12]Ohad Fried, Ayush Tewari, Michael Zollhöfer, Adam Finkelstein, Eli Shechtman, Dan B Goldman, Kyle Genova, Zeyu Jin, Christian Theobalt, and Maneesh Agrawala.Text-based editing of talking-head video.ACM Trans. Graph., 2019.
+[13]Jiahao Geng, Tianjia Shao, Youyi Zheng, Yanlin Weng, and Kun Zhou.Warp-guided gans for single-photo facial animation.ACM Transactions on Graphics (TOG), 2018.
+[14]Xiaojie Guo, Siyuan Li, Jiawan Zhang, Jiayi Ma, Lin Ma, Wei Liu, and Haibin Ling.Pfld: A practical facial landmark detector.arXiv: Computer Vision and Pattern Recognition, 2019.
+[15]Sungjoo Ha, Martin Kersner, Beomsu Kim, Seokjun Seo, and Dongyoung Kim.Marionette: Few-shot face reenactment preserving identity of unseen targets.In AAAI, 2020.
+[16]Martin Heusel, Hubert Ramsauer, Thomas Unterthiner, Bernhard Nessler, and Sepp Hochreiter.Gans trained by a two time-scale update rule converge to a local nash equilibrium.In NeurIPS, 2017.
+[17]Fa-Ting Hong, Longhao Zhang, Li Shen, and Dan Xu.Depth-aware generative adversarial network for talking head video generation.In CVPR, 2022.
+[18]Xun Huang and Serge Belongie.Arbitrary style transfer in real-time with adaptive instance normalization.In ICCV, 2017.
+[19]Justin Johnson, Alexandre Alahi, and Li Fei-Fei.Perceptual losses for real-time style transfer and super-resolution.In ECCV, 2016.
+[20]Tero Karras, Samuli Laine, and Timo Aila.A style-based generator architecture for generative adversarial networks.In CVPR, 2019.
+[21]Tero Karras, Samuli Laine, Miika Aittala, Janne Hellsten, Jaakko Lehtinen, and Timo Aila.Analyzing and improving the image quality of StyleGAN.In CVPR, 2020.
+[22]Taras Khakhulin, Vanessa Sklyarova, Victor Lempitsky, and Egor Zakharov.Realistic one-shot mesh-based head avatars.In ECCV, 2022.
+[23]Hyeongwoo Kim, Mohamed Elgharib, Hans-Peter Zollöfer, Michael Seidel, Thabo Beeler, Christian Richardt, and Christian Theobalt.Neural style-preserving visual dubbing.ACM Transactions on Graphics (TOG), 2019.
+[24]Hyeongwoo Kim, Pablo Garrido, Ayush Tewari, Weipeng Xu, Justus Thies, Matthias Nießner, Patrick Pérez, Christian Richardt, Michael Zollhöfer, and Christian Theobalt.Deep video portraits.Association for Computing Machinery, 2018.
+[25]Wei-Sheng Lai, Jia-Bin Huang, Oliver Wang, Eli Shechtman, Ersin Yumer, and Ming-Hsuan Yang.Learning blind video temporal consistency.In ECCV, 2018.
+[26]Chenyang Lei, Yazhou Xing, and Qifeng Chen.Blind video temporal consistency via deep video prior.In NeurIPS, 2020.
+[27]Lingzhi Li, Jianmin Bao, Hao Yang, Dong Chen, and Fang Wen.Faceshifter: Towards high fidelity and occlusion aware face swapping.arXiv: Computer Vision and Pattern Recognition, 2019.
+[28]Arun Mallya, Ting-Chun Wang, and Ming-Yu Liu.Implicit Warping for Animation with Image Sets.In NeurIPS, 2022.
+[29]Arsha Nagrani, Joon Son Chung, and Andrew Zisserman.Voxceleb: A large-scale speaker identification dataset.conference of the international speech communication association, 2017.
+[30]Alex Nichol and John Schulman.Reptile: a scalable metalearning algorithm.arXiv: Learning, 2018.
+[31]Hao Ouyang, Bo Zhang, Pan Zhang, Hao Yang, Jiaolong Yang, Dong Chen, Qifeng Chen, and Fang Wen.Real-time neural character rendering with pose-guided multiplane images.ECCV, 2022.
+[32]Youxin Pang, Yong Zhang, Weize Quan, Yanbo Fan, Xiaodong Cun, Ying Shan, and Dong-ming Yan.Dpe: Disentanglement of pose and expression for general video portrait editing.arXiv preprint arXiv:2301.06281, 2023.
+[33]Taesung Park, Ming-Yu Liu, Ting-Chun Wang, and Jun-Yan Zhu.Semantic image synthesis with spatially-adaptive normalization.In CVPR, 2019.
+[34]Ethan Perez, Florian Strub, Harm De Vries, Vincent Dumoulin, and Aaron Courville.Film: Visual reasoning with a general conditioning layer.In AAAI, 2018.
+[35]Yurui Ren, Ge Li, Yuanqi Chen, Thomas H. Li, and Shan Liu.Pirenderer: Controllable portrait image generation via semantic neural rendering.In ICCV, 2021.
+[36]Manuel Ruder, Alexey Dosovitskiy, and Thomas Brox.Artistic style transfer for videos.In German Conference on Pattern Recognition, pages 26–36, 2016.
+[37]Mincheol Shin, Se Jung Kim, and Frank Biocca.The uncanny valley: No need for any further judgments when an avatar looks eerie.Computers in Human Behavior, 94:100–109, 2019.
+[38]Aliaksandr Siarohin, Stéphane Lathuilière, Sergey Tulyakov, Elisa Ricci, and Nicu Sebe.First order motion model for image animation.In NeurIPS, 2019.
+[39]Aliaksandr Siarohin, Stéphane Lathuilière, Sergey Tulyakov, Elisa Ricci, and Nicu Sebe.Animating arbitrary objects via deep motion transfer.In CVPR, 2019.
+[40]Junshu Tang, Bo Zhang, Binxin Yang, Ting Zhang, Dong Chen, Lizhuang Ma, and Fang Wen.Explicitly controllable 3d-aware portrait generation.arXiv preprint arXiv:2209.05434, 2022.
+[41]Jiale Tao, Biao Wang, Borun Xu, Tiezheng Ge, Yuning Jiang, Wen Li, and Lixin Duan.Structure-aware motion transfer with deformable anchor model.In CVPR, 2022.
+[42]Zachary Teed and Jia Deng.Raft: Recurrent all-pairs field transforms for optical flow.In ECCV, 2020.
+[43]Soumya Tripathy, Juho Kannala, and Esa Rahtu.Facegan: Facial attribute controllable reenactment gan.In CVPR, 2021.
+[44]Rotem Tzaban, Ron Mokady, Rinon Gal, Amit H. Bermano, and Daniel Cohen-Or.Stitch it in time: Gan-based facial editing of real videos, 2022.
+[45]Thomas Unterthiner, Sjoerd van Steenkiste, Karol Kurach, Raphaël Marinier, Marcin Michalski, and Sylvain Gelly.Fvd: A new metric for video generation.In ICLR, pages 694–711. Springer, 2019.
+[46]Shaofei Wang, Marko Mihajlovic, Qianli Ma, Andreas Geiger, and Siyu Tang.Metaavatar: Learning animatable clothed human models from few depth images.In NeurIPS, 2021.
+[47]Ting-Chun Wang, Arun Mallya, and Ming-Yu Liu.One-shot free-view neural talking-head synthesis for video conferencing.In CVPR, 2020.
+[48]Xintao Wang, Yu Li, Honglun Zhang, and Ying Shan.Towards real-world blind face restoration with generative facial prior.In CVPR, 2021.
+[49]Olivia Wiles, A Koepke, and Andrew Zisserman.X2face: A network for controlling face generation using images, audio, and pose codes.In ECCV, 2018.
+[50]Erroll Wood, Tadas Baltrusaitis, Charlie Hewitt, Sebastian Dziadzio, Matthew Johnson, Virginia Estellers, Thomas J. Cashman, and Jamie Shotton.Fake it till you make it: Face analysis in the wild using synthetic data alone.In ICCV, 2021.
+[51]Erroll Wood, Tadas Baltrusaitis, Charlie Hewitt, Matthew Johnson, Jingjing Shen, Nikola Milosavljevic, Daniel Wilde, Stephan Garbin, Chirag Raman, Jamie Shotton, Toby Sharp, Ivan Stojiljkovic, Tom Cashman, and Julien Valentin.3d face reconstruction with dense landmarks.In ECCV, 2022.
+[52]Jinbo Xing, Menghan Xia, Yuechen Zhang, Xiaodong Cun, Jue Wang, and Tien-Tsin Wong.Codetalker: Speech-driven 3d facial animation with discrete motion prior.arXiv preprint arXiv:2301.02379, 2023.
+[53]Bing Xu, Naiyan Wang, Tianqi Chen, and Mu Li.Empirical evaluation of rectified activations in convolutional network, 2015.
+[54]Lingbo Yang, Chang Liu, Pan Wang, Shanshe Wang, Peiran Ren, Siwei Ma, and Wen Gao.Hifacegan: Face renovation via collaborative suppression and replenishment.ACM Multimedia, 2020.
+[55]Tao Yang, Peiran Ren, Xuansong Xie, and Lei Zhang.Gan prior embedded network for blind face restoration in the wild.In CVPR, 2021.
+[56]Fei Yin, Yong Zhang, Xiaodong Cun, Mingdeng Cao, Yanbo Fan, Xuan Wang, Qingyan Bai, Baoyuan Wu, Jue Wang, and Yujiu Yang.Styleheat: One-shot high-resolution editable talking face generation via pretrained stylegan.In ECCV, 2022.
+[57]Egor Zakharov, Aleksei Ivakhnenko, Aliaksandra Shysheya, and Victor Lempitsky.Fast bi-layer neural synthesis of one-shot realistic head avatars.In ECCV, 2020.
+[58]Egor Zakharov, Aliaksandra Shysheya, Egor Burkov, and Victor Lempitsky.Few-shot adversarial learning of realistic neural talking head models.In ICCV, 2019.
+[59]Bowen Zhang, Shuyang Gu, Bo Zhang, Jianmin Bao, Dong Chen, Fang Wen, Yong Wang, and Baining Guo.Styleswin: Transformer-based gan for high-resolution image generation.In CVPR, 2022.
+[60]Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, and Oliver Wang.The unreasonable effectiveness of deep features as a perceptual metric.In CVPR, 2018.
+[61]Zhimeng Zhang, Lincheng Li, and Yu Ding.Flow-guided one-shot talking face generation with a high-resolution audio-visual dataset.In CVPR, 2021.
+[62]Ruiqi Zhao, Tianyi Wu, and Guodong Guo.Sparse to dense motion transfer for face image animation.In ICCV, 2021.
+Appendix AImplementation Details
+Dataset. Following previous work [9], we train our warping and refinement networks on cropped VoxCeleb2 dataset [6], which consists of 145k videos from 6k different identities. We preprocess the videos by cropping the faces with bounding boxes containing the landmarks from the first frame and resize each video sequence to 
+256
+×
+256
+ resolution. We randomly select 500 videos from the VoxCeleb2 for evaluation. We use the source and driving frames from the same identity for training and same-identity reenactment evaluation, where the driving frames is also the ground truth image. For cross-identity reenactment evaluation, we randomly shuffle the identity in the previous test set, where the source and driving frames have different identities.
+
+Training details. We train the 
+256
+×
+256
+ base model on the VoxCeleb2 dataset with batch size of 48 using Adam optimizer of learning rate 
+2
+×
+10
+−
+4
+ on 
+8
+×
+Tesla V100 GPUs. We set hyperparameters of losses as: 
+�
+r
+=
+10
+,
+�
+id
+=
+20
+,
+�
+eye
+=
+50
+,
+�
+mouth
+=
+50
+ and 
+�
+adv
+=
+1
+. We first train the warping network for 200,000 iterations, then the warping and refinement network jointly for 200,000 more iterations.
+
+We further conduct our meta-learning stage for 
+�
+=
+14
+,
+000
+ outer iterations and meta-learning rate 
+�
+=
+2
+×
+10
+−
+5
+. In each iteration, we train an inner loop for 
+�
+=
+24
+ iteration with inner loop learning rate 
+�
+=
+2
+×
+10
+−
+4
+ on 48 images per identity.
+
+We train our temporal super-resolution module on the HDTF dataset for 20,000 iterations with batch size 8 and video sequence length 7 using Adam optimizer of learning rate 
+1
+×
+10
+−
+4
+.
+
+Metrics. Following previous works [26, 25], we evaluate our temporal consistency using warping error 
+�
+warp 
+. For each frame 
+�
+�
+, we calculate the warping error with previous frame 
+�
+�
+−
+1
+ as:
+
+�
+pair
+​
+(
+�
+)
+=
+∑
+�
+=
+1
+�
+�
+�
+​
+(
+�
+)
+​
+‖
+�
+�
+​
+(
+�
+)
+−
+�
+​
+(
+�
+�
+−
+1
+)
+​
+(
+�
+)
+‖
+1
+∑
+�
+=
+1
+�
+�
+�
+​
+(
+�
+)
+,
+(11)
+�
+warp 
+​
+(
+{
+�
+}
+�
+=
+1
+�
+)
+=
+1
+�
+−
+1
+​
+∑
+�
+=
+2
+�
+{
+�
+pair
+​
+(
+�
+)
+}
+,
+(12)
+where 
+�
+�
+ is the occlusion map  [36] for a pair of images 
+�
+�
+ and 
+�
+�
+−
+1
+,
+�
+ is the number of pixels, and 
+�
+ is backward warping operation with optical flow [42]. The averages warping error 
+�
+warp 
+​
+(
+{
+�
+}
+�
+=
+1
+�
+)
+ is used to evaluate our temporal consistency.
+
+Approach to perform Cross ID reenactment. We can reconstruct an accurate 3D face by fitting a morphable face model [5] based on the dense facial landmarks [51], which well disentangles identity with expression and motion. Benefiting from this, when performing challenging cross-identity reenactment, we simply combine the identity coefficients from the source 3D face with expression and head motion coefficients from the driving face and obtain a new 3D face. Then we project the resultant 3D face to 2D landmarks to serve as the driving target. In this way, there is no leakage of the driving identity so that the source identity could be well preserved.
+
+Detailed architecture. The detailed architecture of our warping and refinement network is shown in Figure 8 and Figure 9. “
+3
+×
+3
+​
+-Conv-
+​
+�
+​
+-
+​
+1
+” indicates a convolutional layer with kernel size of 
+3
+, channel dimensions of 
+�
+ and stride of 
+1
+. “LReLU, ReLU” indicates LeakyReLU [53] and ReLU [1] activation function respectively. Figure 10 illustrates the architecture of our temporal super-resolution network, where “Conv3d-k-1” represents a 3D convolution over temporal and spatial dimensions with 
+�
+ feature dimensions and stride of 
+1
+.
+
+\begin{overpic}[width=216.81pt]{images/supp/Detailed_architecture_warping-cropped.pdf} \end{overpic}
+Figure 8:Detailed architecture of our warping network.
+\begin{overpic}[width=216.81pt]{images/supp/Detailed_architecture_refinement-cropped.pdf} \end{overpic}
+Figure 9:Detailed architecture of our refinement network.
+\begin{overpic}[width=216.81pt]{images/supp/Detailed_architecture_F3d_sr-cropped.pdf} \end{overpic}
+Figure 10:Detailed architecture of our temporal super-resolution network.
+Appendix BAdditional Ablation
+B.1Visualization of ID, Landmark Ablation
+Figure 13 illustrates the warped images using the flow field produced by the warping network to evaluate the effectiveness of our dense landmark. The results guided by our dense landmarks are more accurate without obvious artifacts. In Figure 14, we show the visual changes brought by our ID-preserving refinement. Our source identity is better preserved, especially in the area of eye makeup and dimple.
+
+B.2Ablation of Temporal Super-Resolution
+In Figure 11, we select a column of the generated frame and visualize its temporal change. The bicubic-upsampled video lack texture of hair. The naive 2D face restoration baseline [48] generates more flickering artifacts. Our results have clear and stable temporal motion, which is close to ground truth. In Table 4, we provide an additional comparison with StyleHEAT [56] at 
+512
+×
+512
+ resolution and evaluate baselines using FVD [45], which is a popular metrics in video generation. Our method achieves the lowest FVD, which demonstrates our high temporal fidelity. Since StyleHEAT generates unrealistic over-smooth and flickering images, its FID, LPIPS, and FVD are much worse than ours. Note that L1 loss 
+�
+warp
+ is biased towards over-smoothed results. Thus, the 
+�
+warp
+ of StyleHEAT and bicubic upsampled video can be lower than ours.
+
+Refer to caption
+Figure 11:Comparison of temporal profile. We select a column and observe its changes with time index. The result of our temporal super-resolution is more stable and consistent without flickering noise.
+Methods	FID
+↓
+LPIPS
+↓
+FVD
+↓
+�
+�
+​
+�
+​
+�
+​
+�
+↓
+Ground Truth	-	-	-	0.0182
+StyleHEAT[56] 	44.5207	0.2840	572.363	0.0207
+Base w/ bicubic	25.5762	0.2285	248.413	0.0184
+Base w/ GFPGAN [48] 	22.6351	0.2178	172.754	0.0242
+Ours	21.4974	0.2079	162.685	0.0213
+Table 4:Quantitative evaluation of our temporal super-resolution on self-reconstruction at 
+512
+×
+512
+ resolution.
+Methods	Params	FPS	Same-ID 
+256
+2
+Cross-ID 
+256
+2
+FID
+↓
+ 	FVD
+↓
+LPIPS
+↓
+ID Loss
+↓
+FID
+↓
+ID Loss
+↓
+FOMM [38] 	59.80	51.57	22.7112	136.4454	0.1577	0.0848	37.4306	0.4368
+PIRender [35] 	22.52	9.72	28.2376	367.3942	0.1881	0.1200	40.4600	0.3600
+DaGAN [17] 	60.36	29.04	21.0879	108.5139	0.1427	0.0912	34.1784	0.4640
+DAM [41] 	59.75	43.74	23.7192	140.8459	0.1363	0.0832	40.4675	0.4400
+ROME [22] 	123.85	2.63	119.9319	1204.52	0.5422	0.3376	102.9575	0.5360
+Ours	130.28	16.78	18.1581	219.6183	0.1335	0.0496	25.1646	0.1920
+Methods	Params	FPS	Same-ID 
+512
+2
+Cross-ID 
+512
+2
+StyleHEAT [56] 	367.70	0.03	41.3364	244.6287	0.2957	0.2560	136.3959	0.4960
+Ours	284.97	1.22	21.1314	131.8511	0.2150	0.0880	127.3204	0.2544
+Table 5:Evaluation against more baselines on a larger scale test set
+Methods	Quality
+↓
+Identity
+↓
+Motion
+↓
+FOMM [38] 	3.48	3.25	2.99
+PIRender [35] 	3.12	2.92	3.28
+DaGAN [17] 	3.48	3.55	3.01
+DAM [41] 	3.65	3.58	3.02
+ROME [22] 	2.77	2.87	3.14
+StyleHEAT [56] 	2.99	3.26	3.71
+Ours	1.51	1.57	1.84
+Table 6:Average ranking score of user study. User prefer ours the best in both three aspects.
+Appendix CAdditional Comparison Results
+C.1Additional Qualitative Comparison with Recent Methods on a Larger Scale Test Set
+Main results. We perform our evaluation including recent methods [17, 41, 22] on a larger test set, which contains 20 test videos following the setting of StyleHEAT [56]. For the same-id case, we evaluate using 500 frames of each video with 10k frames in total, while for the cross-id case, we use 1000 source images from CelebA-HQ as source images and use 100 frames of each video to drive 50 source images with 100k frames in total. The results are shown in Table 5, in which our method achieves the best scores in almost all the metrics. Moreover, the FVD score of our full model improves significantly compared with the base model, which illustrates the effectiveness of the proposed temporal super-resolution network. Note that the compared methods target the one-shot setting and inevitably exhibit artifacts. In contrast, we are the first to study a personalized model which is of practical significance, and the proposed fast personalization is orthogonal to prior techniques and can be generally applied.
+
+Number of parameters and runtime (FPS). We also provide the comparison of the model size and throughput between our model and other methods in Table 5.
+
+User study. We also conduct a user study to obtain the user’s subject evaluation of different approaches. We present all the results produced by each comparing method to the participants and ask them to rank the score from 1 to 7 (1 is the best, 7 is the worst) on three perspectives independently: the image quality, the identity preservation and the motion drivability. 20 subjects are asked to rank different methods with 15 sets of comparisons in each study. The average ranking is shown in Table 6. Our method earns user preferences the best in both three aspects.
+
+C.2Additional Qualitative Comparison
+We also provide additional videos on the webpage to evaluate our results qualitatively. “Ours-Base” in the video denotes our base model in Sec 3.1, while “Ours-Full” denotes our full model with temporal-consistent super-resolution network. Our model is able to provide state-of-the-art generation quality with high temporal fidelity on both self-reconstruction and cross-reenactment tasks. Moreover, the videos of fast personalization illustrate the strong adaptation capability of our meta-learned model. The in-the-wild examples also demonstrate the generalized ability of the proposed model.
+
+\begin{overpic}[width=65.04366pt]{images/supp/failure_case/src_1.png} \end{overpic}	\begin{overpic}[width=65.04366pt]{images/supp/failure_case/00000818_gt.png} \end{overpic}	\begin{overpic}[width=65.04366pt]{images/supp/failure_case/00000818_ours_highlight.png} \end{overpic}
+Source	Driving	Ours
+Figure 12:Failure case of our framework.
+Appendix DLimitation
+Our one-shot model may not handle occlusions well. As shown in Figure 12, the occluded text in the background appears blurry in the output result. One possible solution is to inpaint the background from pretrained matting and combined it with the generation results using alpha-blending following  [9], which we leave for future work.
+
+Refer to caption	Refer to caption	Refer to caption	Refer to caption
+Refer to caption	Refer to caption	Refer to caption	Refer to caption
+Refer to caption	Refer to caption	Refer to caption	Refer to caption
+Source	Driving	Sparse ldmks	Ours
+Figure 13:Qualitative comparison of warping quality of sparse landmarks and dense landmark encoding.
+Refer to caption	Refer to caption	Refer to caption	Refer to caption
+Refer to caption	Refer to caption	Refer to caption	Refer to caption
+Refer to caption	Refer to caption	Refer to caption	Refer to caption
+Source	Driving	 
+Ours w/o ID
+ID Loss 0.6272
+Ours w/ ID
+ID Loss 0.2112
+Figure 14:Qualitative comparison of identity-preserving architecture.
+◄ ar5iv homepage Feeling
+lucky? Conversion
+report Report
+an issue View original
+on arXiv►
+Copyright Privacy Policy Generated on Fri Mar 1 10:41:50 2024 by LaTeXMLMascot Sammy

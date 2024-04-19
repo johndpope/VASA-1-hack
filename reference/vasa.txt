@@ -1,0 +1,1230 @@
+License: CC BY 4.0
+arXiv:2404.10667v1 [cs.CV] 16 Apr 2024
+VASA-1: Lifelike Audio-Driven Talking Faces Generated in Real Time
+Microsoft Research Asia
+​​​​​​ Sicheng Xu  
+​​​​Microsoft Research Asia ​​​​​​sichengxu@microsoft.com​​ &​​​​Guojun Chen
+*
+
+​​​​Microsoft Research Asia ​​​​guoch@microsoft.com &Yu-Xiao Guo
+*
+
+Microsoft Research Asia yuxgu@microsoft.com &   Jiaolong Yang
+*
+†
+
+Microsoft Research Asia jiaoyan@microsoft.com &Chong Li    
+Microsoft Research Asia chol@microsoft.com &Zhenyu Zang
+Microsoft Research Asia ​​​​zhenyuzang@microsoft.com​​​​ &Yizhong Zhang
+Microsoft Research Asia yizzhan@microsoft.com​ &Xin Tong
+Microsoft Research Asia xtong@microsoft.com &Baining Guo
+Microsoft Research Asia bainguo@microsoft.com
+: Equal contributions. 
+†
+: Corresponding author.  See the contribution statement section for contributions.
+Abstract
+We introduce VASA, a framework for generating lifelike talking faces with appealing visual affective skills (VAS) given a single static image and a speech audio clip. Our premiere model, VASA-1, is capable of not only producing lip movements that are exquisitely synchronized with the audio, but also capturing a large spectrum of facial nuances and natural head motions that contribute to the perception of authenticity and liveliness. The core innovations include a diffusion-based holistic facial dynamics and head movement generation model that works in a face latent space, and the development of such an expressive and disentangled face latent space using videos. Through extensive experiments including evaluation on a set of new metrics, we show that our method significantly outperforms previous methods along various dimensions comprehensively. Our method delivers high video quality with realistic facial and head dynamics and also supports the online generation of 512
+×
+512 videos at up to 40 FPS with negligible starting latency. It paves the way for real-time engagements with lifelike avatars that emulate human conversational behaviors. Project webpage: https://www.microsoft.com/en-us/research/project/vasa-1/
+
+1Introduction
+In the realm of multimedia and communication, the human face is not just a visage but a dynamic canvas, where every subtle movement and expression can articulate emotions, convey unspoken messages, and foster empathetic connections. The emergence of AI-generated talking faces offers a window into a future where technology amplifies the richness of human-human and human-AI interactions. Such technology holds the promise of enriching digital communication wang2021one; ma2021pixel, increasing accessibility for those with communicative impairments johnson2018assessing; prnewswire2024deepbrain, transforming education methods with interactive AI tutoring bozkurt2023speculative; kessler2018technology, and providing therapeutic support and social interaction in healthcare rehm2016role; leff2014avatar.
+
+As one step towards achieving such capabilities, our work introduces VASA-1, a new method that can produce audio-generated talking faces with a high level of realism and liveliness. Given a static face image of an arbitrary individual, alongside a speech audio clip from any person, our approach is capable of generating a hyper-realistic talking face video efficiently. This video not only features lip movements that are meticulously synchronized with the audio input but also exhibits a wide range of natural, human-like facial dynamics and head movements.
+
+Creating talking faces from audio has attracted significant attention in recent years with numerous approaches proposed zhou2020makelttalk; prajwal2020lip; zhang2021flow; sun2021speech2talking; guo2021ad; wang2021audio2head; wang2022one; wang2023lipformer; yu2023talking; zhang2023sadtalker; ma2023styletalk; he2024gaia. However, existing techniques are still far from achieving the authenticity of natural talking faces. Current research has predominantly focused on the precision of lip synchronization with promising accuracy obtained prajwal2020lip; wang2023lipformer. The creation of expressive facial dynamics and the subtle nuances of lifelike facial behavior remain largely neglected. This results in generated faces that seem rigid and unconvincing. Additionally, natural head movements also play a vital role in enhancing the perception of realism. Although recent studies have attempted to simulate realistic head motions wang2021audio2head; yu2023talking; zhang2023sadtalker, there remains a sizable gap between the generated animations and the genuine human movement patterns.
+
+Refer to caption
+Figure 1:Given a single portrait image, a speech audio clip, and optionally a set of other control signals, our approach produces a high-quality lifelike talking face video of 512
+×
+ 512 resolution at up to 40 FPS. The method is generic and robust, and the generated talking faces can faithfully mimic human facial expressions and head movements, reaching a high level of realism and liveliness. (All the photorealistic portrait images in this paper are virtual, non-existing identities generated by karras2020analyzing; betker2023improving. See our project page for the generated video samples with audios.)
+Another important factor is the efficiency of generation, which plays a pivotal role in real-time applications such as live communication. While image and video diffusion techniques have brought remarkable advancements in talking face generation du2023dae; stypulkowski2024diffused; tian2024emo as well as the broader video generation field blattmann2023stable; videoworldsimulators2024, the substantial computation demands have limited their practicality for interactive systems. A critical need exists for optimized algorithms that can bridge the gap between high-quality video synthesis and the low-latency requirements of real-time applications.
+
+Given the limitations of existing methods, this work develops an efficient yet powerful audio-conditioned generative model that works in the latent space of head and facial movements. Different from prior works, we train a Diffusion Transformer model on the latent space of holistic facial dynamics as well as head movements. We consider all possible facial dynamics – including lip motion, (non-lip) expression, eye gaze and blinking, among others – as a single latent variable and model its probabilistic distribution in a unified manner. By contrast, existing methods often apply separate models for different factors, even with interleaved regressive and generative formulations for them wang2021audio2head; zhou2021pose; yu2023talking; wang2023progressive; zhang2023sadtalker. Our holistic facial dynamics modeling, together with the jointly learned head motion patterns, leads to the generation of a diverse array of lifelike and emotive talking behaviors. Furthermore, we incorporate a set of optional conditioning signals such as main gaze direction, head distance, and emotion offset into the learning process. This makes the generative modeling of complex distribution more tractable and increases the generation controllability.
+
+To achieve our goal, another challenge lies in constructing the latent space for the aforementioned holistic facial dynamics and gathering the data for the diffusion model training. Beyond facial and head movements, a human face image contains other factors such as identity and appearance. In this work, we seek to build a proper latent space for human face using a large volume of face videos . Our aim is for the face latent space to possess both a total state of disentanglement between facial dynamics and other factors, as well as a high degree of expressiveness to model rich facial appearance details and dynamic nuances. We base our method on the 3D-aided representation wang2021one; drobyshev2022megaportraits and equip it with a collection of carefully-designed loss functions. Trained on face videos in an self-supervised or weakly-supervised manner, our encoder can produce well-disentangled factors including 3D appearance, identity, head pose and holistic facial dynamics, and the decoder can generate high quality faces following the given latent codes.
+
+VASA-1 has collectively advanced the realism of lip-audio synchronization, facial dynamics, and head movement to new heights. Coupled with high image generation quality and efficient running speed, we achieved real-time talking faces that are realistic and lifelike. Through detailed evaluations, we show that our method significantly outperforms existing methods. We believe VASA-1 brings us closer to a future where digital AI avatars can engage with us in ways that are as natural and intuitive as interactions with real humans, demonstrating appealing visual affective skills for more dynamic and empathetic information exchange.
+
+2Related Work
+Disentangled face representation learning.
+The representation of facial images through disentangled variables has been extensively studied by previous works. Some methods utilize sparse keypoints siarohin2019first; zakharov2020fast or 3D face models ren2021pirenderer; gao2023high; zhang2023metaportrait to explicitly characterize facial dynamics and other properties, but these can suffer from issues such as inaccurate reconstructions or limited expressive capabilities. There are also many works dedicated to learning disentangled representations within a latent space. A common approach involves separating faces into identity and non-identity components, then recombining them across different frames, either in a 2D burkov2020neural; zhou2021pose; liang2022expressive; yin2022styleheat; pang2023dpe; wang2023progressive or 3D context wang2021one; drobyshev2022megaportraits. The main challenge faced by these methods is the effective disentanglement of various factors while still achieving expressive representations of all static and dynamic facial attributes, which is addressed in this work.
+
+Audio-driven talking face generation.
+Talking face video generation from audio inputs has been a long-standing task in computer vision and graphics. Early works have focused on synthesizing only the lips, achieved by mapping audio signals directly to lip movements while leaving other facial attributes unchanged suwajanakorn2017synthesizing; chen2018lip; prajwal2020lip; yin2022styleheat; cheng2022videoretalking. More recent efforts have expanded the scope to include a broader array of facial expressions and head movements derived from audio inputs. For instance, the method of zhang2023sadtalker separates the generation targets into different categories, including lip-only 3DMM coefficients, eye blinks, and head poses. yu2023talking proposed to decompose lip and non-lip features on the top of the expression latent from zhou2021pose. Both zhang2023sadtalker and yu2023talking regress lip-related representations directly from audio features and model other attributes in a probabilistic manner. In contrast to these approaches, our method generates comprehensive facial dynamics and head poses from audio along with other control signals. This approach differs from the trend of further disentanglement, seeking instead to create more holistic and integrated outputs.
+
+Video generation.
+Recent advances in generative models brown2020language; ho2020denoising; song2020score; song2020denoising have led to significant progress in video generation. Earlier video generation approaches vondrick2016generating; tulyakov2018mocogan; skorokhodov2022stylegan employed the adversarial learning goodfellow2014generative framework, while more recent methods yan2021videogpt; blattmann2023align; girdhar2023emu; kondratyuk2023videopoet; bar2024lumiere; videoworldsimulators2024 have leveraged diffusion or auto-regressive models to capture diverse video distributions. Recently, several works concurrent to us tian2024emo; wei2024aniportrait have adapted video diffusion techniques to audio-driven talking face generation, achieving promising results despite the slow training and inference speeds. In contrast, our method can deliver both efficiency and high-quality results in the generation of talking face videos.
+
+3Method
+Task definition.
+As illustrated in Fig. 1, The input to our method consists of a single face image 
+𝐈
+ of an arbitrary identity and a speech audio clip 
+𝐚
+ from, again, an arbitrary person. The goal is to generate a synthesized video of the input face image speaking with the given audio in a realistic and coherent manner. A successfully generated video should exhibit high fidelity in several key aspects: the clarity and authenticity of the image frames, precise synchronization between the audio and lip movements, expressive and emotive facial dynamics, and naturalistic head poses.
+
+Our generation process can also accept a set of optional control signals to guide the generation, which include the main eye gaze direction 
+𝐠
+, head-to-camera distance 
+�
+, and emotion offset 
+𝐞
+. More details will be provided in the later sections.
+
+Overall framework.
+Instead of generating video frames directly, we generate holistic facial dynamics and head motion in the latent space conditioned on audio and other signals. Given these motion latent codes, our method then produces video frames by a face decoder, which also takes the appearance and identity features extracted using a face encoder from the input image as input.
+
+To achieve this, we start by constructing a face latent space and training the face encoder and decoder. An expressive and disentangled face latent learning framework is crafted and trained on real-life face videos. Then we train a simple yet powerful Diffusion Transformer to model the motion distribution and generate the motion latent codes in the test time given audio and other conditions.
+
+3.1Expressive and Disentangled Face Latent Space Construction
+Given a corpus of unlabeled talking face videos, we aim to build a latent space for human face with high degrees of disentanglement and expressiveness. The disentanglement enables effective generative modeling of the human head and holistic facial behaviors on massive videos, irrespective of the subject identities. It also enables disentangled factor control of the output which is desirable in many applications. Existing methods fall short of either expressiveness burkov2020neural; ren2021pirenderer; yu2023talking; wang2023progressive or disentanglement wang2021one; drobyshev2022megaportraits; zhang2023metaportrait or both. The expressiveness of facial appearance and dynamic movements, on the other hand, ensures that the decoder can output high quality videos with rich facial details and the latent generator is able to capture nuanced facial dynamics.
+
+To achieve this, we base our model on the 3D-aid face reenactment framework from wang2021one; drobyshev2022megaportraits. The 3D appearance feature volume can better characterize the appearance details in 3D compared to 2D feature maps. The explicit 3D feature warping is also powerful in modeling 3D head and facial movements. Specifically, we decompose a facial image into a canonical 3D appearance volume 
+𝐕
+�
+⁢
+�
+⁢
+�
+, an identity code 
+𝐳
+�
+⁢
+�
+, a 3D head pose 
+𝐳
+�
+⁢
+�
+⁢
+�
+⁢
+�
+, and a facial dynamics code 
+𝐳
+�
+⁢
+�
+⁢
+�
+. Each of them is extracted from a face image by an independent encoder, except that 
+𝐕
+�
+⁢
+�
+⁢
+�
+ is constructed by first extracting a posed 3D volume followed by rigid and non-rigid 3D warping to the canonical volume, as done in drobyshev2022megaportraits. A single decoder 
+𝒟
+ takes these latent variables as input and reconstructs the face image, where similar warping fields in the inverse direction are first applied to 
+𝐕
+�
+⁢
+�
+⁢
+�
+ to get the posed appearance volume. Readers are referred to drobyshev2022megaportraits for more details of this architecture.
+
+To learn the disentangled latent space, the core idea is to construct image reconstruction loss by swapping latent variables between different images in videos. Our basic loss functions are adapted from drobyshev2022megaportraits. However, we identified the poor disentanglement between facial dynamics and head pose using the original losses. The disentanglement between identity and motions is also imperfect. Therefore, we introduce several additional losses crucial to achieve our goal. For instance, inspired by pang2023dpe, we add a pairwise head pose and facial dynamics transfer loss to improve their disentanglement. Let 
+𝐈
+�
+ and 
+𝐈
+�
+ be two frames randomly sampled from the same video of a subject. We extract their latent variables using the encoders, and transfer 
+𝐈
+�
+’s head pose onto 
+𝐈
+�
+ as 
+𝐈
+^
+�
+,
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+⁢
+�
+=
+𝒟
+⁢
+(
+𝐕
+�
+�
+⁢
+�
+⁢
+�
+,
+𝐳
+�
+�
+⁢
+�
+,
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+⁢
+�
+,
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+)
+ and 
+𝐈
+�
+’s facial motion onto 
+𝐈
+�
+ as 
+𝐈
+^
+�
+,
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+=
+𝒟
+⁢
+(
+𝐕
+�
+�
+⁢
+�
+⁢
+�
+,
+𝐳
+�
+�
+⁢
+�
+,
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+⁢
+�
+,
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+)
+. The discrepancy loss between 
+𝐈
+^
+�
+,
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+⁢
+�
+ and 
+𝐈
+^
+�
+,
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+ is subsequently minimized. To reinforce the disentanglement between identity and motions, we add a face identity similarity loss for the cross-identity pose and facial motion transfer results. Let 
+𝐈
+�
+ and 
+𝐈
+�
+ be the video frames of two different subjects, we can transfer the motions of 
+𝐈
+�
+ onto 
+𝐈
+�
+ and obtain 
+𝐈
+^
+�
+,
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+⁢
+�
+,
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+=
+𝒟
+⁢
+(
+𝐕
+�
+�
+⁢
+�
+⁢
+�
+,
+𝐳
+�
+�
+⁢
+�
+,
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+⁢
+�
+,
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+)
+. Then, a cosine similarity loss between the deep face identity features deng2019arcface extracted from 
+𝐈
+�
+ and 
+𝐈
+^
+�
+,
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+⁢
+�
+,
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+ is applied.
+
+Refer to caption
+Figure 2:Our holistic facial dynamics and head pose generation framework with diffusion transformer.
+3.2Holistic Facial Dynamics Generation with Diffusion Transformer
+Given the constructed face latent space and trained encoders, we can extract the facial dynamics and head movements from real-life talking face videos and train a generative model. Crucially, we consider identity-agnostic holistic facial dynamics generation (HFDG), where our learned latent codes represent all facial movements such as lip motion, (non-lip) expression, and eye gaze and blinking. This is in contrast to existing methods that apply separate models for different factors with interleaved regression and generative formulations wang2021audio2head; zhou2021pose; yu2023talking; wang2023progressive; zhang2023sadtalker. Furthermore, previous methods often train on a limited number of identities zhang2023sadtalker; xing2023codetalker; fan2022faceformer and cannot model the wide range of motion patterns of different humans, especially given an expressive motion latent space.
+
+In this work, we utilize diffusion models for audio-conditioned HFDG and train on massive talking face videos from a large number of identities. In particular, we apply a transformer architecture vaswani2017attention; peebles2023scalable; sun2023diffposetalk for our sequence generation task. Figure 2 shows an overview of our HFDG framework.
+
+Formally, a motion sequence extracted from a video clip is defined as 
+𝐗
+=
+{
+[
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+⁢
+�
+,
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+]
+}
+,
+�
+=
+1
+,
+…
+,
+�
+. Given its accompanying audio clip 
+𝐚
+, we extract the synchronized audio features 
+𝐀
+=
+{
+𝐟
+�
+�
+⁢
+�
+⁢
+�
+⁢
+�
+⁢
+�
+}
+, for which we use a pretrained feature extractor Wav2Vec2 baevski2020wav2vec.
+
+Diffusion formulation.
+Diffusion models define two Markov chains ho2020denoising; song2020denoising; song2020score, the forward chain progressively adds Gaussian noise to the target data, while the reverse chain iteratively restores the raw signal from noise. Following the denoising score matching objective song2020score, we define the simplified loss function as
+
+𝔼
+�
+∼
+𝒰
+⁢
+[
+1
+,
+�
+]
+,
+𝐗
+0
+,
+𝐂
+∼
+�
+⁢
+(
+𝐗
+0
+,
+𝒞
+)
+⁢
+(
+‖
+𝐗
+0
+−
+ℋ
+⁢
+(
+𝐗
+�
+,
+�
+,
+𝐂
+)
+‖
+2
+)
+,
+(1)
+where 
+�
+ denotes the time step, 
+𝐗
+0
+=
+𝐗
+ is the raw motion latent sequence, and 
+𝐗
+�
+ is the noisy inputs generated by the diffusion forward process 
+�
+⁢
+(
+𝐗
+�
+|
+𝐗
+�
+−
+1
+)
+=
+𝒩
+⁢
+(
+𝐗
+�
+;
+1
+−
+�
+�
+⁢
+𝐗
+�
+−
+1
+,
+�
+�
+⁢
+I
+)
+. 
+ℋ
+ is our transformer network which predicts the raw signal itself instead of noise. 
+𝐂
+ is the condition signal, to be described next.
+
+Conditioning signals.
+The primary condition signal for our audio-driven motion generation task is the audio feature sequence 
+𝐀
+. We also incorporate several additional signals, which not only make the generative modeling more tractable but also increase the generation controllability.
+
+Specifically, we consider the main eye gaze direction 
+𝐠
+, head-to-camera distance 
+�
+, and emotion offset 
+𝐞
+. The main gaze direction, 
+𝐠
+=
+(
+�
+,
+�
+)
+, is defined by a vector in spherical coordinates. It specifies the focused direction of the generated talking face. We extract 
+𝐠
+ for the training video clips using zemblys2019gazenet on each frame followed by a simple histogram-based clustering algorithm. The head distance 
+�
+ is a normalized scalar controlling the distance between the face and the virtual camera, which affects the face scale in the generated face video. We obtain this scale label for the training videos using deng2019accurate. The emotion offset 
+𝐞
+ modulates the depicted emotion on the talking face. Note that emotion is often intrinsically linked to and can be largely inferred from audio; hence, 
+𝐞
+ serves only as a global offset added to enhance or moderately alter the emotion when required. It is not designed to achieve a total emotion shift during inference or produce emotions incongruent with the input audio. In practice, we use the averaged emotion coefficients extracted by savchenko2022hsemotion as our emotion signal.
+
+In order to achieve a seamless transition between adjacent windows, we incorporate the last 
+�
+ frames of the audio feature and generated motions from the previous window as the condition of the current one. To summarize, our input condition can be denoted as 
+𝐂
+=
+[
+𝐗
+�
+⁢
+�
+⁢
+�
+,
+𝐀
+�
+⁢
+�
+⁢
+�
+;
+𝐀
+,
+𝐠
+,
+�
+,
+𝐞
+]
+
+Classifier-free guidance (CFG) ho2022classifier.
+In the training stage, we randomly drop each of the input conditions. During inference, we apply
+
+𝐗
+^
+0
+=
+(
+1
++
+∑
+𝐜
+∈
+𝐂
+�
+𝐜
+)
+⋅
+ℋ
+⁢
+(
+𝐗
+�
+,
+�
+,
+𝐂
+)
+−
+∑
+𝐜
+∈
+𝐂
+�
+�
+⋅
+ℋ
+⁢
+(
+𝐗
+�
+,
+�
+,
+𝐂
+|
+𝐜
+=
+∅
+)
+(2)
+where 
+�
+𝐜
+ is the CFG scale for condition 
+𝐜
+. 
+𝐂
+|
+𝐜
+=
+∅
+ denotes that the condition 
+𝐜
+ is replaced with 
+∅
+.
+
+During training, we use a drop probability of 
+0.1
+ for each condition except for 
+𝐗
+�
+⁢
+�
+⁢
+�
+ and 
+𝐀
+�
+⁢
+�
+⁢
+�
+ for which we use 
+0.5
+. This is to ensure the model can well handle the first window with no preceding audio and motions (i.e., set to 
+∅
+). We also randomly drop the last few frames of 
+𝐀
+ to ensure robust motion generation for audio sequences shorter than the window length.
+
+3.3Talking Face Video Generation
+At inference time, given an arbitrary face image and an audio clip, we first extract the 3D appearance volume 
+𝐕
+�
+⁢
+�
+⁢
+�
+ and identity code 
+𝐳
+�
+⁢
+�
+ using our trained face encoders. Then, we extract the audio features, split them into segments of length 
+�
+, and generate the head and facial motion sequences 
+{
+𝐗
+=
+{
+[
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+⁢
+�
+,
+𝐳
+�
+�
+⁢
+�
+⁢
+�
+]
+}
+}
+ one by one in a sliding-window manner using our trained diffusion transformer 
+ℋ
+. The final video can be generated subsequently using our trained decoder.
+
+4Experiments
+Implementation details.
+For face latent space learning, we use the public VoxCeleb2 dataset from chung2018voxceleb2 which contains talking face videos from about 6K subjects. We reprocess the dataset and discard the clips with multiple individuals and those of low quality using the method of su2020blindly. For motion latent generation, we use an 8-layer transformer encoder with an embedding dim 
+512
+ and head number 
+8
+ as our diffusion network. The model is trained on VoxCeleb2 chung2018voxceleb2 and another high-resolution talk video dataset collected by us, which contains about 3.5K subjects. In our default setup, the model uses a forward-facing main gaze condition, an average head distance of all training videos, and an empty emotion offset condition. The CFG parameters are set to 
+�
+𝐀
+=
+0.5
+ and 
+�
+𝐠
+=
+1.0
+, and 
+50
+ sampling steps are used.
+
+Evaluation benchmarks.
+We evaluate our method using two datasets. The first is a subset of VoxCeleb2 chung2018voxceleb2. We randomly selected 46 subjects from the test split of VoxCeleb2 and randomly sampled 10 video clips for each subject, resulting in a total of 460 clips. These video clips are about 5
+∼
+15 seconds long (80% are less than 10 seconds), with most of the content being interviews and news reports. To further evaluate our method under long speech generation with a wider range of vocal variations, we further collected 32 one-minute clips of 17 individuals. These videos are predominantly sourced from online coaching sessions and educational lectures and the talking styles are considerably more diverse than VoxCeleb2. We refer to this dataset as OneMin-32.
+
+Refer to caption
+Figure 3:Generated talking faces under different control signals. Top row: results under different main gaze direction condition (forward-facing, leftwards, rightwards, and upwards, respectively). Middle row: results under different head distances (from far to near). Bottom row: results under different emotion offset (neutral, happy, angry and surprised, respectively).
+Refer to caption
+Figure 4:Disentanglement between identity and motion. In these examples, the same generated head and facial motion sequences are applied onto three different face images.
+Refer to caption
+Figure 5:Disentanglement between head pose and facial dynamics. From top to bottom: the raw generated sequence, applying generated poses with fixed initial facial dynamics, and applying generated facial dynamics with fixed initial head pose and pre-defined spinning poses, respectively.
+4.1Qualitative Evaluation
+Visual results.
+Figure 1 presents some representative audio-driven talking face generation results of our method. Visually inspected, our method can generate high-quality video frames with vivid facial emotions. Moreover, it can generate human-like conversational behaviors, including sporadic shifts in eye gaze during speech and contemplation, as well as the natural and variable rhythm of eye blinking, among other nuances. We highly recommend that readers view our video results online to fully perceive the capabilities and output quality of our method.
+
+Generation controllability.
+Figure 3 shows our generated results under different control signals including main eye gaze, head distance, and emotion offset. It is evident that our generation model can well interpret these signals and produce talking face results that closely adhere to these specified parameters.
+
+Disentanglement of face latents.
+Figure 4 shows that when applying the same motion latent sequences onto different subjects, our method effectively maintains both the distinct facial movements and the unique facial identities. This indicates the efficacy of our method in disentangling identity and motion. Figure 5 further illustrates the effective disentanglement between head pose and facial dynamics. By holding one aspect constant and changing the other, the resulting images faithfully reflect the intended head and facial motions without interference.
+
+Out-of-distribution generation.
+Our method exhibits the capability to handle photo and audio inputs that fall outside the training distribution. For instance, as shown in Figure 6, it can handle artistic photos, singing audio clips (top two rows), and non-English speech (the last row). Notably, these data variants were not present in the training dataset.
+
+Refer to caption
+Figure 6:Generation results with out-of-distribution images (non-photorealistic) and audios (singing audios for the first two rows and non-English speech for the last row). Our method can still generate high quality videos well-aligned with the audios, although it was not trained on such data variations.
+4.2Quantitative Evaluation
+Evaluation metrics.
+We use the following metrics for quantitative evaluation of our generated lip movement, head pose and overall video quality, including a new data-driven audio-pose synchronization metric trained in a way similar to CLIP radford2021learning:
+
+• Audio-lip synchronization. We use a pretrained audio-lip synchronization network, i.e., SyncNet chung2017out, to assess the alignment of the input audio with the generated lip movements in videos. Specifically, we compute the confidence score and feature distance as 
+�
+�
+ and 
+�
+�
+ respectively. Higher 
+�
+�
+ and lower 
+�
+�
+ indicate better audio-lip synchronization quality in general.
+• Audio-pose alignment. Measuring the alignment between the generated head poses and input audio is not trivial and there are no well-established metrics. A few recent studies zhang2023sadtalker; sun2023diffposetalk employed the Beat Align Score siyao2022bailando to evaluate audio-pose alignment. However, this metric is not optimal because the concept of a “beat” in the context of natural speech and human head motion is ambiguous. In this work, we introduce a new data-driven metric called Contrastive Audio and Pose Pretraining (CAPP) score. Inspired by CLIP radford2021learning, we jointly train a pose sequence encoder and an audio sequence encoder and predict whether the input pose sequence and audio are paired. The audio encoder is initialized from a pretrained Wav2Vec2 network baevski2020wav2vec and the pose encoder is a randomly initialized 6-layer transformer network. The input window size is 3 seconds. Our CAPP model is trained on 2K hours of real-life audio and pose sequences, and demonstrates a robust capability to assess the degree of synchronization between audio inputs and generate poses (see Sec. 4.3).
+• Pose variation intensity. We further define a pose variation intensity score 
+Δ
+⁢
+�
+ which is the average of the pose angle differences between adjacent frames. Averaged over all the frames of all generated videos, 
+Δ
+⁢
+�
+ provides an indication of the overall head motion intensity generated by a method.
+• Video quality. Following previous video generation works yan2021videogpt; skorokhodov2022stylegan, we use the Fréchet Video Distance (FVD) unterthiner2019fvd to evaluate the generated video quality. We compute the FVD metric using sequences of 25 consecutive frames.
+Compared methods.
+We compare our method with there existing audio-driven talking face generation methods: MakeItTalk zhou2020makelttalk, Audio2Head wang2021audio2head; zhang2023sadtalker, and SadTalker zhang2023sadtalker. MakeItTalk zhou2020makelttalk employs an LSTM to convert audio into dynamic facial landmarks, then use the landmarks to animate a source image into a video sequence through either image warping or neural network based image translation. Audio2Head wang2021audio2head uses a motion-aware recurrent network to translate audio into head poses, which, along with the original audio, are used to generate dense motion fields. The motion fields are further applied to the image features and the final output is then generated by a neural network. SadTalker zhang2023sadtalker employs a VAE network to generate pose offsets from audio and a regression network to predict lip-only coefficients from audio features. A random variable is used for eye blink generation. This method can generate varied poses and eye blinks from identical audio inputs but only regress a deterministic pattern for other motions such as eyebrow, gaze and facial expressions.
+
+Main results.
+For each audio input, we generate a single video for deterministic approaches, i.e., MakeItTalk and Audio2Head. For SadTalker zhang2023sadtalker and our method, we sample three videos for each audio and average the computed metrics. Since different pose representations are used by these methods, we re-extract the head poses from the generated frames to compute the pose-related metrics (i.e., CAPP and 
+Δ
+⁢
+�
+). For the FVD metric, we use 2K 25-frame video clips of both the real videos and generated ones. For reference purpose, we also report the evaluated metrics of real videos.
+
+Table 1 and Table 2 present the results on the VoxCeleb2 and OneMin-32 benchmarks. Note that we did not evaluate the FVD on VoxCeleb2 as its video quality is varied and often low. On both benchmarks, our method achieves the best results among all methods on all evaluated metrics. In terms of audio-lip synchronization scores (
+�
+�
+ and 
+�
+�
+), our method outperforms all others by a wide margin. Note that our method yields better scores than real videos, which is due to effect of the audio CFG (see Sec. 4.3). Our generated poses are better aligned with the audios especially on the OneMin-32 benchmark, as reflected by the CAPP scores. The head movements also exhibit the highest intensity according to 
+Δ
+⁢
+�
+, although there’s still a gap to the intensity of real videos. Our FVD score is significantly lower than others, demonstrating the much higher video quality and realism of our results.
+
+Table 1:Comparison with previous methods on the VoxCeleb2 benchmark.
+�
+�
+ 
+↑
+�
+�
+ 
+↓
+CAPP
+↑
+Δ
+P
+MakeItTalk zhou2020makelttalk	4.176	15.513	-0.051	0.210
+Audio2Head wang2021audio2head	6.172	8.470	0.246	0.260
+SadTalker zhang2023sadtalker	5.843	8.813	0.441	0.275
+Ours	
+8.841
+6.312
+0.468
+0.304
+Real video	7.640	7.189	0.588	0.505
+Table 2:Comparison with previous methods on the OneMin-32 benchmark.
+�
+�
+ 
+↑
+�
+�
+ 
+↓
+CAPP
+↑
+Δ
+P	
+FVD
+25
+↓
+MakeItTalk zhou2020makelttalk	-0.123	14.340	0.002	0.190	304.833
+Audio2Head wang2021audio2head	5.992	8.211	0.205	0.239	209.772
+SadTalker zhang2023sadtalker	5.501	8.850	0.383	0.252	214.507
+Ours	
+7.957
+6.635
+0.465
+0.316
+105.884
+Real video	7.192	7.254	0.559	0.405	29.245
+4.3Analysis and Ablation Study
+CAPP metric.
+We analyze the effectiveness of our proposed CAPP metric in measuring the alignment between audio and head pose.
+
+Table 3:CAPP under frame shifting
+0	
+±
+1	
+±
+2	
+±
+3	
+±
+4
+​0.608	​0.462	​0.206	​0.069	​0.082
+First, we study its sensitivity to temporal shifting by manually introducing frame offsets to ground-truth audio-pose pairs. We extract 3-second clip segments from the VoxCeleb2 test split, yielding approximately 2.1K audio-pose pairs. The average CAPP score for these pairs is 
+0.608
+, as shown in Table 3. Manual frame shifts lead to a rapid decline in CAPP scores, approaching zero for shifts larger than two frames. This indicates a robust correlation between CAPP scores and audio-head pose alignment.
+
+Table 4:CAPP under pose variation scaling
+×
+0.2	
+×
+0.5	
+×
+1.0	
+×
+1.5	
+×
+3.0
+​0.368	​0.584	​0.608	​0.587	​0.505
+We further investigate the effect of head movement intensity on CAPP by manually scaling the pose differences between consecutive frames using various factors. Table 4 shows that altering movement intensity negatively impacts the CAPP scores, demonstrating CAPP can assess the alignment of audio and pose in terms of their intensity. However, this sensitivity to intensity appears less pronounced than that to temporal misalignment.
+
+CFG scales.
+The CFG strategy ho2022classifier for diffusion models can attain a trade-off between sample quality and diversity. Here we evaluate the choice of the CFG scales for the audio and main gaze conditions (i.e., 
+�
+𝐀
+ and 
+�
+𝐠
+ in Eq. 2) in our model.
+
+As shown in Table 5, as we increase the value of 
+�
+𝐠
+, the accuracy of gaze control improves. Increasing the audio CFG scale to 
+�
+𝐀
+=
+0.5
+ significantly enhances the performance of lip-audio alignment (
+�
+�
+ and 
+�
+�
+), pose-audio alignment (CAPP), and pose variation intensity (
+Δ
+⁢
+�
+). With positive audio CFG, the lip-audio alignment scores even surpass those evaluated on real videos (the results without audio CFG, i.e., 
+�
+𝐀
+=
+0
+, were slightly worse than or comparable to them). Moreover, the FVD score shows a slight drop which indicates slightly better video quality.
+
+Table 5:Ablation study of the audio and main gaze CFG scales as well as the sampling steps. 
+ℰ
+�
+ denotes the average angular error of main gaze directions and 
+ℰ
+�
+ is the average head distance error.
+�
+�
+ 
+↑
+�
+�
+ 
+↓
+CAPP
+↑
+Δ
+P	
+FVD
+25
+↓
+ℰ
+�
+�
+↓
+ℰ
+�
+↓
+�
+𝐀
+=
+0.0
+,
+�
+𝐠
+=
+0.0
+7.087	7.391	0.414	0.291	117.425	5.730	0.004
+�
+𝐀
+=
+0.0
+,
+�
+𝐠
+=
+1.0
+7.134	7.345	0.421	0.290	116.547	5.329	0.004
+�
+𝐀
+=
+0.0
+,
+�
+𝐠
+=
+2.0
+7.108	7.386	0.414	0.298	117.784	5.064	0.005
+�
+𝔸
+=
+0.5
+,
+�
+𝐠
+=
+1.0
+7.957	6.635	0.465	0.316	105.884	5.253	0.005
+�
+𝐀
+=
+1.0
+,
+�
+𝐠
+=
+1.0
+8.218	6.437	0.474	0.342	104.886	5.333	0.005
+�
+𝐀
+=
+2.0
+,
+�
+𝐠
+=
+1.0
+8.295	6.397	0.455	0.395	104.293	5.531	0.005
+�
+𝐀
+=
+0.5
+,
+�
+𝐠
+=
+1.0
+ (steps
+=
+10
+)	8.293	6.363	0.523	0.243	117.060	5.469	0.006
+Real video	7.192	7.254	0.559	0.405	29.244	–	–
+Further increasing 
+�
+𝐀
+ marginally improves lip-audio synchronization and reduces 
+FVD
+25
+, but at the cost of slightly degrading audio-pose synchronization and gaze controllability. In addition, observations from the generated videos indicate that a higher 
+�
+𝐀
+ significantly amplifies mouth movements for strong vocals and causes head pose jitter during rapid speech. For balanced performance and overall generation quality, we set 
+�
+𝐀
+=
+0.5
+ and 
+�
+𝐠
+=
+1.0
+ as our standard configuration.
+
+We also evaluated the influence of sampling steps on performance. Table 5 illustrates that decreasing the steps from 
+50
+ to 
+10
+ improves audio-lip and audio-pose alignment while compromising pose variation intensity and overall video quality. This step reduction could accelerate the inference process by a factor of 5 for this latent motion generation module.
+
+5Conclusion
+In summary, our work presents VASA-1, an audio-driven talking face generation model that stands out for its efficient generation of realistic lip synchronization, vivid facial expressions, and naturalistic head movements from a single image and audio input. It significantly outperforms existing methods in delivering video quality and performance efficiency, demonstrating promising visual affective skills in the generated face videos. The technical cornerstone is an innovative holistic facial dynamics and head movement generation model that works in an expressive and disentangled face latent space.
+
+The advancements made by VASA-1 have the potential to reshape human-human and human-AI interactions across various domains, including communication, education, and healthcare. The integration of controllable conditioning signals further enhances the model’s adaptability for personalized user experiences.
+
+Limitations and future work.
+There are still several limitations with our method. Currently, it processes human regions only up to the torso. Extending to the full upper body could offer additional capabilities. While utilizing 3D latent representations, the absence of a more explicit 3D face model such as wu2022anifacegan; wu2023aniportraitgan may result in artifacts like texture sticking due to the neural rendering. Additionally, our approach does not account for non-rigid elements like hair and clothing, which could be addressed with a stronger video prior. In the future, we also plan to incorporate more diverse talking styles and emotions to improve expressiveness and control.
+
+6Social Impact and Responsible AI Considerations
+Our research focuses on generating audio-driven visual affective skills for virtual AI avatars, aiming for positive applications. It is not intended to create content that is used to mislead or deceive. However, like other related content generation techniques, it could still potentially be misused for impersonating humans. We are opposed to any behavior to create misleading or harmful contents of real persons, and are interested in applying our technique for advancing forgery detection. Currently, the videos generated by this method still contain identifiable artifacts, and the numerical study shows that there’s still a gap to achieve the authenticity of real videos.
+
+While acknowledging the possibility of misuse, it’s imperative to recognize the substantial positive potential of our technique. The benefits – ranging from enhancing educational equity, improving accessibility for individuals with communication challenges, and offering companionship or therapeutic support to those in need – underscore the importance of our research and other related explorations. We are dedicated to developing AI responsibly, with the goal of advancing human well-being.
+
+Contribution statement
+Sicheng Xu, Guojun Chen, Yu-Xiao Guo were the core contributors to the implementation, training, and experimentation of various algorithm modules, as well as the data processing and management. Jiaolong Yang initiated the project idea, led the project, designed the overall framework, and provided detailed technical advice to each component. Chong Li, Zhengyu Zang and Yizhong Zhang contributed to enhancing the system quality, conducting evaluations, and demonstrating results. Xin Tong provided technical advice throughout the project and helped with project coordination. Baining Guo offered strategic research direction guidance, scientific advising, and other project supports. Paper written by Jiaolong Yang and Sicheng Xu.
+
+Acknowledgments
+We would like to thank our colleagues Zheng Zhang, Zhirong Wu, Shujie Liu, Dong Chen, Xu Tan and others for the valuable discussions and insightful suggestions for our project.
+
+References
+(1)
+https://www.prnewswire.com/news-releases/deepbrain-ai-delivers-ai-avatar-to-empower-people-with-disabilities-302026965.html, 2024.[Online; accessed 8-Apr-2024].
+(2)
+Alexei Baevski, Yuhao Zhou, Abdelrahman Mohamed, and Michael Auli.wav2vec 2.0: A framework for self-supervised learning of speech representations.Advances in Neural Information Processing Systems, 33:12449–12460, 2020.
+(3)
+Omer Bar-Tal, Hila Chefer, Omer Tov, Charles Herrmann, Roni Paiss, Shiran Zada, Ariel Ephrat, Junhwa Hur, Yuanzhen Li, Tomer Michaeli, et al.Lumiere: A space-time diffusion model for video generation.arXiv preprint arXiv:2401.12945, 2024.
+(4)
+James Betker, Gabriel Goh, Li Jing, Tim Brooks, Jianfeng Wang, Linjie Li, Long Ouyang, Juntang Zhuang, Joyce Lee, Yufei Guo, et al.Improving image generation with better captions.https://cdn. openai. com/papers/dall-e-3.pdf, 2(3):8, 2023.
+(5)
+Andreas Blattmann, Tim Dockhorn, Sumith Kulal, Daniel Mendelevitch, Maciej Kilian, Dominik Lorenz, Yam Levi, Zion English, Vikram Voleti, Adam Letts, et al.Stable video diffusion: Scaling latent video diffusion models to large datasets.arXiv preprint arXiv:2311.15127, 2023.
+(6)
+Andreas Blattmann, Robin Rombach, Huan Ling, Tim Dockhorn, Seung Wook Kim, Sanja Fidler, and Karsten Kreis.Align your latents: High-resolution video synthesis with latent diffusion models.In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 22563–22575, 2023.
+(7)
+Aras Bozkurt, Xiao Junhong, Sarah Lambert, Angelica Pazurek, Helen Crompton, Suzan Koseoglu, Robert Farrow, Melissa Bond, Chrissi Nerantzi, Sarah Honeychurch, et al.Speculative futures on chatgpt and generative artificial intelligence (ai): A collective reflection from the educational landscape.Asian Journal of Distance Education, 18(1):53–130, 2023.
+(8)
+Tim Brooks, Bill Peebles, Connor Holmes, Will DePue, Yufei Guo, Li Jing, David Schnurr, Joe Taylor, Troy Luhman, Eric Luhman, Clarence Ng, Ricky Wang, and Aditya Ramesh.Video generation models as world simulators.2024.
+(9)
+Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, et al.Language models are few-shot learners.Advances in Neural Information Processing Systems, 33:1877–1901, 2020.
+(10)
+Egor Burkov, Igor Pasechnik, Artur Grigorev, and Victor Lempitsky.Neural head reenactment with latent pose descriptors.In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 13786–13795, 2020.
+(11)
+Lele Chen, Zhiheng Li, Ross K Maddox, Zhiyao Duan, and Chenliang Xu.Lip movements generation at a glance.In European Conference on Computer Vision, pages 520–535, 2018.
+(12)
+Kun Cheng, Xiaodong Cun, Yong Zhang, Menghan Xia, Fei Yin, Mingrui Zhu, Xuan Wang, Jue Wang, and Nannan Wang.Videoretalking: Audio-based lip synchronization for talking head video editing in the wild.In SIGGRAPH Asia 2022, pages 1–9, 2022.
+(13)
+Joon Son Chung, Arsha Nagrani, and Andrew Zisserman.Voxceleb2: Deep speaker recognition.arXiv preprint arXiv:1806.05622, 2018.
+(14)
+Joon Son Chung and Andrew Zisserman.Out of time: automated lip sync in the wild.In Asian Conference on Computer Vision Workshops, pages 251–263. Springer, 2017.
+(15)
+Jiankang Deng, Jia Guo, Niannan Xue, and Stefanos Zafeiriou.Arcface: Additive angular margin loss for deep face recognition.In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 4690–4699, 2019.
+(16)
+Yu Deng, Jiaolong Yang, Sicheng Xu, Dong Chen, Yunde Jia, and Xin Tong.Accurate 3d face reconstruction with weakly-supervised learning: From single image to image set.In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops, pages 0–0, 2019.
+(17)
+Nikita Drobyshev, Jenya Chelishev, Taras Khakhulin, Aleksei Ivakhnenko, Victor Lempitsky, and Egor Zakharov.Megaportraits: One-shot megapixel neural head avatars.In Proceedings of the 30th ACM International Conference on Multimedia, pages 2663–2671, 2022.
+(18)
+Chenpeng Du, Qi Chen, Tianyu He, Xu Tan, Xie Chen, Kai Yu, Sheng Zhao, and Jiang Bian.Dae-talker: High fidelity speech-driven talking face generation with diffusion autoencoder.In Proceedings of the ACM International Conference on Multimedia, pages 4281–4289, 2023.
+(19)
+Yingruo Fan, Zhaojiang Lin, Jun Saito, Wenping Wang, and Taku Komura.Faceformer: Speech-driven 3d facial animation with transformers.In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 18770–18780, 2022.
+(20)
+Yue Gao, Yuan Zhou, Jinglu Wang, Xiao Li, Xiang Ming, and Yan Lu.High-fidelity and freely controllable talking head video generation.In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5609–5619, 2023.
+(21)
+Rohit Girdhar, Mannat Singh, Andrew Brown, Quentin Duval, Samaneh Azadi, Sai Saketh Rambhatla, Akbar Shah, Xi Yin, Devi Parikh, and Ishan Misra.Emu video: Factorizing text-to-video generation by explicit image conditioning.arXiv preprint arXiv:2311.10709, 2023.
+(22)
+Ian Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing Xu, David Warde-Farley, Sherjil Ozair, Aaron Courville, and Yoshua Bengio.Generative adversarial nets.Advances in Neural Information Processing Systems, 27, 2014.
+(23)
+Yudong Guo, Keyu Chen, Sen Liang, Yong-Jin Liu, Hujun Bao, and Juyong Zhang.Ad-nerf: Audio driven neural radiance fields for talking head synthesis.In IEEE/CVF International Conference on Computer Vision, pages 5784–5794, 2021.
+(24)
+Tianyu He, Junliang Guo, Runyi Yu, Yuchi Wang, Jialiang Zhu, Kaikai An, Leyi Li, Xu Tan, Chunyu Wang, Han Hu, et al.Gaia: Zero-shot talking avatar generation.In International Conference on Learning Representations, 2024.
+(25)
+Jonathan Ho, Ajay Jain, and Pieter Abbeel.Denoising diffusion probabilistic models.Advances in neural information processing systems, 33:6840–6851, 2020.
+(26)
+Jonathan Ho and Tim Salimans.Classifier-free diffusion guidance.arXiv preprint arXiv:2207.12598, 2022.
+(27)
+Esperanza Johnson, Ramón Hervás, Carlos Gutiérrez López de la Franca, Tania Mondéjar, Sergio F Ochoa, and Jesús Favela.Assessing empathy and managing emotions through interactions with an affective avatar.Health informatics journal, 24(2):182–193, 2018.
+(28)
+Tero Karras, Samuli Laine, Miika Aittala, Janne Hellsten, Jaakko Lehtinen, and Timo Aila.Analyzing and improving the image quality of stylegan.In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8110–8119, 2020.
+(29)
+Greg Kessler.Technology and the future of language teaching.Foreign Language Annals, 51(1):205–218, 2018.
+(30)
+Dan Kondratyuk, Lijun Yu, Xiuye Gu, José Lezama, Jonathan Huang, Rachel Hornung, Hartwig Adam, Hassan Akbari, Yair Alon, Vighnesh Birodkar, et al.Videopoet: A large language model for zero-shot video generation.arXiv preprint arXiv:2312.14125, 2023.
+(31)
+Julian Leff, Geoffrey Williams, Mark Huckvale, Maurice Arbuthnot, and Alex P Leff.Avatar therapy for persecutory auditory hallucinations: What is it and how does it work?Psychosis, 6(2):166–176, 2014.
+(32)
+Borong Liang, Yan Pan, Zhizhi Guo, Hang Zhou, Zhibin Hong, Xiaoguang Han, Junyu Han, Jingtuo Liu, Errui Ding, and Jingdong Wang.Expressive talking head generation with granular audio-visual control.In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 3387–3396, 2022.
+(33)
+Shugao Ma, Tomas Simon, Jason Saragih, Dawei Wang, Yuecheng Li, Fernando De La Torre, and Yaser Sheikh.Pixel codec avatars.In IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 64–73, 2021.
+(34)
+Yifeng Ma, Suzhen Wang, Zhipeng Hu, Changjie Fan, Tangjie Lv, Yu Ding, Zhidong Deng, and Xin Yu.Styletalk: One-shot talking head generation with controllable speaking styles.In AAAI Conference on Artificial Intelligence, pages arXiv–2301, 2023.
+(35)
+Youxin Pang, Yong Zhang, Weize Quan, Yanbo Fan, Xiaodong Cun, Ying Shan, and Dong-ming Yan.Dpe: Disentanglement of pose and expression for general video portrait editing.In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 427–436, 2023.
+(36)
+William Peebles and Saining Xie.Scalable diffusion models with transformers.In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 4195–4205, 2023.
+(37)
+KR Prajwal, Rudrabha Mukhopadhyay, Vinay P Namboodiri, and CV Jawahar.A lip sync expert is all you need for speech to lip generation in the wild.In ACM International Conference on Multimedia, pages 484–492, 2020.
+(38)
+Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark, et al.Learning transferable visual models from natural language supervision.In International Conference on Machine Learning, pages 8748–8763. PMLR, 2021.
+(39)
+Imogen C Rehm, Emily Foenander, Klaire Wallace, Jo-Anne M Abbott, Michael Kyrios, and Neil Thomas.What role can avatars play in e-mental health interventions? exploring new models of client–therapist interaction.Frontiers in Psychiatry, 7:186, 2016.
+(40)
+Yurui Ren, Ge Li, Yuanqi Chen, Thomas H Li, and Shan Liu.PIRenderer: Controllable portrait image generation via semantic neural rendering.In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 13759–13768, 2021.
+(41)
+Andrey V Savchenko.Hsemotion: High-speed emotion recognition library.Software Impacts, 14:100433, 2022.
+(42)
+Aliaksandr Siarohin, Stéphane Lathuilière, Sergey Tulyakov, Elisa Ricci, and Nicu Sebe.First order motion model for image animation.In Advances in Neural Information Processing Systems, 2019.
+(43)
+Li Siyao, Weijiang Yu, Tianpei Gu, Chunze Lin, Quan Wang, Chen Qian, Chen Change Loy, and Ziwei Liu.Bailando: 3d dance generation by actor-critic gpt with choreographic memory.In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 11050–11059, 2022.
+(44)
+Ivan Skorokhodov, Sergey Tulyakov, and Mohamed Elhoseiny.Stylegan-v: A continuous video generator with the price, image quality and perks of stylegan2.In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 3626–3636, 2022.
+(45)
+Jiaming Song, Chenlin Meng, and Stefano Ermon.Denoising diffusion implicit models.arXiv preprint arXiv:2010.02502, 2020.
+(46)
+Yang Song, Jascha Sohl-Dickstein, Diederik P Kingma, Abhishek Kumar, Stefano Ermon, and Ben Poole.Score-based generative modeling through stochastic differential equations.arXiv preprint arXiv:2011.13456, 2020.
+(47)
+Michał Stypułkowski, Konstantinos Vougioukas, Sen He, Maciej Zięba, Stavros Petridis, and Maja Pantic.Diffused heads: Diffusion models beat gans on talking-face generation.In Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision, pages 5091–5100, 2024.
+(48)
+Shaolin Su, Qingsen Yan, Yu Zhu, Cheng Zhang, Xin Ge, Jinqiu Sun, and Yanning Zhang.Blindly assess image quality in the wild guided by a self-adaptive hyper network.In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 3667–3676, 2020.
+(49)
+Yasheng Sun, Hang Zhou, Ziwei Liu, and Hideki Koike.Speech2talking-face: Inferring and driving a face with synchronized audio-visual representation.In International Joint Conference on Artificial Intelligence, volume 2, page 4, 2021.
+(50)
+Zhiyao Sun, Tian Lv, Sheng Ye, Matthieu Gaetan Lin, Jenny Sheng, Yu-Hui Wen, Minjing Yu, and Yong-jin Liu.Diffposetalk: Speech-driven stylistic 3d facial animation and head pose generation via diffusion models.arXiv preprint arXiv:2310.00434, 2023.
+(51)
+Supasorn Suwajanakorn, Steven M Seitz, and Ira Kemelmacher-Shlizerman.Synthesizing obama: learning lip sync from audio.ACM Transactions on Graphics, 36(4):1–13, 2017.
+(52)
+Linrui Tian, Qi Wang, Bang Zhang, and Liefeng Bo.Emo: Emote portrait alive-generating expressive portrait videos with audio2video diffusion model under weak conditions.arXiv preprint arXiv:2402.17485, 2024.
+(53)
+Sergey Tulyakov, Ming-Yu Liu, Xiaodong Yang, and Jan Kautz.Mocogan: Decomposing motion and content for video generation.In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pages 1526–1535, 2018.
+(54)
+Thomas Unterthiner, Sjoerd van Steenkiste, Karol Kurach, Raphaël Marinier, Marcin Michalski, and Sylvain Gelly.Fvd: A new metric for video generation.2019.
+(55)
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin.Attention is all you need.Advances in Neural Information Processing Systems, 30, 2017.
+(56)
+Carl Vondrick, Hamed Pirsiavash, and Antonio Torralba.Generating videos with scene dynamics.Advances in Neural Information Processing Systems, 29, 2016.
+(57)
+Duomin Wang, Yu Deng, Zixin Yin, Heung-Yeung Shum, and Baoyuan Wang.Progressive disentangled representation learning for fine-grained controllable talking head synthesis.In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 17979–17989, 2023.
+(58)
+Jiayu Wang, Kang Zhao, Shiwei Zhang, Yingya Zhang, Yujun Shen, Deli Zhao, and Jingren Zhou.Lipformer: High-fidelity and generalizable talking face generation with a pre-learned facial codebook.In IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 13844–13853, 2023.
+(59)
+Suzhen Wang, Lincheng Li, Yu Ding, Changjie Fan, and Xin Yu.Audio2head: Audio-driven one-shot talking-head generation with natural head motion.In International Joint Conference on Artificial Intelligence, 2021.
+(60)
+Suzhen Wang, Lincheng Li, Yu Ding, and Xin Yu.One-shot talking face generation from single-speaker audio-visual correlation learning.In AAAI Conference on Artificial Intelligence, volume 36, pages 2531–2539, 2022.
+(61)
+Ting-Chun Wang, Arun Mallya, and Ming-Yu Liu.One-shot free-view neural talking-head synthesis for video conferencing.In IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 10039–10049, 2021.
+(62)
+Huawei Wei, Zejun Yang, and Zhisheng Wang.Aniportrait: Audio-driven synthesis of photorealistic portrait animation.arXiv preprint arXiv:2403.17694, 2024.
+(63)
+Yue Wu, Yu Deng, Jiaolong Yang, Fangyun Wei, Qifeng Chen, and Xin Tong.Anifacegan: Animatable 3d-aware face image generation for video avatars.Advances in Neural Information Processing Systems, 35:36188–36201, 2022.
+(64)
+Yue Wu, Sicheng Xu, Jianfeng Xiang, Fangyun Wei, Qifeng Chen, Jiaolong Yang, and Xin Tong.Aniportraitgan: Animatable 3d portrait generation from 2d image collections.In SIGGRAPH Asia 2023, pages 1–9, 2023.
+(65)
+Jinbo Xing, Menghan Xia, Yuechen Zhang, Xiaodong Cun, Jue Wang, and Tien-Tsin Wong.Codetalker: Speech-driven 3d facial animation with discrete motion prior.In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 12780–12790, 2023.
+(66)
+Wilson Yan, Yunzhi Zhang, Pieter Abbeel, and Aravind Srinivas.Videogpt: Video generation using vq-vae and transformers.arXiv preprint arXiv:2104.10157, 2021.
+(67)
+Fei Yin, Yong Zhang, Xiaodong Cun, Mingdeng Cao, Yanbo Fan, Xuan Wang, Qingyan Bai, Baoyuan Wu, Jue Wang, and Yujiu Yang.Styleheat: One-shot high-resolution editable talking face generation via pre-trained stylegan.In European Conference on Computer Vision, pages 85–101, 2022.
+(68)
+Zhentao Yu, Zixin Yin, Deyu Zhou, Duomin Wang, Finn Wong, and Baoyuan Wang.Talking head generation with probabilistic audio-to-visual diffusion priors.In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 7645–7655, 2023.
+(69)
+Egor Zakharov, Aleksei Ivakhnenko, Aliaksandra Shysheya, and Victor Lempitsky.Fast bi-layer neural synthesis of one-shot realistic head avatars.In European Conference on Computer Vision, pages 524–540, 2020.
+(70)
+Raimondas Zemblys, Diederick C Niehorster, and Kenneth Holmqvist.gazenet: End-to-end eye-movement event detection with deep neural networks.Behavior research methods, 51:840–864, 2019.
+(71)
+Bowen Zhang, Chenyang Qi, Pan Zhang, Bo Zhang, HsiangTao Wu, Dong Chen, Qifeng Chen, Yong Wang, and Fang Wen.Metaportrait: Identity-preserving talking head generation with fast personalized adaptation.In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 22096–22105, 2023.
+(72)
+Wenxuan Zhang, Xiaodong Cun, Xuan Wang, Yong Zhang, Xi Shen, Yu Guo, Ying Shan, and Fei Wang.Sadtalker: Learning realistic 3d motion coefficients for stylized audio-driven single image talking face animation.In IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8652–8661, 2023.
+(73)
+Zhimeng Zhang, Lincheng Li, Yu Ding, and Changjie Fan.Flow-guided one-shot talking face generation with a high-resolution audio-visual dataset.In IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 3661–3670, 2021.
+(74)
+Hang Zhou, Yasheng Sun, Wayne Wu, Chen Change Loy, Xiaogang Wang, and Ziwei Liu.Pose-controllable talking face generation by implicitly modularized audio-visual representation.In Proceedings of the IEEE/CVF Conference on computer Vision and Pattern Recognition, pages 4176–4186, 2021.
+(75)
+Yang Zhou, Xintong Han, Eli Shechtman, Jose Echevarria, Evangelos Kalogerakis, and Dingzeyu Li.Makelttalk: speaker-aware talking-head animation.ACM Transactions On Graphics (TOG), 39(6):1–15, 2020.
