@@ -124,117 +124,47 @@ class DiffusionTransformer(nn.Module):
         x = self.norm(x)
         return x
 
-class MotionFieldEstimator(nn.Module):
-    def __init__(self, model_scale='standard', input_channels=32, num_keypoints=15, predict_multiref_occ=True, occ2_on_deformed_source=False):
-        super().__init__()
-        use_weight_norm=False
-        if model_scale == 'standard' or model_scale == 'large':
-            down_seq = [(num_keypoints+1)*5, 64, 128, 256, 512, 1024]
-            up_seq = [1024, 512, 256, 128, 64, 32]
-        elif model_scale == 'small':
-            down_seq = [(num_keypoints+1)*5, 32, 64, 128, 256, 512]
-            up_seq = [512, 256, 128, 64, 32, 16]
-        K = num_keypoints
-        D = 16
-        C1 = input_channels # appearance feats channel
-        C2 = 4
-        self.compress = nn.Conv3d(C1, C2, 1, 1, 0)
-        self.down = nn.Sequential(*[DownBlock3D(down_seq[i], down_seq[i + 1], use_weight_norm) for i in range(len(down_seq) - 1)])
-        self.up = nn.Sequential(*[UpBlock3D(up_seq[i], up_seq[i + 1], use_weight_norm) for i in range(len(up_seq) - 1)])
-        self.mask_conv = nn.Conv3d(down_seq[0] + up_seq[-1], K + 1, 7, 1, 3)
-        self.predict_multiref_occ = predict_multiref_occ
-        self.occ2_on_deformed_source = occ2_on_deformed_source
-        self.occlusion_conv = nn.Conv2d((down_seq[0] + up_seq[-1]) * D, 1, 7, 1, 3)
-        if self.occ2_on_deformed_source:
-            self.occlusion_conv2 = nn.Conv2d(3, 1, 7, 1, 3)
-        else:
-            self.occlusion_conv2 = nn.Conv2d((down_seq[0] + up_seq[-1]) * D, 1, 7, 1, 3)
-        self.C, self.D = down_seq[0] + up_seq[-1], D
 
-    def forward(self, fs, kp_s, kp_d, Rs, Rd):
-        # the original fs is compressed to 4 channels using a 1x1x1 conv
-        fs_compressed = self.compress(fs)
-        N, _, D, H, W = fs.shape
-        # [N,21,1,16,64,64]
-        heatmap_representation = create_heatmap_representations(fs_compressed, kp_s, kp_d)
-        # [N,21,16,64,64,3]
-        sparse_motion = create_sparse_motions(fs_compressed, kp_s, kp_d, Rs, Rd)
-        # [N,21,4,16,64,64]
-        deformed_source = create_deformed_source_image(fs_compressed, sparse_motion)
-        input = torch.cat([heatmap_representation, deformed_source], dim=2).view(N, -1, D, H, W)
-        output = self.down(input)
-        output = self.up(output)
-        x = torch.cat([input, output], dim=1) # [B, C1=25 + C2=32, D, H, W]
-        mask = self.mask_conv(x)
-        # [N,21,16,64,64,1]
-        mask = F.softmax(mask, dim=1).unsqueeze(-1)
-        # [N,16,64,64,3]
-        deformation = (sparse_motion * mask).sum(dim=1)
-        if self.predict_multiref_occ:
-            occlusion, occlusion_2 = self.create_occlusion(x.view(N, -1, H, W))
-            return deformation, occlusion, occlusion_2
-        else:
-            return deformation, x.view(N, -1, H, W)
-        
-    # x: torch.Tensor, N, M, H, W
-    def create_occlusion(self, x, deformed_source=None):
-        occlusion = self.occlusion_conv(x)
-        if self.occ2_on_deformed_source:
-            assert deformed_source is not None
-            occlusion_2 = self.occlusion_conv2(deformed_source)
-        else:
-            occlusion_2 = self.occlusion_conv2(x)
-        occlusion = torch.sigmoid(occlusion)
-        occlusion_2 = torch.sigmoid(occlusion_2)
-        return occlusion, occlusion_2
+# The HeadPoseExpressionEstimator takes an input face image and estimates the head pose (yaw, pitch, roll) 
+# and expression deformation parameters. It uses a series of residual bottleneck blocks followed by fully connected layers 
+# to predict the head pose angles, translation vector, and deformation parameters.
+class HeadPoseExpressionEstimator(nn.Module):
+    def __init__(self, use_weight_norm=False):
+        super(HeadPoseExpressionEstimator, self).__init__()
+        self.pre_layers = nn.Sequential(
+            ConvBlock2D("CNA", 3, 64, 7, 2, 3, use_weight_norm),
+            nn.MaxPool2d(3, 2, 1)
+        )
+        self.res_layers = nn.Sequential(
+            self._make_layer(0, 64, 256, 3, use_weight_norm),
+            self._make_layer(1, 256, 512, 4, use_weight_norm),
+            self._make_layer(2, 512, 1024, 6, use_weight_norm),
+            self._make_layer(3, 1024, 2048, 3, use_weight_norm)
+        )
+        self.fc_yaw = nn.Linear(2048, 66)
+        self.fc_pitch = nn.Linear(2048, 66)
+        self.fc_roll = nn.Linear(2048, 66)
+        self.fc_t = nn.Linear(2048, 3)
+        self.fc_delta = nn.Linear(2048, 3 * 15)
 
-class Generator(nn.Module):
-    def __init__(self, input_channels=32, model_scale='standard', more_res=False):
-        super().__init__()
-        use_weight_norm=True
-        C=input_channels
-        
-        if model_scale == 'large':
-            n_res = 12
-            up_seq = [256, 128, 64]
-            D = 16
-            use_up_res = True
-        elif model_scale in ['standard', 'small']:
-            n_res = 6
-            up_seq = [256, 128, 64]
-            D = 16 
-            use_up_res = False
-        self.in_conv = ConvBlock2D("CNA", C * D, up_seq[0], 3, 1, 1, use_weight_norm, nonlinearity_type="leakyrelu")
-        self.mid_conv = nn.Conv2d(up_seq[0], up_seq[0], 1, 1, 0)
-        self.res = nn.Sequential(*[ResBlock2D(up_seq[0], use_weight_norm) for _ in range(n_res)])
-        ups = []
-        for i in range(len(up_seq) - 1):
-            ups.append(UpBlock2D(up_seq[i], up_seq[i + 1], use_weight_norm))
-            if use_up_res:
-                ups.append(ResBlock2D(up_seq[i + 1], up_seq[i + 1]))
-        self.up = nn.Sequential(*ups)
-        self.out_conv = nn.Conv2d(up_seq[-1], 3, 7, 1, 3)
-               
-    def forward(self, fs, deformation, occlusion, return_hid=False):
-        deformed_fs = self.get_deformed_feature(fs, deformation)
-        return self.forward_with_deformed_feature(deformed_fs, occlusion, return_hid=return_hid)
-    
-    def forward_with_deformed_feature(self, deformed_fs, occlusion, return_hid=False):
-        fs = deformed_fs
-        fs = self.in_conv(fs)
-        fs = self.mid_conv(fs)
-        fs = self.res(fs)
-        fs = self.up(fs)
-        rgb = self.out_conv(fs)
-        if return_hid:
-            return rgb, fs
-        return rgb
-    
-    @staticmethod
-    def get_deformed_feature(fs, deformation):
-        N, _, D, H, W = fs.shape
-        fs = F.grid_sample(fs, deformation, align_corners=True, padding_mode='border').view(N, -1, H, W)
-        return fs
+    def _make_layer(self, i, in_channels, out_channels, n_block, use_weight_norm):
+        stride = 1 if i == 0 else 2
+        return nn.Sequential(
+            ResBottleneck(in_channels, out_channels, stride, use_weight_norm),
+            *[ResBottleneck(out_channels, out_channels, 1, use_weight_norm) for _ in range(n_block)]
+        )
+
+    def forward(self, x):
+        x = self.pre_layers(x)
+        x = self.res_layers(x)
+        x = torch.mean(x, (2, 3))
+        yaw = self.fc_yaw(x)
+        pitch = self.fc_pitch(x)
+        roll = self.fc_roll(x)
+        t = self.fc_t(x)
+        delta = self.fc_delta(x)
+        delta = delta.view(x.shape[0], -1, 3)
+        return yaw, pitch, roll, t, delta
 
 # Define the loss functions
 def pairwise_transfer_loss(kp_s, kp_d, facial_dynamics_s, facial_dynamics_d):
