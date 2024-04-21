@@ -3,22 +3,14 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import transforms
-
-
 import numpy as np
-
+from camera import Camera
 from math import cos, sin
 import cv2
-
-
 import mediapipe as mp
-
-
 from decord import VideoReader
-
-
 from transformers import Wav2Vec2Model, Wav2Vec2Processor
-
+from hsemotion_onnx.facial_emotions import HSEmotionRecognizer
 
 
 class FaceHelper:
@@ -33,9 +25,101 @@ class FaceHelper:
         self.face_mesh = self.mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, min_detection_confidence=0.5)
 
         self.HEAD_POSE_LANDMARKS = [33, 263, 1, 61, 291, 199]
+
+
+        # Initialize the Emotion Recognizer
+        model_name = 'enet_b0_8_va_mtl'  # Adjust as needed depending on the model availability
+        self.fer = HSEmotionRecognizer(model_name=model_name)
+        self.emotion_idx_to_class = {0: 'angry', 1: 'contempt', 2: 'disgust', 3: 'fear', 4: 'happy', 
+                                     5: 'neutral', 6: 'sad', 7: 'surprise'}
+        
     def __del__(self):
         self.face_detection.close()
         self.face_mesh.close()
+
+
+    def detect_emotions(self, image_path):
+        """
+        Detects emotions on faces in the given image.
+
+        Args:
+            image_path (str): Path to the image file.
+
+        Returns:
+            dict: A dictionary with coordinates of faces and their corresponding emotions.
+        """
+        image = cv2.imread(image_path)
+        if image is None:
+            return "Image not found."
+
+        # Convert the image to RGB as MediaPipe requires RGB images
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # Detect faces
+        results = self.face_detection.process(image_rgb)
+        emotions = {}
+
+        if results.detections:
+            for detection in results.detections:
+                bboxC = detection.location_data.relative_bounding_box
+                ih, iw, _ = image.shape
+                x, y, w, h = int(bboxC.xmin * iw), int(bboxC.ymin * ih), int(bboxC.width * iw), int(bboxC.height * ih)
+                face_img = image_rgb[y:y+h, x:x+w]
+
+                if face_img.size != 0:
+                    emotion_idx, _ = self.fer.predict_emotions(face_img)
+                    emotion_label = self.emotion_idx_to_class[emotion_idx]
+                    emotions[(x, y, w, h)] = emotion_label
+
+                    # Optionally draw detected emotion on the image
+                    cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    cv2.putText(image, emotion_label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        else:
+            return "No face detected."
+
+        # Display the image with detected emotions
+        cv2.imshow("Emotion Detection", image)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+        return emotions
+
+    def estimate_gaze(self, image):
+        """
+        Estimate the gaze direction in spherical coordinates (theta, phi) based on eye landmarks.
+
+        Args:
+            image (np.array): The input image to process.
+
+        Returns:
+            tuple: (theta, phi) if eyes are detected, otherwise None.
+        """
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        results = self.face_mesh.process(image_rgb)
+
+        if results.multi_face_landmarks:
+            for face_landmarks in results.multi_face_landmarks:
+                # Extract left and right eye landmarks
+                left_eye = np.array([(face_landmarks.landmark[i].x * image.shape[1], 
+                                      face_landmarks.landmark[i].y * image.shape[0]) for i in range(362, 374)])
+                right_eye = np.array([(face_landmarks.landmark[i].x * image.shape[1], 
+                                       face_landmarks.landmark[i].y * image.shape[0]) for i in range(374, 386)])
+
+                left_eye_center = left_eye.mean(axis=0)
+                right_eye_center = right_eye.mean(axis=0)
+
+                # Calculate gaze direction in Cartesian coordinates
+                gaze_vector = right_eye_center - left_eye_center
+
+                # Convert to spherical coordinates
+                x, y = gaze_vector
+                r = np.sqrt(x**2 + y**2)
+                theta = np.arctan2(y, x)  # Azimuth
+                phi = np.arctan2(r, 0)  # Elevation, simplified as z=0 in image plane
+
+                return np.degrees(theta), np.degrees(phi)
+
+        return None
 
     def generate_face_region_mask(self,frame_image, video_id=0,frame_idx=0):
         frame_np = np.array(frame_image.convert('RGB'))  # Ensure the image is in RGB
