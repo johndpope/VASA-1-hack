@@ -35,3 +35,14 @@ These encoders form the core components of the VASA framework for extracting the
 from modules.real3d.facev2v_warp.network2 import AppearanceFeatureExtractor, CanonicalKeypointDetector, PoseExpressionEstimator, MotionFieldEstimator, Generator
 
 ```
+
+
+
+
+**REFERENCES - condition signals**
+gaze direction
+Accurate 3d face reconstruction with weakly-supervised learning: From single image to image set
+https://github.com/Microsoft/Deep3DFaceReconstruction
+
+HSEmotion: High-speed emotion recognition library
+https://github.com/av-savchenko/face-emotion-recognition/tree/main
