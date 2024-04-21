@@ -280,6 +280,27 @@ class FaceDecoder(nn.Module):
         return face_image
 
 # Define the diffusion transformer for holistic facial dynamics generation
+'''
+In the provided code snippet for the DiffusionTransformer class, the transformer architecture is implemented using the nn.TransformerEncoderLayer module from PyTorch. The queries, keys, and values are internally computed within each transformer layer based on the input features.
+
+The nn.TransformerEncoderLayer module takes care of computing the queries, keys, and values from the input features using linear transformations. The attention mechanism in the transformer layer then uses these queries, keys, and values to compute the self-attention weights and update the input features.
+
+Here's a breakdown of the transformer architecture in the code:
+
+The DiffusionTransformer class is initialized with the number of layers (num_layers), number of attention heads (num_heads), hidden size (hidden_size), and dropout probability (dropout).
+In the __init__ method, the class creates a nn.ModuleList called self.layers, which contains num_layers instances of nn.TransformerEncoderLayer. Each transformer layer has the specified hidden_size, num_heads, and dropout probability.
+The forward method takes the input features x, audio_features, gaze_direction, head_distance, and emotion_offset.
+The input features are concatenated along the last dimension using torch.cat to form a single tensor input_features.
+The concatenated input_features tensor is then passed through each transformer layer in self.layers using a loop. Inside each transformer layer, the following operations are performed:
+The input features are linearly transformed to compute the queries, keys, and values.
+The attention mechanism computes the self-attention weights using the queries, keys, and values.
+The self-attention weights are used to update the input features.
+The updated features are passed through a feedforward neural network.
+Residual connections and layer normalization are applied.
+After passing through all the transformer layers, the output features are normalized using nn.LayerNorm in self.norm(x).
+The final output x is returned, which represents the processed features after applying the transformer layers.
+The transformer architecture in this code leverages the self-attention mechanism to capture dependencies and relationships among the input features. The queries, keys, and values are internally computed within each transformer layer based on the input features, allowing the model to learn and update the feature representations through the attention mechanism.
+'''
 class DiffusionTransformer(nn.Module):
     def __init__(self, num_layers, num_heads, hidden_size, dropout=0.1):
         super(DiffusionTransformer, self).__init__()
