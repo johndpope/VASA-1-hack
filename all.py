@@ -20,9 +20,159 @@ from modules.real3d.facev2v_warp.func_utils import (
     create_deformed_source_image,
 )
 
+
+class Canonical3DVolumeEncoder(nn.Module):
+    def __init__(self, model_scale='standard'):
+        super().__init__()
+        use_weight_norm = False
+        down_seq = [3, 64, 128, 256, 512]
+        n_res = 2
+        self.in_conv = ConvBlock2D("CNA", 3, down_seq[0], 7, 1, 3, use_weight_norm)
+        self.down = nn.Sequential(*[DownBlock2D(down_seq[i], down_seq[i + 1], use_weight_norm) for i in range(len(down_seq) - 1)])
+        self.res = nn.Sequential(*[ResBlock2D(down_seq[-1], use_weight_norm) for _ in range(n_res)])
+        self.out_conv = nn.Conv2d(down_seq[-1], 64, 1, 1, 0)
+        
+    def forward(self, x):
+        x = self.in_conv(x)
+        x = self.down(x)
+        x = self.res(x)
+        x = self.out_conv(x)
+        return x
+
+class IdentityEncoder(nn.Module):
+    def __init__(self, model_scale='standard'):
+        super().__init__()
+        use_weight_norm = False
+        down_seq = [3, 64, 128, 256, 512]
+        n_res = 2
+        self.in_conv = ConvBlock2D("CNA", 3, down_seq[0], 7, 1, 3, use_weight_norm)
+        self.down = nn.Sequential(*[DownBlock2D(down_seq[i], down_seq[i + 1], use_weight_norm) for i in range(len(down_seq) - 1)])
+        self.res = nn.Sequential(*[ResBlock2D(down_seq[-1], use_weight_norm) for _ in range(n_res)])
+        self.out_conv = nn.Conv2d(down_seq[-1], 512, 1, 1, 0)
+        
+    def forward(self, x):
+        x = self.in_conv(x)
+        x = self.down(x)
+        x = self.res(x)
+        x = self.out_conv(x)
+        x = x.view(x.shape[0], -1)
+        return x
+    
+class HeadPoseEncoder(nn.Module):
+    def __init__(self, model_scale='standard'):
+        super().__init__()
+        use_weight_norm = False
+        down_seq = [3, 64, 128, 256]
+        n_res = 2
+        self.in_conv = ConvBlock2D("CNA", 3, down_seq[0], 7, 1, 3, use_weight_norm)
+        self.down = nn.Sequential(*[DownBlock2D(down_seq[i], down_seq[i + 1], use_weight_norm) for i in range(len(down_seq) - 1)])
+        self.res = nn.Sequential(*[ResBlock2D(down_seq[-1], use_weight_norm) for _ in range(n_res)])
+        self.out_conv = nn.Conv2d(down_seq[-1], 3, 1, 1, 0)
+        
+    def forward(self, x):
+        x = self.in_conv(x)
+        x = self.down(x)
+        x = self.res(x)
+        x = self.out_conv(x)
+        x = x.view(x.shape[0], -1)
+        return x
+
+class FacialDynamicsEncoder(nn.Module):
+    def __init__(self, model_scale='standard'):
+        super().__init__()
+        use_weight_norm = False
+        down_seq = [3, 64, 128, 256, 512]
+        n_res = 2
+        self.in_conv = ConvBlock2D("CNA", 3, down_seq[0], 7, 1, 3, use_weight_norm)
+        self.down = nn.Sequential(*[DownBlock2D(down_seq[i], down_seq[i + 1], use_weight_norm) for i in range(len(down_seq) - 1)])
+        self.res = nn.Sequential(*[ResBlock2D(down_seq[-1], use_weight_norm) for _ in range(n_res)])
+        self.out_conv = nn.Conv2d(down_seq[-1], 256, 1, 1, 0)
+
+    def forward(self, x):
+        x = self.in_conv(x)
+        x = self.down(x)
+        x = self.res(x)
+        x = self.out_conv(x)
+        x = x.view(x.shape[0], -1) 
+        return x
+
+
+class ExpressiveDisentangledFaceLatentSpace(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Encoders
+        self.canonical_3d_volume_encoder = Canonical3DVolumeEncoder()
+        self.identity_encoder = IdentityEncoder()
+        self.head_pose_encoder = HeadPoseEncoder()
+        self.facial_dynamics_encoder = FacialDynamicsEncoder()
+        
+        # Decoder
+        self.decoder = Decoder()
+        
+        # Loss functions
+        self.reconstruction_loss = nn.L1Loss()
+        self.pairwise_transfer_loss = nn.L1Loss()
+        self.identity_similarity_loss = nn.CosineSimilarity()
+
+    def forward(self, img1, img2):
+        # Extract latent variables for img1
+        V_a1 = self.canonical_3d_volume_encoder(img1)
+        z_id1 = self.identity_encoder(img1)
+        z_pose1 = self.head_pose_encoder(img1)
+        z_dyn1 = self.facial_dynamics_encoder(img1)
+        
+        # Extract latent variables for img2
+        V_a2 = self.canonical_3d_volume_encoder(img2)
+        z_id2 = self.identity_encoder(img2)
+        z_pose2 = self.head_pose_encoder(img2)
+        z_dyn2 = self.facial_dynamics_encoder(img2)
+        
+        # Reconstruct images
+        img1_recon = self.decoder(V_a1, z_id1, z_pose1, z_dyn1)
+        img2_recon = self.decoder(V_a2, z_id2, z_pose2, z_dyn2)
+        
+        # Pairwise head pose and facial dynamics transfer
+        img1_pose_transfer = self.decoder(V_a1, z_id1, z_pose2, z_dyn1)
+        img2_dyn_transfer = self.decoder(V_a2, z_id2, z_pose2, z_dyn1)
+        
+        # Cross-identity pose and facial motion transfer
+        img1_cross_id_transfer = self.decoder(V_a1, z_id2, z_pose1, z_dyn1)
+        img2_cross_id_transfer = self.decoder(V_a2, z_id1, z_pose2, z_dyn2)
+        
+        return img1_recon, img2_recon, img1_pose_transfer, img2_dyn_transfer, img1_cross_id_transfer, img2_cross_id_transfer
+
+    def training_step(self, img1, img2):
+        # Forward pass
+        img1_recon, img2_recon, img1_pose_transfer, img2_dyn_transfer, img1_cross_id_transfer, img2_cross_id_transfer = self.forward(img1, img2)
+        
+        # Reconstruction loss
+        loss_recon = self.reconstruction_loss(img1_recon, img1) + self.reconstruction_loss(img2_recon, img2)
+        
+        # Pairwise transfer loss
+        loss_pairwise_transfer = self.pairwise_transfer_loss(img1_pose_transfer, img2_dyn_transfer)
+        
+        # Identity similarity loss
+        id_feat1 = extract_identity_features(img1)
+        id_feat1_cross_id_transfer = extract_identity_features(img1_cross_id_transfer)
+        id_feat2 = extract_identity_features(img2)
+        id_feat2_cross_id_transfer = extract_identity_features(img2_cross_id_transfer)
+        loss_id_sim = 1 - self.identity_similarity_loss(id_feat1, id_feat1_cross_id_transfer) + 1 - self.identity_similarity_loss(id_feat2, id_feat2_cross_id_transfer)
+        
+        # Total loss
+        total_loss = loss_recon + loss_pairwise_transfer + loss_id_sim
+        
+        return total_loss
+
 class FaceEncoder(nn.Module):
     def __init__(self, use_weight_norm=False):
         super(FaceEncoder, self).__init__()
+        # Define encoder architecture for extracting latent variables
+        # - Canonical 3D appearance volume (V_can)
+        # - Identity code (z_id)
+        # - 3D head pose (z_pose)
+        # - Facial dynamics code (z_dyn)
+        # ...
+    
         self.in_conv = ConvBlock2D("CNA", 3, 64, 7, 1, 3, use_weight_norm)
         self.down = nn.Sequential(
             DownBlock2D(64, 128, use_weight_norm),
