@@ -334,6 +334,7 @@ class Decoder(nn.Module):
             nn.Upsample(scale_factor=2),
             ConvBlock2D("CNA", 64, 3, 7, 1, 3, use_weight_norm, activation_type="tanh")
         )
+        self.fh = FaceHelper()
 
     def forward(self, V_can, z_id, z_pose, z_dyn):
         N, C, D, H, W = V_can.shape
@@ -342,7 +343,8 @@ class Decoder(nn.Module):
         x = self.res(x)
 
         # Apply 3D warping based on head pose and facial dynamics
-        yaw, pitch, roll = z_pose[:, 0], z_pose[:, 1], z_pose[:, 2]
+        # yaw, pitch, roll = z_pose[:, 0], z_pose[:, 1], z_pose[:, 2]
+        yaw, pitch, roll = self.fh.calculate_pose(z_pose)
         t = z_pose[:, 3:]
         delta = z_dyn
 
