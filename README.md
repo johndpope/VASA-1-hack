@@ -13,9 +13,12 @@ https://github.com/yerfor/Real3DPortrait/
 
 
 
+fyi - keep eyes on this repo - Egor Zakharov who worked on MegaPortraits as lead AI worked on this 
+https://github.com/MBZUAI-Metaverse/VOODOO3D-official
 
-all the models / code created in all.py from Claude Opus.
-(I'm considering that the Real3DPortrait code has a correct implmentation of MegaPortrait foundation code.)
+
+All the models / code created in Net.py from Claude Opus.
+The Real3DPortrait code seems to provide warping / volumetric models as a downstream implmentation of MegaPortrait foundation code.
 
 
 
