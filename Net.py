@@ -3,39 +3,23 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import transforms
-
-
 import torch
 import torch.nn.functional as F
 import numpy as np
 from torch import nn
-
-
-import json
-import os
 from math import cos, sin, pi
 from typing import List, Tuple, Dict, Any
 from camera import Camera
 import cv2
-import decord
-import librosa
-import mediapipe as mp
 import numpy as np
-import soundfile as sf
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
-from decord import VideoReader,AVReader
-
-
-from moviepy.editor import VideoFileClip
+from FaceHelper import FaceHelper
 from PIL import Image
 from torch.utils.data import Dataset
-
-from transformers import Wav2Vec2Model, Wav2Vec2Processor
-
-
+from modules.real3d.facev2v_warp.func_utils import transform_kp,make_coordinate_grid_2d
 from modules.real3d.facev2v_warp.layers import ConvBlock2D, DownBlock2D, DownBlock3D, UpBlock2D, UpBlock3D, ResBlock2D, ResBlock3D, ResBottleneck
 from modules.real3d.facev2v_warp.func_utils import (
     out2heatmap,
@@ -134,7 +118,7 @@ class ExpressiveDisentangledFaceLatentSpace(nn.Module):
         
         # Decoder
         self.decoder = Decoder()
-        
+        self.fh = FaceHelper()
         # Loss functions
         self.reconstruction_loss = nn.L1Loss()
         self.pairwise_transfer_loss = nn.L1Loss()
@@ -178,10 +162,11 @@ class ExpressiveDisentangledFaceLatentSpace(nn.Module):
         loss_pairwise_transfer = self.pairwise_transfer_loss(img1_pose_transfer, img2_dyn_transfer)
         
         # Identity similarity loss
-        id_feat1 = extract_identity_features(img1)
-        id_feat1_cross_id_transfer = extract_identity_features(img1_cross_id_transfer)
-        id_feat2 = extract_identity_features(img2)
-        id_feat2_cross_id_transfer = extract_identity_features(img2_cross_id_transfer)
+
+        id_feat1 = self.fh.extract_identity_features(img1)
+        id_feat1_cross_id_transfer =  self.fh.extract_identity_features(img1_cross_id_transfer)
+        id_feat2 =  self.fh.extract_identity_features(img2)
+        id_feat2_cross_id_transfer =  self.fh.extract_identity_features(img2_cross_id_transfer)
         loss_id_sim = 1 - self.identity_similarity_loss(id_feat1, id_feat1_cross_id_transfer) + 1 - self.identity_similarity_loss(id_feat2, id_feat2_cross_id_transfer)
         
         # Total loss
@@ -321,49 +306,57 @@ class DiffusionTransformer(nn.Module):
         x = self.norm(x)
         return x
 
-
-# The HeadPoseExpressionEstimator takes an input face image and estimates the head pose (yaw, pitch, roll) 
-# and expression deformation parameters. It uses a series of residual bottleneck blocks followed by fully connected layers 
-# to predict the head pose angles, translation vector, and deformation parameters.
-class HeadPoseExpressionEstimator(nn.Module):
-    def __init__(self, use_weight_norm=False):
-        super(HeadPoseExpressionEstimator, self).__init__()
-        self.pre_layers = nn.Sequential(
-            ConvBlock2D("CNA", 3, 64, 7, 2, 3, use_weight_norm),
-            nn.MaxPool2d(3, 2, 1)
+# Decoder
+'''
+we extract the head pose parameters (yaw, pitch, roll, and translation t) and facial dynamics (delta) from the input latent codes z_pose and z_dyn.
+We then use the transform_kp function to transform the keypoints based on the head pose and facial dynamics. This function applies the necessary transformations to the canonical 3D volume V_can to obtain the transformed keypoints kp_pose.
+Next, we create a 2D coordinate grid using make_coordinate_grid_2d and repeat it for each batch sample. We add the transformed keypoints kp_pose to the grid to obtain the transformed grid coordinates.
+Finally, we use F.grid_sample to warp the feature volume x using the transformed grid coordinates. The warped feature volume x_warped is then passed through the upsampling layers to generate the final face image.
+Note that you may need to adjust the dimensions and shapes of the tensors based on your specific implementation and the dimensions of V_can and the latent codes.
+'''
+class Decoder(nn.Module):
+    def __init__(self, use_weight_norm=True):
+        super(Decoder, self).__init__()
+        self.in_conv = ConvBlock2D("CNA", 64, 256, 3, 1, 1, use_weight_norm, nonlinearity_type="leakyrelu")
+        self.res = nn.Sequential(
+            ResBlock2D(256, use_weight_norm),
+            ResBlock2D(256, use_weight_norm),
+            ResBlock2D(256, use_weight_norm),
+            ResBlock2D(256, use_weight_norm),
+            ResBlock2D(256, use_weight_norm),
+            ResBlock2D(256, use_weight_norm)
         )
-        self.res_layers = nn.Sequential(
-            self._make_layer(0, 64, 256, 3, use_weight_norm),
-            self._make_layer(1, 256, 512, 4, use_weight_norm),
-            self._make_layer(2, 512, 1024, 6, use_weight_norm),
-            self._make_layer(3, 1024, 2048, 3, use_weight_norm)
-        )
-        self.fc_yaw = nn.Linear(2048, 66)
-        self.fc_pitch = nn.Linear(2048, 66)
-        self.fc_roll = nn.Linear(2048, 66)
-        self.fc_t = nn.Linear(2048, 3)
-        self.fc_delta = nn.Linear(2048, 3 * 15)
-
-    def _make_layer(self, i, in_channels, out_channels, n_block, use_weight_norm):
-        stride = 1 if i == 0 else 2
-        return nn.Sequential(
-            ResBottleneck(in_channels, out_channels, stride, use_weight_norm),
-            *[ResBottleneck(out_channels, out_channels, 1, use_weight_norm) for _ in range(n_block)]
+        self.up = nn.Sequential(
+            nn.Upsample(scale_factor=2),
+            ConvBlock2D("CNA", 256, 128, 3, 1, 1, use_weight_norm),
+            nn.Upsample(scale_factor=2),
+            ConvBlock2D("CNA", 128, 64, 3, 1, 1, use_weight_norm),
+            nn.Upsample(scale_factor=2),
+            ConvBlock2D("CNA", 64, 3, 7, 1, 3, use_weight_norm, activation_type="tanh")
         )
 
-    def forward(self, x):
-        x = self.pre_layers(x)
-        x = self.res_layers(x)
-        x = torch.mean(x, (2, 3))
-        yaw = self.fc_yaw(x)
-        pitch = self.fc_pitch(x)
-        roll = self.fc_roll(x)
-        t = self.fc_t(x)
-        delta = self.fc_delta(x)
-        delta = delta.view(x.shape[0], -1, 3)
-        return yaw, pitch, roll, t, delta
+    def forward(self, V_can, z_id, z_pose, z_dyn):
+        N, C, D, H, W = V_can.shape
+        x = V_can.view(N, -1, H, W)
+        x = self.in_conv(x)
+        x = self.res(x)
 
+        # Apply 3D warping based on head pose and facial dynamics
+        yaw, pitch, roll = z_pose[:, 0], z_pose[:, 1], z_pose[:, 2]
+        t = z_pose[:, 3:]
+        delta = z_dyn
 
+        # Transform keypoints based on head pose and facial dynamics
+        kp_pose, R = transform_kp(V_can, yaw, pitch, roll, t, delta)
 
+        # Warp the feature volume using the transformed keypoints
+        grid = make_coordinate_grid_2d(x.shape[2:]).unsqueeze(0).repeat(N, 1, 1, 1).to(x.device)
+        grid = grid.view(N, -1, 2)
+        kp_pose = kp_pose.view(N, -1, 2)
+        grid_transformed = grid + kp_pose
+        grid_transformed = grid_transformed.view(N, x.shape[2], x.shape[3], 2)
+        x_warped = F.grid_sample(x, grid_transformed, align_corners=True)
 
+        face_image = self.up(x_warped)
+        return face_image
 

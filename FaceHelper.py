@@ -11,7 +11,7 @@ import mediapipe as mp
 from decord import VideoReader
 from transformers import Wav2Vec2Model, Wav2Vec2Processor
 from hsemotion_onnx.facial_emotions import HSEmotionRecognizer
-
+from insightface.app import FaceAnalysis
 
 class FaceHelper:
     def __init__(self):
@@ -33,10 +33,33 @@ class FaceHelper:
         self.emotion_idx_to_class = {0: 'angry', 1: 'contempt', 2: 'disgust', 3: 'fear', 4: 'happy', 
                                      5: 'neutral', 6: 'sad', 7: 'surprise'}
         
+        # Initialize the FaceAnalysis module with the ArcFace model
+        self.app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+        self.app.prepare(ctx_id=0, det_size=(640, 640))
+        
     def __del__(self):
         self.face_detection.close()
         self.face_mesh.close()
 
+    def extract_identity_features(self,img):
+        # Convert the input image to RGB format
+        img_rgb = img.permute(1, 2, 0).cpu().numpy() * 0.5 + 0.5
+        img_rgb = (img_rgb * 255).astype('uint8')
+
+        # Perform face detection and recognition using insightface
+        faces = self.app.get(img_rgb)
+
+        if len(faces) == 0:
+            # If no face is detected, return None
+            return None
+        else:
+            # Take the features of the first detected face
+            id_features = faces[0].embedding
+
+            # Convert the features to a torch tensor
+            id_features = torch.from_numpy(id_features).float().cuda()
+
+            return id_features
 
     def detect_emotions(self, image_path):
         """

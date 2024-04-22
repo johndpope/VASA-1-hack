@@ -6,6 +6,14 @@ modules cherry picked from
 https://github.com/yerfor/Real3DPortrait/
 
 
+
+
+
+
+
+
+
+
 all the models / code created in all.py from Claude Opus.
 (I'm considering that the Real3DPortrait code has a correct implmentation of MegaPortrait foundation code.)
 
@@ -41,8 +49,13 @@ from modules.real3d.facev2v_warp.network2 import AppearanceFeatureExtractor, Can
 
 **REFERENCES - condition signals**
 gaze direction
-Accurate 3d face reconstruction with weakly-supervised learning: From single image to image set
+Accurate 3d face reconstruction with weakly-supervised learning
 https://github.com/Microsoft/Deep3DFaceReconstruction
 
 HSEmotion: High-speed emotion recognition library
 https://github.com/av-savchenko/face-emotion-recognition/tree/main
+
+
+Arface - feature extractor
+https://github.com/deepinsight/insightface/tree/master/recognition/arcface_torch
+
