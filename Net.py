@@ -305,6 +305,9 @@ class DiffusionTransformer(nn.Module):
         
         x = self.norm(x)
         return x
+    
+
+    
 
 # Decoder
 '''
@@ -362,3 +365,44 @@ class Decoder(nn.Module):
         face_image = self.up(x_warped)
         return face_image
 
+
+'''
+In this implementation:
+
+The ClassifierFreeGuidance module takes a diffusion model (model) and a list of guidance scales (guidance_scales) as input.
+The forward method computes the unconditional model output (unconditional_output) by passing None as the conditioning information.
+It then computes the conditional model output (conditional_output) by passing the actual conditioning information (cond).
+The Classifier-free Guidance is applied by computing a weighted sum of the difference between the conditional and unconditional outputs, using the provided guidance scales.
+The final output is the sum of the weighted difference and the unconditional output.
+During training or sampling, you can create an instance of the ClassifierFreeGuidance module with the desired guidance scales and use it like a regular diffusion model. The conditioning information (cond) should be provided based on your specific task (e.g., class labels, text embeddings, or other conditioning signals).
+
+Note that this is a general implementation, and you may need to adjust it based on your specific diffusion model architecture and conditioning requirements.
+'''
+class ClassifierFreeGuidance(nn.Module):
+    def __init__(self, model, guidance_scales):
+        super().__init__()
+        self.model = model
+        self.guidance_scales = guidance_scales
+
+    def forward(self, x, t, cond):
+        # Compute the unconditional model output
+        unconditional_output = self.model(x, t, None)
+
+        # Compute the conditional model output
+        conditional_output = self.model(x, t, cond)
+
+        # Apply Classifier-free Guidance
+        guidance_output = torch.zeros_like(unconditional_output)
+        for scale in self.guidance_scales:
+            guidance_output = guidance_output + scale * (conditional_output - unconditional_output)
+
+        return guidance_output + unconditional_output
+# Example usage
+guidance_scales = [1.0, 0.5]  # Adjust the scales as needed
+guided_model = ClassifierFreeGuidance(diffusion_model, guidance_scales)
+
+# During training or sampling
+x = ...  # Input noise or image
+t = ...  # Timestep
+cond = ...  # Conditioning information (e.g., class labels, text embeddings)
+output = guided_model(x, t, cond)
