@@ -1,4 +1,5 @@
-from dataset import VideoMAE
+from dataset import VideoMAE # TBD - https://github.com/search?q=VideoMAE+voxceleb&type=code
+# voxceleb2 dataset here - https://github.com/johndpope/VASA-1-hack/issues/5#issuecomment-2077007921
 import torch
 from torch.utils.data import DataLoader
 from torch import optim, nn
