@@ -2,14 +2,9 @@
 Using Claude Opus to reverse engineer code from white paper (this is for La Raza)
 
 
-modules cherry picked from 
+
+The Real3DPortrait code seems to provide warping / volumetric models as a downstream implmentation of One-shot free-view neural talking-head synthesis for video conferencing code. modules cherry picked from 
 https://github.com/yerfor/Real3DPortrait/
-
-
-
-
-
-
 
 
 
@@ -17,212 +12,90 @@ fyi - keep eyes on this repo - Egor Zakharov who worked on MegaPortraits as lead
 https://github.com/MBZUAI-Metaverse/VOODOO3D-official
 
 
-All the models / code created in Net.py from Claude Opus.
-The Real3DPortrait code seems to provide warping / volumetric models as a downstream implmentation of MegaPortrait foundation code.
+fyi - Kevin Fringe attempted to implement the MegaPortrait by samsung / russia team - I've added some suggested fixes from Claude.
+https://github.com/johndpope/MegaPortrait/
 
+
+
+All the models / code created in Net.py from Claude Opus.
 
 
 ```python
-class Canonical3DVolumeEncoder(nn.Module):
-    def __init__(self, model_scale='standard'):
-        super().__init__()
-        use_weight_norm = False
-        down_seq = [3, 64, 128, 256, 512]
-        n_res = 2
-        self.in_conv = ConvBlock2D("CNA", 3, down_seq[0], 7, 1, 3, use_weight_norm)
-        self.down = nn.Sequential(*[DownBlock2D(down_seq[i], down_seq[i + 1], use_weight_norm) for i in range(len(down_seq) - 1)])
-        self.res = nn.Sequential(*[ResBlock2D(down_seq[-1], use_weight_norm) for _ in range(n_res)])
-        self.out_conv = nn.Conv2d(down_seq[-1], 64, 1, 1, 0)
-        
-    def forward(self, x):
-        x = self.in_conv(x)
-        x = self.down(x)
-        x = self.res(x)
-        x = self.out_conv(x)
-        return x
 
-class IdentityEncoder(nn.Module):
-    def __init__(self, model_scale='standard'):
-        super().__init__()
-        use_weight_norm = False
-        down_seq = [3, 64, 128, 256, 512]
-        n_res = 2
-        self.in_conv = ConvBlock2D("CNA", 3, down_seq[0], 7, 1, 3, use_weight_norm)
-        self.down = nn.Sequential(*[DownBlock2D(down_seq[i], down_seq[i + 1], use_weight_norm) for i in range(len(down_seq) - 1)])
-        self.res = nn.Sequential(*[ResBlock2D(down_seq[-1], use_weight_norm) for _ in range(n_res)])
-        self.out_conv = nn.Conv2d(down_seq[-1], 512, 1, 1, 0)
-        
-    def forward(self, x):
-        x = self.in_conv(x)
-        x = self.down(x)
-        x = self.res(x)
-        x = self.out_conv(x)
-        x = x.view(x.shape[0], -1)
-        return x
-    
-class HeadPoseEncoder(nn.Module):
-    def __init__(self, model_scale='standard'):
-        super().__init__()
-        use_weight_norm = False
-        down_seq = [3, 64, 128, 256]
-        n_res = 2
-        self.in_conv = ConvBlock2D("CNA", 3, down_seq[0], 7, 1, 3, use_weight_norm)
-        self.down = nn.Sequential(*[DownBlock2D(down_seq[i], down_seq[i + 1], use_weight_norm) for i in range(len(down_seq) - 1)])
-        self.res = nn.Sequential(*[ResBlock2D(down_seq[-1], use_weight_norm) for _ in range(n_res)])
-        self.out_conv = nn.Conv2d(down_seq[-1], 3, 1, 1, 0)
-        
-    def forward(self, x):
-        x = self.in_conv(x)
-        x = self.down(x)
-        x = self.res(x)
-        x = self.out_conv(x)
-        x = x.view(x.shape[0], -1)
-        return x
-
-class FacialDynamicsEncoder(nn.Module):
-    def __init__(self, model_scale='standard'):
-        super().__init__()
-        use_weight_norm = False
-        down_seq = [3, 64, 128, 256, 512]
-        n_res = 2
-        self.in_conv = ConvBlock2D("CNA", 3, down_seq[0], 7, 1, 3, use_weight_norm)
-        self.down = nn.Sequential(*[DownBlock2D(down_seq[i], down_seq[i + 1], use_weight_norm) for i in range(len(down_seq) - 1)])
-        self.res = nn.Sequential(*[ResBlock2D(down_seq[-1], use_weight_norm) for _ in range(n_res)])
-        self.out_conv = nn.Conv2d(down_seq[-1], 256, 1, 1, 0)
-
-    def forward(self, x):
-        x = self.in_conv(x)
-        x = self.down(x)
-        x = self.res(x)
-        x = self.out_conv(x)
-        x = x.view(x.shape[0], -1) 
-        return x
-
-
-class ExpressiveDisentangledFaceLatentSpace(nn.Module):
+class DisentanglementLosses(nn.Module):
     def __init__(self):
-        super().__init__()
-        # Encoders
-        self.canonical_3d_volume_encoder = Canonical3DVolumeEncoder()
-        self.identity_encoder = IdentityEncoder()
-        self.head_pose_encoder = HeadPoseEncoder()
-        self.facial_dynamics_encoder = FacialDynamicsEncoder()
+        super(DisentanglementLosses, self).__init__()
+        self.l1_loss = nn.L1Loss()
+        self.cosine_similarity = nn.CosineSimilarity(dim=1)
+        self.face_analysis = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+        self.face_analysis.prepare(ctx_id=0, det_size=(640, 640))
+    
+    def extract_identity_features(self, image):
+        # Assume image is a tensor of shape (batch_size, 3, height, width)
+        image = image.permute(0, 2, 3, 1).cpu().numpy() * 0.5 + 0.5
+        image = (image * 255).astype('uint8')
         
-        # Decoder
-        self.decoder = Decoder()
-        self.fh = FaceHelper()
-        # Loss functions
-        self.reconstruction_loss = nn.L1Loss()
-        self.pairwise_transfer_loss = nn.L1Loss()
-        self.identity_similarity_loss = nn.CosineSimilarity()
+        identity_features = []
+        for img in image:
+            faces = self.face_analysis.get(img)
+            if len(faces) > 0:
+                identity_features.append(faces[0].embedding)
+            else:
+                identity_features.append(None)
+        
+        identity_features = [torch.from_numpy(feat).float().cuda() if feat is not None else None for feat in identity_features]
+        return identity_features
+    
+    def forward(self, img1, img2, img1_recon, img2_recon, img1_pose_transfer, img2_dyn_transfer, img1_cross_id_transfer, img2_cross_id_transfer):
+        # Pairwise head pose and facial dynamics transfer loss
+        loss_pairwise_transfer = self.l1_loss(img1_pose_transfer, img2_dyn_transfer)
+        
+        # Face identity similarity loss for cross-identity motion transfer
+        id_feat1 = self.extract_identity_features(img1)
+        id_feat2 = self.extract_identity_features(img2)
+        id_feat1_cross_id_transfer = self.extract_identity_features(img1_cross_id_transfer)
+        id_feat2_cross_id_transfer = self.extract_identity_features(img2_cross_id_transfer)
+        
+        loss_id_sim = torch.tensor(0.0).cuda()
+        count = 0
+        for feat1, feat2, feat1_cross, feat2_cross in zip(id_feat1, id_feat2, id_feat1_cross_id_transfer, id_feat2_cross_id_transfer):
+            if feat1 is not None and feat2 is not None and feat1_cross is not None and feat2_cross is not None:
+                loss_id_sim += 1 - self.cosine_similarity(feat1, feat1_cross) + 1 - self.cosine_similarity(feat2, feat2_cross)
+                count += 1
+        
+        if count > 0:
+            loss_id_sim /= count
+        
+        return loss_pairwise_transfer, loss_id_sim
+    
 
-    def forward(self, img1, img2):
-        # Extract latent variables for img1
-        V_a1 = self.canonical_3d_volume_encoder(img1)
-        z_id1 = self.identity_encoder(img1)
-        z_pose1 = self.head_pose_encoder(img1)
-        z_dyn1 = self.facial_dynamics_encoder(img1)
-        
-        # Extract latent variables for img2
-        V_a2 = self.canonical_3d_volume_encoder(img2)
-        z_id2 = self.identity_encoder(img2)
-        z_pose2 = self.head_pose_encoder(img2)
-        z_dyn2 = self.facial_dynamics_encoder(img2)
-        
-        # Reconstruct images
-        img1_recon = self.decoder(V_a1, z_id1, z_pose1, z_dyn1)
-        img2_recon = self.decoder(V_a2, z_id2, z_pose2, z_dyn2)
-        
-        # Pairwise head pose and facial dynamics transfer
-        img1_pose_transfer = self.decoder(V_a1, z_id1, z_pose2, z_dyn1)
-        img2_dyn_transfer = self.decoder(V_a2, z_id2, z_pose2, z_dyn1)
-        
-        # Cross-identity pose and facial motion transfer
-        img1_cross_id_transfer = self.decoder(V_a1, z_id2, z_pose1, z_dyn1)
-        img2_cross_id_transfer = self.decoder(V_a2, z_id1, z_pose2, z_dyn2)
-        
-        return img1_recon, img2_recon, img1_pose_transfer, img2_dyn_transfer, img1_cross_id_transfer, img2_cross_id_transfer
-
-    def training_step(self, img1, img2):
-        # Forward pass
-        img1_recon, img2_recon, img1_pose_transfer, img2_dyn_transfer, img1_cross_id_transfer, img2_cross_id_transfer = self.forward(img1, img2)
-        
-        # Reconstruction loss
-        loss_recon = self.reconstruction_loss(img1_recon, img1) + self.reconstruction_loss(img2_recon, img2)
-        
-        # Pairwise transfer loss
-        loss_pairwise_transfer = self.pairwise_transfer_loss(img1_pose_transfer, img2_dyn_transfer)
-        
-        # Identity similarity loss
-
-        id_feat1 = self.fh.extract_identity_features(img1)
-        id_feat1_cross_id_transfer =  self.fh.extract_identity_features(img1_cross_id_transfer)
-        id_feat2 =  self.fh.extract_identity_features(img2)
-        id_feat2_cross_id_transfer =  self.fh.extract_identity_features(img2_cross_id_transfer)
-        loss_id_sim = 1 - self.identity_similarity_loss(id_feat1, id_feat1_cross_id_transfer) + 1 - self.identity_similarity_loss(id_feat2, id_feat2_cross_id_transfer)
-        
-        # Total loss
-        total_loss = loss_recon + loss_pairwise_transfer + loss_id_sim
-        
-        return total_loss
 
 class FaceEncoder(nn.Module):
     def __init__(self, use_weight_norm=False):
         super(FaceEncoder, self).__init__()
-        # Define encoder architecture for extracting latent variables
-        # - Canonical 3D appearance volume (V_can)
-        # - Identity code (z_id)
-        # - 3D head pose (z_pose)
-        # - Facial dynamics code (z_dyn)
-        # ...
-    
-        self.in_conv = ConvBlock2D("CNA", 3, 64, 7, 1, 3, use_weight_norm)
-        self.down = nn.Sequential(
-            DownBlock2D(64, 128, use_weight_norm),
-            DownBlock2D(128, 256, use_weight_norm),
-            DownBlock2D(256, 512, use_weight_norm)
-        )
-        self.mid_conv = nn.Conv2d(512, 32 * 16, 1, 1, 0)
-        self.res = nn.Sequential(
-            ResBlock3D(32, use_weight_norm),
-            ResBlock3D(32, use_weight_norm),
-            ResBlock3D(32, use_weight_norm),
-            ResBlock3D(32, use_weight_norm),
-            ResBlock3D(32, use_weight_norm),
-            ResBlock3D(32, use_weight_norm)
-        )
-        self.identity_encoder = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, 128)
-        )
-        self.head_pose_encoder = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, 6)
-        )
-        self.facial_dynamics_encoder = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, 64)
-        )
-
+        self.appearance_extractor = AppearanceFeatureExtractor()
+        self.canonical_kp_detector = CanonicalKeypointDetector()
+        self.pose_exp_estimator = PoseExpressionEstimator()
+        
     def forward(self, x):
-        x = self.in_conv(x)
-        x = self.down(x)
-        x = self.mid_conv(x)
-        N, _, H, W = x.shape
-        x = x.view(N, 32, 16, H, W)
-        appearance_volume = self.res(x)
+        appearance_volume = self.appearance_extractor(x)
+        canonical_keypoints = self.canonical_kp_detector(x)
+        yaw, pitch, roll, t, delta = self.pose_exp_estimator(x)
+        head_pose = torch.cat([yaw.unsqueeze(1), pitch.unsqueeze(1), roll.unsqueeze(1), t], dim=1)
+        facial_dynamics = delta
+        return appearance_volume, canonical_keypoints, head_pose, facial_dynamics
         
-        # Extract identity code, head pose, and facial dynamics code
-        x = x.view(N, -1)
-        identity_code = self.identity_encoder(x)
-        head_pose = self.head_pose_encoder(x)
-        facial_dynamics = self.facial_dynamics_encoder(x)
-        
-        return appearance_volume, identity_code, head_pose, facial_dynamics
 
+
+# class FaceDecoder(nn.Module):
+#     def __init__(self):
+#         super(FaceDecoder, self).__init__()
+#         self.generator = Generator()
+        
+#     def forward(self, appearance_volume, deformation, occlusion):
+#         reconstructed_face = self.generator(appearance_volume, deformation, occlusion)
+#         return reconstructed_face
+    
 class FaceDecoder(nn.Module):
     def __init__(self, use_weight_norm=True):
         super(FaceDecoder, self).__init__()
@@ -243,6 +116,7 @@ class FaceDecoder(nn.Module):
             nn.Upsample(scale_factor=2),
             ConvBlock2D("CNA", 64, 3, 7, 1, 3, use_weight_norm, activation_type="tanh")
         )
+        self.motion_field_estimator = MotionFieldEstimator(model_scale='small')
 
     def forward(self, appearance_volume, identity_code, head_pose, facial_dynamics):
         N, _, D, H, W = appearance_volume.shape
@@ -250,10 +124,14 @@ class FaceDecoder(nn.Module):
         x = self.in_conv(x)
         x = self.res(x)
         
-        # Apply 3D warping based on head pose and facial dynamics
-        # ...
+        # Generate motion field using the MotionFieldEstimator
+        deformation, occlusion = self.motion_field_estimator(appearance_volume, head_pose, facial_dynamics)
         
-        face_image = self.up(x)
+        # Apply deformation to the feature volume
+        deformed_x = F.grid_sample(x, deformation, align_corners=True, padding_mode='border')
+        
+        # Apply occlusion-aware decoding
+        face_image = self.up(deformed_x * occlusion)
         return face_image
 
 # Define the diffusion transformer for holistic facial dynamics generation
@@ -278,6 +156,7 @@ After passing through all the transformer layers, the output features are normal
 The final output x is returned, which represents the processed features after applying the transformer layers.
 The transformer architecture in this code leverages the self-attention mechanism to capture dependencies and relationships among the input features. The queries, keys, and values are internally computed within each transformer layer based on the input features, allowing the model to learn and update the feature representations through the attention mechanism.
 '''
+
 class DiffusionTransformer(nn.Module):
     def __init__(self, num_layers, num_heads, hidden_size, dropout=0.1):
         super(DiffusionTransformer, self).__init__()
@@ -287,7 +166,7 @@ class DiffusionTransformer(nn.Module):
         ])
         self.norm = nn.LayerNorm(hidden_size)
 
-    def forward(self, x, audio_features, gaze_direction, head_distance, emotion_offset):
+    def forward(self, x, audio_features, gaze_direction, head_distance, emotion_offset, guidance_scale=1.0):
         # Concatenate input features
         input_features = torch.cat([x, audio_features, gaze_direction, head_distance, emotion_offset], dim=-1)
         
@@ -296,7 +175,18 @@ class DiffusionTransformer(nn.Module):
             x = layer(input_features)
         
         x = self.norm(x)
+        
+        # Apply Classifier-Free Guidance
+        if guidance_scale != 1.0:
+            uncond_input_features = torch.cat([x, audio_features, torch.zeros_like(gaze_direction), 
+                                               torch.zeros_like(head_distance), torch.zeros_like(emotion_offset)], dim=-1)
+            uncond_output = self.forward(uncond_input_features, audio_features, gaze_direction, head_distance, emotion_offset, guidance_scale=1.0)
+            x = uncond_output + guidance_scale * (x - uncond_output)
+        
         return x
+    
+
+    
 
 # Decoder
 '''
@@ -353,6 +243,48 @@ class Decoder(nn.Module):
 
         face_image = self.up(x_warped)
         return face_image
+
+
+'''
+In this implementation:
+
+The ClassifierFreeGuidance module takes a diffusion model (model) and a list of guidance scales (guidance_scales) as input.
+The forward method computes the unconditional model output (unconditional_output) by passing None as the conditioning information.
+It then computes the conditional model output (conditional_output) by passing the actual conditioning information (cond).
+The Classifier-free Guidance is applied by computing a weighted sum of the difference between the conditional and unconditional outputs, using the provided guidance scales.
+The final output is the sum of the weighted difference and the unconditional output.
+During training or sampling, you can create an instance of the ClassifierFreeGuidance module with the desired guidance scales and use it like a regular diffusion model. The conditioning information (cond) should be provided based on your specific task (e.g., class labels, text embeddings, or other conditioning signals).
+
+Note that this is a general implementation, and you may need to adjust it based on your specific diffusion model architecture and conditioning requirements.
+'''
+class ClassifierFreeGuidance(nn.Module):
+    def __init__(self, model, guidance_scales):
+        super().__init__()
+        self.model = model
+        self.guidance_scales = guidance_scales
+
+    def forward(self, x, t, cond):
+        # Compute the unconditional model output
+        unconditional_output = self.model(x, t, None)
+
+        # Compute the conditional model output
+        conditional_output = self.model(x, t, cond)
+
+        # Apply Classifier-free Guidance
+        guidance_output = torch.zeros_like(unconditional_output)
+        for scale in self.guidance_scales:
+            guidance_output = guidance_output + scale * (conditional_output - unconditional_output)
+
+        return guidance_output + unconditional_output
+# Example usage
+# guidance_scales = [1.0, 0.5]  # Adjust the scales as needed
+# guided_model = ClassifierFreeGuidance(diffusion_model, guidance_scales)
+
+# # During training or sampling
+# x = ...  # Input noise or image
+# t = ...  # Timestep
+# cond = ...  # Conditioning information (e.g., class labels, text embeddings)
+# output = guided_model(x, t, cond)
 ```
 
 
