@@ -112,6 +112,8 @@ params_stage2 = list(diffusion_transformer.parameters())
 optimizer_stage2 = optim.Adam(params_stage2, lr=learning_rate, weight_decay=1e-5)
 scheduler_stage2 = get_cosine_schedule_with_warmup(optimizer_stage2, num_warmup_steps=0, num_training_steps=len(dataloader) * num_epochs_stage2)
 
+guidance_scale = 1.5  # Set the guidance scale for CFG
+
 for epoch in range(num_epochs_stage2):
     for batch in dataloader:
         video_frames, _, audio_features, _ = batch
@@ -129,9 +131,9 @@ for epoch in range(num_epochs_stage2):
             head_distance = fh.head_distance_estimator(frame)  
             emotion_offset = fh.detect_emotions(frame)
             
-            # Diffusion transformer for generating dynamics
+            # Diffusion transformer for generating dynamics with CFG
             generated_dynamics = diffusion_transformer(
-                facial_dynamics, audio_features[:, frame_idx], gaze_direction, head_distance, emotion_offset)
+                facial_dynamics, audio_features[:, frame_idx], gaze_direction, head_distance, emotion_offset, guidance_scale=guidance_scale)
             
             # Generate motion field using the MotionFieldEstimator
             deformation, occlusion = motion_field_estimator(appearance_volume, head_pose, generated_dynamics)
