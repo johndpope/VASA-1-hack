@@ -310,7 +310,7 @@ Here's how the provided code aligns with the VASA paper:
 Overall, the code follows the high-level architecture and components described in the VASA paper, including the face latent space construction, holistic facial dynamics generation with diffusion transformer, and the decoder for generating talking face videos. The specific implementation details and function names may differ, but the overall structure and flow of the code align with the concepts presented in the paper.
 ```
 
-
+```
 **FaceHelper**
 __init__:
 Initializes various components for face detection, mesh processing, emotion recognition, and face analysis using different models and libraries such as MediaPipe and Insightface.
@@ -338,7 +338,7 @@ Draws axes on the image at given angles to visualize the orientation of the head
 Estimates the head pose (roll, pitch, yaw angles) given an image by detecting facial landmarks and calculating the pose.
 **get_head_pose_velocities_at_frame:**
 Calculates the velocities of head pose changes between frames in a video, useful for analyzing motion over time.
-
+```
 
 **REFERENCES - condition signals**
 gaze direction
