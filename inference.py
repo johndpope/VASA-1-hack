@@ -1,3 +1,9 @@
+import torch
+from torch.utils.data import ConcatDataset, DataLoader
+from modules.real3d.facev2v_warp.network import AppearanceFeatureExtractor, CanonicalKeypointDetector, PoseExpressionEstimator, MotionFieldEstimator, Generator
+from Net import FaceEncoder, FaceDecoder, DiffusionTransformer, ClassifierFreeGuidance
+import numpy as np
+
 '''
 This expanded code includes the following components:
 
@@ -94,6 +100,26 @@ for epoch in range(num_epochs):
         optimizer.step()
 
         
+# Load the trained models
+def load_model(model_class, model_path):
+    model = model_class()
+    model.load_state_dict(torch.load(model_path))
+    model.eval()
+    return model
+
+# Specify the paths to the saved models
+encoder_path = "encoder.pth"
+decoder_path = "decoder.pth"
+diffusion_transformer_path = "diffusion_transformer.pth"
+
+# Load the trained models
+face_encoder = load_model(FaceEncoder, encoder_path)
+face_decoder = load_model(FaceDecoder, decoder_path)
+diffusion_transformer = load_model(DiffusionTransformer, diffusion_transformer_path)
+
+# Initialize CFG with the loaded diffusion transformer
+guided_model = ClassifierFreeGuidance(diffusion_transformer, guidance_scales=[0.5, 1.0])
+
 
 # Inference
 def generate_talking_face(face_image, audio_clip):
