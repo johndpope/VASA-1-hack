@@ -1,145 +1,158 @@
-# from Net import *
-# # Define the loss functions
-# def pairwise_transfer_loss(kp_s, kp_d, facial_dynamics_s, facial_dynamics_d):
-#     # Implement the pairwise head pose and facial dynamics transfer loss
-#     # ...
-#     return loss
+from dataset import VideoMAE # TBD - https://github.com/search?q=VideoMAE+voxceleb&type=code
+# voxceleb2 dataset here - https://github.com/johndpope/VASA-1-hack/issues/5#issuecomment-2077007921
 
-# def identity_similarity_loss(face_image1, face_image2):
-#     # Implement the face identity similarity loss for cross-identity motion transfer
-#     # ...
-#     return loss
+import torch
+from torch.utils.data import DataLoader
+from torch import optim, nn
+from transformers import get_cosine_schedule_with_warmup
+from Net import FaceEncoder, FaceDecoder, DiffusionTransformer,DisentanglementLosses
+import torchvision.transforms as transforms
+from FaceHelper import FaceHelper
+from modules.real3d.facev2v_warp.network import AppearanceFeatureExtractor, CanonicalKeypointDetector, PoseExpressionEstimator, MotionFieldEstimator, Generator
 
-# # # Define the dataset and data loader
-# # class FaceVideoDataset(torch.utils.data.Dataset):
-# #     def __init__(self, video_dir, transform=None):
-# #         # Implement the dataset initialization
-# #         # ...
+# Training configuration
+num_epochs_stage1 = 100
+num_epochs_stage2 = 100
+batch_size = 32
+learning_rate = 0.001
 
-# #     def __len__(self):
-# #         # Return the length of the dataset
-# #         # ...
+# Initialize models
+encoder = FaceEncoder()
+decoder = FaceDecoder()
+fh = FaceHelper()
+diffusion_transformer = DiffusionTransformer(num_layers=6, num_heads=8, hidden_size=512)
+motion_field_estimator = MotionFieldEstimator(model_scale='small')
 
-# #     def __getitem__(self, index):
-# #         # Return a sample from the dataset
-# #         # ...
+# Data loading and transformations
+transform = transforms.Compose([
+    transforms.Resize((256, 256)),
+    transforms.ToTensor(),
+])
 
-# # Set up the training parameters
-# num_epochs = 100
-# batch_size = 32
-# learning_rate = 0.001
+dataset = VideoMAE(
+    root='/path/to/voxceleb2/root',
+    setting='/path/to/voxceleb2/train.txt',
+    train=True,
+    image_size=256,
+    audio_conf={
+        'num_mel_bins': 128,
+        'target_length': 1024,
+        'freqm': 0,
+        'timem': 0,
+        'noise': False,
+        'mean': -4.6476,  
+        'std': 4.5699,
+    },
+)
 
-# # Initialize the models and optimizers
-# encoder = FaceEncoder()
-# decoder = FaceDecoder()
-# diffusion_transformer = DiffusionTransformer(num_layers=6, num_heads=8, hidden_size=512)
-# encoder_optimizer = optim.Adam(encoder.parameters(), lr=learning_rate)
-# decoder_optimizer = optim.Adam(decoder.parameters(), lr=learning_rate)
-# diffusion_transformer_optimizer = optim.Adam(diffusion_transformer.parameters(), lr=learning_rate)
+dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+disentanglement_losses = DisentanglementLosses()
+def compute_lip_sync_loss(original_landmarks, generated_landmarks):
+    loss_fn = torch.nn.MSELoss()
+    return loss_fn(original_landmarks, generated_landmarks)
 
-# # Set up the data loader
-# transform = transforms.Compose([
-#     transforms.Resize((256, 256)),
-#     transforms.ToTensor(),
-#     # Add any additional data augmentations or normalizations
-# ])
-# dataset = FaceVideoDataset(video_dir='path/to/face/videos', transform=transform)
-# dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-
-# # Training loop
-# for epoch in range(num_epochs):
-#     for batch in dataloader:
-#         # Forward pass through the face encoder
-#         appearance_volume, identity_code, head_pose, facial_dynamics = encoder(batch['video'])
+# Stage 1: Face Latent Space Construction
+print("Stage 1: Face Latent Space Construction")
+params_stage1 = list(encoder.parameters()) + list(decoder.parameters())
+optimizer_stage1 = optim.Adam(params_stage1, lr=learning_rate, weight_decay=1e-5)
+scheduler_stage1 = get_cosine_schedule_with_warmup(optimizer_stage1, num_warmup_steps=0, num_training_steps=len(dataloader) * num_epochs_stage1)
+for epoch in range(num_epochs_stage1):
+    for batch in dataloader:
+        video_frames, _, _, _ = batch
+        video_frames = video_frames.cuda()
         
-#         # Generate holistic facial dynamics using the diffusion transformer
-#         audio_features = batch['audio']
-#         gaze_direction = batch['gaze']
-#         head_distance = batch['distance']
-#         emotion_offset = batch['emotion']
-#         generated_dynamics = diffusion_transformer(facial_dynamics, audio_features, gaze_direction, head_distance, emotion_offset)
-        
-#         # Reconstruct the face image using the face decoder
-#         reconstructed_face = decoder(appearance_volume, identity_code, head_pose, generated_dynamics)
-        
-#         # Compute losses
-#         transfer_loss = pairwise_transfer_loss(head_pose, generated_dynamics, facial_dynamics, generated_dynamics)
-#         identity_loss = identity_similarity_loss(batch['video'], reconstructed_face)
-        
-#         total_loss = transfer_loss + identity_loss
-        
-#         # Backward pass and optimization
-#         encoder_optimizer.zero_grad()
-#         decoder_optimizer.zero_grad()
-#         diffusion_transformer_optimizer.zero_grad()
-#         total_loss.backward()
-#         encoder_optimizer.step()
-#         decoder_optimizer.step()
-#         diffusion_transformer_optimizer.step()
+        for frame_idx in range(0, video_frames.shape[1], 2):  # Process frames in pairs
+            frame1 = video_frames[:, frame_idx]
+            frame2 = video_frames[:, frame_idx + 1]
+            
+            # Forward pass through encoder and decoder for frame1
+            appearance_volume1, identity_code1, head_pose1, facial_dynamics1 = encoder(frame1)
+            reconstructed_face1 = decoder(appearance_volume1, identity_code1, head_pose1, facial_dynamics1)
+            
+            # Forward pass through encoder and decoder for frame2
+            appearance_volume2, identity_code2, head_pose2, facial_dynamics2 = encoder(frame2)
+            reconstructed_face2 = decoder(appearance_volume2, identity_code2, head_pose2, facial_dynamics2)
+            
+            # Pairwise head pose and facial dynamics transfer
+            pose_transfer_face1 = decoder(appearance_volume1, identity_code1, head_pose2, facial_dynamics1)
+            dyn_transfer_face2 = decoder(appearance_volume2, identity_code2, head_pose2, facial_dynamics1)
+            
+            # Cross-identity pose and facial motion transfer
+            cross_id_transfer_face1 = decoder(appearance_volume1, identity_code2, head_pose1, facial_dynamics1)
+            cross_id_transfer_face2 = decoder(appearance_volume2, identity_code1, head_pose2, facial_dynamics2)
+            
+            # Compute disentanglement losses
+            loss_pairwise_transfer, loss_id_sim = disentanglement_losses(
+                frame1, frame2, reconstructed_face1, reconstructed_face2,
+                pose_transfer_face1, dyn_transfer_face2,
+                cross_id_transfer_face1, cross_id_transfer_face2
+            )
+            
+            # Reconstruction loss
+            reconstruction_loss = nn.L1Loss()(frame1, reconstructed_face1) + nn.L1Loss()(frame2, reconstructed_face2)
+            
+            # Total loss
+            total_loss = reconstruction_loss + loss_pairwise_transfer + loss_id_sim
+            
+            # Optimization step
+            optimizer_stage1.zero_grad()
+            total_loss.backward()
+            optimizer_stage1.step()
+            scheduler_stage1.step()
     
-#     # Print the losses for each epoch
-#     print(f"Epoch [{epoch+1}/{num_epochs}], Transfer Loss: {transfer_loss.item()}, Identity Loss: {identity_loss.item()}")
+    print(f"Stage 1 - Epoch [{epoch+1}/{num_epochs_stage1}], Total Loss: {total_loss.item()}, Reconstruction Loss: {reconstruction_loss.item()}, Pairwise Transfer Loss: {loss_pairwise_transfer.item()}, Identity Similarity Loss: {loss_id_sim.item()}")
+    
+    # Save the encoder and decoder models
+    torch.save(encoder.state_dict(), f"encoder_stage1_epoch{epoch+1}.pth")
+    torch.save(decoder.state_dict(), f"decoder_stage1_epoch{epoch+1}.pth")
 
+# Stage 2: Holistic Facial Dynamics Generation
+print("Stage 2: Holistic Facial Dynamics Generation")
+params_stage2 = list(diffusion_transformer.parameters())
+optimizer_stage2 = optim.Adam(params_stage2, lr=learning_rate, weight_decay=1e-5)
+scheduler_stage2 = get_cosine_schedule_with_warmup(optimizer_stage2, num_warmup_steps=0, num_training_steps=len(dataloader) * num_epochs_stage2)
 
-# # We start by instantiating the necessary modules: FaceEncoder, FaceDecoder, DiffusionTransformer, MotionFieldEstimator, and Generator. You'll need to load the pretrained weights or initialize these modules accordingly.
-# # We prepare the input data, including the video frames, audio features, gaze direction, head distance, and emotion offset. These are just example placeholders, and you'll need to provide the actual input data based on your specific use case.
-# # We pass the video frames through the FaceEncoder to extract the canonical 3D appearance volume, identity code, head pose, and facial dynamics code.
-# # We generate the holistic facial dynamics using the DiffusionTransformer by providing the facial dynamics code, audio features, gaze direction, head distance, and emotion offset.
-# # From the generated dynamics, we extract the source keypoints (kp_s) and driving keypoints (kp_d).
-# # We compute the rotation matrices Rs and Rd for the source and driving keypoints, respectively. In this example, we use identity matrices for simplicity, but you should compute the actual rotation matrices based on the head pose.
-# # We call the MotionFieldEstimator with the appearance volume, source keypoints, driving keypoints, and rotation matrices. It returns the deformation field, occlusion mask, and an additional occlusion mask (if predict_multiref_occ is set to True).
-# # We pass the appearance volume, deformation field, and occlusion mask to the Generator to generate the output image.
-# # We reconstruct the face image using the FaceDecoder by providing the appearance volume, identity code, head pose, and generated dynamics.
-# # Finally, you can compute the necessary losses, perform backpropagation, and save the generated output image and reconstructed face.
-# # Note: Make sure to replace the placeholder input data with your actual data and adjust the dimensions accordingly. Additionally, you'll need to implement the loss functions and the specific training procedure as described in the VASA-1 paper.
-
-# # Remember to refer to the original paper for more details on the architecture, hyperparameters, and training process to ensure accurate implementation.
-# # Instantiate the necessary modules
-# face_encoder = FaceEncoder(use_weight_norm=False)
-# face_decoder = FaceDecoder(use_weight_norm=True)
-# diffusion_transformer = DiffusionTransformer(num_layers=6, num_heads=8, hidden_size=512, dropout=0.1)
-# motion_field_estimator = MotionFieldEstimator(model_scale='standard', input_channels=32, num_keypoints=15, predict_multiref_occ=True, occ2_on_deformed_source=False)
-# generator = Generator(input_channels=32, model_scale='standard', more_res=False)
-
-# # Load the pretrained weights or initialize the modules
-# # ...
-
-# # Prepare the input data
-# video_frames = torch.randn(1, 3, 256, 256)  # Example input video frames
-# audio_features = torch.randn(1, 512)  # Example audio features
-# gaze_direction = torch.randn(1, 2)  # Example gaze direction
-# head_distance = torch.randn(1, 1)  # Example head distance
-# emotion_offset = torch.randn(1, 6)  # Example emotion offset
-
-# # Extract the canonical 3D appearance volume, identity code, head pose, and facial dynamics code
-# appearance_volume, identity_code, head_pose, facial_dynamics = face_encoder(video_frames)
-
-# # Generate holistic facial dynamics using the diffusion transformer
-# generated_dynamics = diffusion_transformer(facial_dynamics, audio_features, gaze_direction, head_distance, emotion_offset)
-
-# # Extract keypoints from the generated dynamics
-# kp_s = generated_dynamics[:, :, :3]  # Source keypoints
-# kp_d = generated_dynamics[:, :, 3:]  # Driving keypoints
-
-# # Compute the rotation matrices
-# Rs = torch.eye(3).unsqueeze(0).repeat(kp_s.shape[0], 1, 1)  # Source rotation matrix
-# Rd = torch.eye(3).unsqueeze(0).repeat(kp_d.shape[0], 1, 1)  # Driving rotation matrix
-
-# # Call the MotionFieldEstimator
-# deformation, occlusion, occlusion_2 = motion_field_estimator(appearance_volume, kp_s, kp_d, Rs, Rd)
-
-# # Generate the output image using the Generator
-# output_image = generator(appearance_volume, deformation, occlusion)
-
-# # Reconstruct the face image using the FaceDecoder
-# reconstructed_face = face_decoder(appearance_volume, identity_code, head_pose, generated_dynamics)
-
-# # Compute losses and perform backpropagation
-# # ...
-
-# # Save the generated output image and reconstructed face
-# # ...
-
-
-
-
+for epoch in range(num_epochs_stage2):
+    for batch in dataloader:
+        video_frames, _, audio_features, _ = batch
+        video_frames = video_frames.cuda()
+        audio_features = audio_features.cuda()
+        
+        for frame_idx in range(video_frames.shape[1]):
+            frame = video_frames[:, frame_idx]
+            
+            # Forward pass through encoder
+            appearance_volume, identity_code, head_pose, facial_dynamics = encoder(frame)
+            
+            # Generate dynamics using structured inputs
+            gaze_direction = fh.estimate_gaze(frame)
+            head_distance = fh.head_distance_estimator(frame)  
+            emotion_offset = fh.detect_emotions(frame)
+            
+            # Diffusion transformer for generating dynamics
+            generated_dynamics = diffusion_transformer(
+                facial_dynamics, audio_features[:, frame_idx], gaze_direction, head_distance, emotion_offset)
+            
+            # Generate motion field using the MotionFieldEstimator
+            deformation, occlusion = motion_field_estimator(appearance_volume, head_pose, generated_dynamics)
+            
+            # Face reconstruction using the modified FaceDecoder
+            reconstructed_face = decoder(appearance_volume, identity_code, head_pose, generated_dynamics)
+            
+            # Get lip landmarks for original and reconstructed face
+            original_lip_landmarks = fh.mediapipe_lip_landmark_detector(frame)
+            generated_lip_landmarks = fh.mediapipe_lip_landmark_detector(reconstructed_face.detach())
+            
+            # Compute lip sync loss
+            lip_sync_loss = compute_lip_sync_loss(original_lip_landmarks, generated_lip_landmarks)
+            
+            # Optimization step
+            optimizer_stage2.zero_grad()
+            lip_sync_loss.backward()
+            optimizer_stage2.step()
+            scheduler_stage2.step()
+        
+        print(f"Stage 2 - Epoch [{epoch+1}/{num_epochs_stage2}], Lip Sync Loss: {lip_sync_loss.item()}")
+    
+    # Save the diffusion transformer model
+    torch.save(diffusion_transformer.state_dict(), f"diffusion_transformer_stage2_epoch{epoch+1}.pth")

@@ -30,7 +30,57 @@ from modules.real3d.facev2v_warp.func_utils import (
     create_deformed_source_image,
 )
 from modules.real3d.facev2v_warp.network import AppearanceFeatureExtractor, CanonicalKeypointDetector, PoseExpressionEstimator, MotionFieldEstimator, Generator
+import torch
+import torch.nn as nn
+from torch.nn.functional import cosine_similarity
+from insightface.app import FaceAnalysis
 
+class DisentanglementLosses(nn.Module):
+    def __init__(self):
+        super(DisentanglementLosses, self).__init__()
+        self.l1_loss = nn.L1Loss()
+        self.cosine_similarity = nn.CosineSimilarity(dim=1)
+        self.face_analysis = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+        self.face_analysis.prepare(ctx_id=0, det_size=(640, 640))
+    
+    def extract_identity_features(self, image):
+        # Assume image is a tensor of shape (batch_size, 3, height, width)
+        image = image.permute(0, 2, 3, 1).cpu().numpy() * 0.5 + 0.5
+        image = (image * 255).astype('uint8')
+        
+        identity_features = []
+        for img in image:
+            faces = self.face_analysis.get(img)
+            if len(faces) > 0:
+                identity_features.append(faces[0].embedding)
+            else:
+                identity_features.append(None)
+        
+        identity_features = [torch.from_numpy(feat).float().cuda() if feat is not None else None for feat in identity_features]
+        return identity_features
+    
+    def forward(self, img1, img2, img1_recon, img2_recon, img1_pose_transfer, img2_dyn_transfer, img1_cross_id_transfer, img2_cross_id_transfer):
+        # Pairwise head pose and facial dynamics transfer loss
+        loss_pairwise_transfer = self.l1_loss(img1_pose_transfer, img2_dyn_transfer)
+        
+        # Face identity similarity loss for cross-identity motion transfer
+        id_feat1 = self.extract_identity_features(img1)
+        id_feat2 = self.extract_identity_features(img2)
+        id_feat1_cross_id_transfer = self.extract_identity_features(img1_cross_id_transfer)
+        id_feat2_cross_id_transfer = self.extract_identity_features(img2_cross_id_transfer)
+        
+        loss_id_sim = torch.tensor(0.0).cuda()
+        count = 0
+        for feat1, feat2, feat1_cross, feat2_cross in zip(id_feat1, id_feat2, id_feat1_cross_id_transfer, id_feat2_cross_id_transfer):
+            if feat1 is not None and feat2 is not None and feat1_cross is not None and feat2_cross is not None:
+                loss_id_sim += 1 - self.cosine_similarity(feat1, feat1_cross) + 1 - self.cosine_similarity(feat2, feat2_cross)
+                count += 1
+        
+        if count > 0:
+            loss_id_sim /= count
+        
+        return loss_pairwise_transfer, loss_id_sim
+    
 
 class Canonical3DVolumeEncoder(nn.Module):
     def __init__(self, model_scale='standard'):
