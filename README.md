@@ -310,35 +310,6 @@ Here's how the provided code aligns with the VASA paper:
 Overall, the code follows the high-level architecture and components described in the VASA paper, including the face latent space construction, holistic facial dynamics generation with diffusion transformer, and the decoder for generating talking face videos. The specific implementation details and function names may differ, but the overall structure and flow of the code align with the concepts presented in the paper.
 ```
 
-```
-**FaceHelper**
-__init__:
-Initializes various components for face detection, mesh processing, emotion recognition, and face analysis using different models and libraries such as MediaPipe and Insightface.
-__del__:
-Handles the cleanup process, specifically closing the MediaPipe face detection and face mesh processes.
-mediapipe_lip_landmark_detector:
-Detects lip landmarks using the MediaPipe Face Mesh solution on provided images.
-**head_distance_estimator:**
-Estimates the distance of a head from the camera based on the size of the bounding box of face landmarks.
-**extract_identity_features:**
-Extracts identity features from an image using the Insightface model, returning features of the first detected face.
-**detect_emotions:**
-Detects emotions on faces in the given image using a specified model and returns a dictionary mapping the face coordinates to the corresponding emotions.
-**estimate_gaze:**
-Estimates the gaze direction in spherical coordinates based on eye landmarks detected in the image.
-**generate_face_region_mask and generate_face_region_mask_np_image:**
-Generates a mask for the face region in an image, optionally adding padding around the detected face.
-**generate_face_region_mask_pil_image:**
-Converts a PIL Image to a NumPy array and calls the generate_face_region_mask_np_image function.
-**calculate_pose:**
-Calculates head pose from detected facial landmarks using Perspective-n-Point pose computation.
-**draw_axis:**
-Draws axes on the image at given angles to visualize the orientation of the head in the image.
-**get_head_pose:**
-Estimates the head pose (roll, pitch, yaw angles) given an image by detecting facial landmarks and calculating the pose.
-**get_head_pose_velocities_at_frame:**
-Calculates the velocities of head pose changes between frames in a video, useful for analyzing motion over time.
-```
 
 **REFERENCES - condition signals**
 gaze direction
