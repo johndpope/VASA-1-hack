@@ -6,7 +6,7 @@ from torch import optim, nn
 from transformers import get_cosine_schedule_with_warmup
 from Net import FaceEncoder, FaceDecoder, DiffusionTransformer
 import torchvision.transforms as transforms
-from FaceHelper import estimate_gaze, detect_emotions,head_distance_estimator,mediapipe_lip_landmark_detector
+from FaceHelper import * #estimate_gaze, detect_emotions,head_distance_estimator,mediapipe_lip_landmark_detector
 from modules.real3d.facev2v_warp.network import AppearanceFeatureExtractor, CanonicalKeypointDetector, PoseExpressionEstimator, MotionFieldEstimator, Generator
 
 # Training configuration
@@ -17,6 +17,7 @@ learning_rate = 0.001
 # Initialize models
 encoder = FaceEncoder()
 decoder = FaceDecoder()
+fh = FaceHelper()
 diffusion_transformer = DiffusionTransformer(num_layers=6, num_heads=8, hidden_size=512)
 motion_field_estimator = MotionFieldEstimator(model_scale='small')
 # Initialize optimizer
@@ -71,9 +72,9 @@ for epoch in range(num_epochs):
             appearance_volume, identity_code, head_pose, facial_dynamics = encoder(frame)
             
             # Generate dynamics using structured inputs
-            gaze_direction = estimate_gaze(frame)  # Updated to use FaceHelper
-            head_distance = head_distance_estimator(frame)  
-            emotion_offset = detect_emotions(frame)  # Updated to use FaceHelper hsemotion_onnx
+            gaze_direction = fh.estimate_gaze(frame)  # Updated to use FaceHelper
+            head_distance = fh.head_distance_estimator(frame)  
+            emotion_offset = fh.detect_emotions(frame)  # Updated to use FaceHelper hsemotion_onnx
             
             # Diffusion transformer for generating dynamics
             generated_dynamics = diffusion_transformer(
@@ -86,8 +87,8 @@ for epoch in range(num_epochs):
             reconstructed_face = decoder(appearance_volume, identity_code, head_pose, generated_dynamics, deformation, occlusion)
             
             # Get lip landmarks for original and reconstructed face
-            original_lip_landmarks = mediapipe_lip_landmark_detector(frame)
-            generated_lip_landmarks = mediapipe_lip_landmark_detector(reconstructed_face.detach())  # Detach for inference
+            original_lip_landmarks = fh.mediapipe_lip_landmark_detector(frame)
+            generated_lip_landmarks = fh.mediapipe_lip_landmark_detector(reconstructed_face.detach())  # Detach for inference
             
             # Compute lip sync loss
             lip_sync_loss = compute_lip_sync_loss(original_lip_landmarks, generated_lip_landmarks)
