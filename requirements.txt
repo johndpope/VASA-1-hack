@@ -1,3 +1,5 @@
 hsemotion_onnx
 insightface
-
+transformers
+decord
+torchaudio

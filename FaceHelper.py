@@ -41,6 +41,50 @@ class FaceHelper:
         self.face_detection.close()
         self.face_mesh.close()
 
+    def mediapipe_lip_landmark_detector(self, image):
+        """
+        Detects lip landmarks using the MediaPipe Face Mesh solution.
+        Arguments:
+            image (np.array): The input image to process.
+        Returns:
+            list: Coordinates of lip landmarks if lips are detected, otherwise None.
+        """
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        results = self.face_mesh.process(image_rgb)
+        if results.multi_face_landmarks:
+            lip_landmarks = []
+            for face_landmarks in results.multi_face_landmarks:
+                # Lip landmarks according to MediaPipe numbering (0-11 are associated with the lips)
+                lips_indices = [i for i in range(0, 12)]
+                for index in lips_indices:
+                    landmark = face_landmarks.landmark[index]
+                    x = landmark.x * image.shape[1]
+                    y = landmark.y * image.shape[0]
+                    lip_landmarks.append((x, y))
+            return lip_landmarks
+        return None
+    
+    def head_distance_estimator(self, image):
+        """
+        Estimates head distance based on the size of the bounding box of face landmarks.
+        Arguments:
+            image (np.array): The image to process.
+        Returns:
+            distance_estimate (float): Estimated distance or None if no face is detected.
+        """
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        results = self.face_detection.process(image_rgb)
+        if results.detections:
+            for detection in results.detections:
+                bboxC = detection.location_data.relative_bounding_box
+                ih, iw, _ = image.shape
+                w = bboxC.width * iw
+                h = bboxC.height * ih
+                face_size = np.sqrt(w * h)
+                distance_estimate = 1 / face_size if face_size != 0 else None
+                return distance_estimate
+        return None
+    
     def extract_identity_features(self,img):
         # Convert the input image to RGB format
         img_rgb = img.permute(1, 2, 0).cpu().numpy() * 0.5 + 0.5
