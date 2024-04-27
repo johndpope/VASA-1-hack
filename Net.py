@@ -29,6 +29,7 @@ from modules.real3d.facev2v_warp.func_utils import (
     create_sparse_motions,
     create_deformed_source_image,
 )
+from modules.real3d.facev2v_warp.network import AppearanceFeatureExtractor, CanonicalKeypointDetector, PoseExpressionEstimator, MotionFieldEstimator, Generator
 
 
 class Canonical3DVolumeEncoder(nn.Module):
@@ -177,60 +178,29 @@ class ExpressiveDisentangledFaceLatentSpace(nn.Module):
 class FaceEncoder(nn.Module):
     def __init__(self, use_weight_norm=False):
         super(FaceEncoder, self).__init__()
-        # Define encoder architecture for extracting latent variables
-        # - Canonical 3D appearance volume (V_can)
-        # - Identity code (z_id)
-        # - 3D head pose (z_pose)
-        # - Facial dynamics code (z_dyn)
-        # ...
-    
-        self.in_conv = ConvBlock2D("CNA", 3, 64, 7, 1, 3, use_weight_norm)
-        self.down = nn.Sequential(
-            DownBlock2D(64, 128, use_weight_norm),
-            DownBlock2D(128, 256, use_weight_norm),
-            DownBlock2D(256, 512, use_weight_norm)
-        )
-        self.mid_conv = nn.Conv2d(512, 32 * 16, 1, 1, 0)
-        self.res = nn.Sequential(
-            ResBlock3D(32, use_weight_norm),
-            ResBlock3D(32, use_weight_norm),
-            ResBlock3D(32, use_weight_norm),
-            ResBlock3D(32, use_weight_norm),
-            ResBlock3D(32, use_weight_norm),
-            ResBlock3D(32, use_weight_norm)
-        )
-        self.identity_encoder = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, 128)
-        )
-        self.head_pose_encoder = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, 6)
-        )
-        self.facial_dynamics_encoder = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, 64)
-        )
-
+        self.appearance_extractor = AppearanceFeatureExtractor()
+        self.canonical_kp_detector = CanonicalKeypointDetector()
+        self.pose_exp_estimator = PoseExpressionEstimator()
+        
     def forward(self, x):
-        x = self.in_conv(x)
-        x = self.down(x)
-        x = self.mid_conv(x)
-        N, _, H, W = x.shape
-        x = x.view(N, 32, 16, H, W)
-        appearance_volume = self.res(x)
+        appearance_volume = self.appearance_extractor(x)
+        canonical_keypoints = self.canonical_kp_detector(x)
+        yaw, pitch, roll, t, delta = self.pose_exp_estimator(x)
+        head_pose = torch.cat([yaw.unsqueeze(1), pitch.unsqueeze(1), roll.unsqueeze(1), t], dim=1)
+        facial_dynamics = delta
+        return appearance_volume, canonical_keypoints, head_pose, facial_dynamics
         
-        # Extract identity code, head pose, and facial dynamics code
-        x = x.view(N, -1)
-        identity_code = self.identity_encoder(x)
-        head_pose = self.head_pose_encoder(x)
-        facial_dynamics = self.facial_dynamics_encoder(x)
-        
-        return appearance_volume, identity_code, head_pose, facial_dynamics
 
+
+# class FaceDecoder(nn.Module):
+#     def __init__(self):
+#         super(FaceDecoder, self).__init__()
+#         self.generator = Generator()
+        
+#     def forward(self, appearance_volume, deformation, occlusion):
+#         reconstructed_face = self.generator(appearance_volume, deformation, occlusion)
+#         return reconstructed_face
+    
 class FaceDecoder(nn.Module):
     def __init__(self, use_weight_norm=True):
         super(FaceDecoder, self).__init__()
@@ -251,6 +221,7 @@ class FaceDecoder(nn.Module):
             nn.Upsample(scale_factor=2),
             ConvBlock2D("CNA", 64, 3, 7, 1, 3, use_weight_norm, activation_type="tanh")
         )
+        self.motion_field_estimator = MotionFieldEstimator(model_scale='small')
 
     def forward(self, appearance_volume, identity_code, head_pose, facial_dynamics):
         N, _, D, H, W = appearance_volume.shape
@@ -258,10 +229,14 @@ class FaceDecoder(nn.Module):
         x = self.in_conv(x)
         x = self.res(x)
         
-        # Apply 3D warping based on head pose and facial dynamics
-        # ...
+        # Generate motion field using the MotionFieldEstimator
+        deformation, occlusion = self.motion_field_estimator(appearance_volume, head_pose, facial_dynamics)
         
-        face_image = self.up(x)
+        # Apply deformation to the feature volume
+        deformed_x = F.grid_sample(x, deformation, align_corners=True, padding_mode='border')
+        
+        # Apply occlusion-aware decoding
+        face_image = self.up(deformed_x * occlusion)
         return face_image
 
 # Define the diffusion transformer for holistic facial dynamics generation

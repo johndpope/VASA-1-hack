@@ -7,6 +7,7 @@ from transformers import get_cosine_schedule_with_warmup
 from Net import FaceEncoder, FaceDecoder, DiffusionTransformer
 import torchvision.transforms as transforms
 from FaceHelper import estimate_gaze, detect_emotions,head_distance_estimator,mediapipe_lip_landmark_detector
+from modules.real3d.facev2v_warp.network import AppearanceFeatureExtractor, CanonicalKeypointDetector, PoseExpressionEstimator, MotionFieldEstimator, Generator
 
 # Training configuration
 num_epochs = 100
@@ -17,7 +18,7 @@ learning_rate = 0.001
 encoder = FaceEncoder()
 decoder = FaceDecoder()
 diffusion_transformer = DiffusionTransformer(num_layers=6, num_heads=8, hidden_size=512)
-
+motion_field_estimator = MotionFieldEstimator(model_scale='small')
 # Initialize optimizer
 params = list(encoder.parameters()) + list(decoder.parameters()) + list(diffusion_transformer.parameters())
 optimizer = optim.Adam(params, lr=learning_rate, weight_decay=1e-5)  # Added weight decay for regularization
@@ -56,14 +57,13 @@ def compute_lip_sync_loss(original_landmarks, generated_landmarks):
     loss_fn = torch.nn.MSELoss()
     return loss_fn(original_landmarks, generated_landmarks)
 
-# Example usage in the training loop
 for epoch in range(num_epochs):
     for batch in dataloader:
         video_frames, _, audio_features, _ = batch
         video_frames = video_frames.cuda()
         audio_features = audio_features.cuda()
         
-        # Process frames
+         # Process frames
         for frame_idx in range(video_frames.shape[1]):
             frame = video_frames[:, frame_idx]
             
@@ -79,8 +79,11 @@ for epoch in range(num_epochs):
             generated_dynamics = diffusion_transformer(
                 facial_dynamics, audio_features[:, frame_idx], gaze_direction, head_distance, emotion_offset)
             
-            # Face reconstruction
-            reconstructed_face = decoder(appearance_volume, identity_code, head_pose, generated_dynamics)
+            # Generate motion field using the MotionFieldEstimator
+            deformation, occlusion = motion_field_estimator(appearance_volume, head_pose, generated_dynamics)
+            
+            # Face reconstruction using the modified FaceDecoder
+            reconstructed_face = decoder(appearance_volume, identity_code, head_pose, generated_dynamics, deformation, occlusion)
             
             # Get lip landmarks for original and reconstructed face
             original_lip_landmarks = mediapipe_lip_landmark_detector(frame)
