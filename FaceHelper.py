@@ -4,7 +4,6 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import transforms
 import numpy as np
-from camera import Camera
 from math import cos, sin
 import cv2
 import mediapipe as mp
@@ -268,13 +267,16 @@ class FaceHelper:
             face2d = np.array(face2d, dtype=np.float64)
             face3d = np.array(face3d, dtype=np.float64)
 
-            camera = Camera()
-            success, rot_vec, trans_vec = cv2.solvePnP(face3d,
-                                                        face2d,
-                                                        camera.internal_matrix,
-                                                        camera.distortion_matrix,
-                                                        flags=cv2.SOLVEPNP_ITERATIVE)
-            
+            cam_matrix = np.array([
+                [focal_length, 0, image_width / 2],
+                [0, focal_length, image_height / 2],
+                [0, 0, 1]
+            ])
+
+            dist_coeffs = np.zeros((4, 1))  # Assuming no lens distortion
+
+            # SolvePnP as before
+            success, rot_vec, trans_vec = cv2.solvePnP(face3d, face2d, cam_matrix, dist_coeffs)
             rmat = cv2.Rodrigues(rot_vec)[0]
 
             P = np.hstack((rmat, np.zeros((3, 1), dtype=np.float64)))

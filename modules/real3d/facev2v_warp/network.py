@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from torch import nn
-from utils.commons.hparams import hparams
+from .utils.commons.hparams import hparams
 
 from modules.real3d.facev2v_warp.layers import ConvBlock2D, DownBlock2D, DownBlock3D, UpBlock2D, UpBlock3D, ResBlock2D, ResBlock3D, ResBottleneck
 from modules.real3d.facev2v_warp.func_utils import (
