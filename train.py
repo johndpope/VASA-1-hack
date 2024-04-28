@@ -1,4 +1,4 @@
-from dataset import VideoMAE # TBD - https://github.com/search?q=VideoMAE+voxceleb&type=code
+# from datasets import VideoMAE # TBD - https://github.com/search?q=VideoMAE+voxceleb&type=code
 # voxceleb2 dataset here - https://github.com/johndpope/VASA-1-hack/issues/5#issuecomment-2077007921
 
 import torch
@@ -9,6 +9,7 @@ from Net import FaceEncoder, FaceDecoder, DiffusionTransformer,DisentanglementLo
 import torchvision.transforms as transforms
 from FaceHelper import FaceHelper
 from modules.real3d.facev2v_warp.network import AppearanceFeatureExtractor, CanonicalKeypointDetector, PoseExpressionEstimator, MotionFieldEstimator, Generator
+from mae import VideoMAE
 
 # Training configuration
 num_epochs_stage1 = 100
