@@ -119,7 +119,7 @@ class FaceEncoder(nn.Module):
 #     def forward(self, appearance_volume, deformation, occlusion):
 #         reconstructed_face = self.generator(appearance_volume, deformation, occlusion)
 #         return reconstructed_face
-    class FaceDecoder(nn.Module):
+class FaceDecoder(nn.Module):
     def __init__(self, use_weight_norm=True):
         super(FaceDecoder, self).__init__()
         self.in_conv = ConvBlock2D("CNA", 32 * 16, 256, 3, 1, 1, use_weight_norm, nonlinearity_type="leakyrelu")
