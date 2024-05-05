@@ -1,0 +1,2485 @@
+Free-HeadGAN: Neural Talking Head Synthesis with Explicit Gaze Control
+Michail Christos Doukas, Evangelos Ververas, Viktoriia Sharmanska, and Stefanos Zafeiriou, 
+The authors are with the Department of Computing, Imperial College London, London SW7 2AZ, U.K. E-mail: {michail-christos.doukas16, e.ververas16, sharmanska.v, s.zafeiriou}@imperial.ac.uk. M. C. Doukas, E. Ververas and S. Zafeiriou are also with Huawei Technologies London, U.K. V. Sharmanska is also with the Department of Computing, University of Sussex, London SW7 2AZ, U.K.
+Abstract
+We present Free-HeadGAN, a person-generic neural talking head synthesis system. We show that modeling faces with sparse 3D facial landmarks are sufficient for achieving state-of-the-art generative performance, without relying on strong statistical priors of the face, such as 3D Morphable Models. Apart from 3D pose and facial expressions, our method is capable of fully transferring the eye gaze, from a driving actor to a source identity. Our complete pipeline consists of three components: a canonical 3D key-point estimator that regresses 3D pose and expression-related deformations, a gaze estimation network and a generator that is built upon the architecture of HeadGAN. We further experiment with an extension of our generator to accommodate few-shot learning using an attention mechanism, in case more than one source images are available. Compared to the latest models for reenactment and motion transfer, our system achieves higher photo-realism combined with superior identity preservation, while offering explicit gaze control.
+
+Index Terms: reenactment, neural talking head synthesis, canonical 3D key-points, gaze estimation, pose editing, gaze editing
+1Introduction
+Generating photo-realistic images or videos of human faces has lately become a very popular computer vision topic, with a remarkable amount of research and discussion revolving around it. Aside from considerable advancements accomplished by the computer graphics community [1, 2, 3], deep neural networks and more specifically Generative Adversarial Neural Networks (GANs) [4] have made a significant contribution towards this direction. For instance, StyleGAN2 [5] has shown incredible results on unconditional faces synthesis.
+
+Neural talking head synthesis, here also referred to as reenactment, is the task where a reference (source) image or video is manipulated or re-animated to match with the facial expressions and head poses performed by a driving (target) actor. Reenactment systems have numerous applications in social media, teleconference, image and video editing, as well as virtual reality and games. They can be further used for facial video compression and reconstruction [6].
+
+Refer to caption
+Figure 1:Given a source and a target image, first we compute a flow field to warp the source image, according to the target pose, expression and gaze. Then, a rendering network generates the final image based on the warped image (and warped visual features). We condition synthesis on sketches of 3D key-points. We preserve identities, by adapting the target key-points to the facial shape of the source, using a canonical 3D key-point estimator. We control gaze in the generated faces by color coding the interior of the eye cavities in sketches with the gaze direction angles.
+Learning-based reenactment methods are classified either as person-specific or person-generic. On the one hand, person-specific approaches [7, 8, 9] are based on identity-specific neural networks. Despite the impressive visual results, these networks require re-training using a long video of the particular source actor we wish to reenact. On the other hand, person-generic systems [10, 11, 12, 13, 14, 15, 16, 6, 17] have the ability to adapt to the source identity during inference, given only a few reference images of the subject, even a single one. Although very promising, in general such models generate samples of lesser quality, when compared with their identity-specific counterparts.
+
+Another important aspect of talking head synthesis relates to face modeling. A common face representation is 2D sparse landmarks (68 points), as used in [10, 11, 12]. More recent methods, such as [13] and [18] use 3D landmarks instead. Among other benefits, the selection of a three-dimensional representation enables free-view control, as we can manually intervene in the head pose to be generated. Other widely used facial representations are dense 3D facial meshes combined with statistical priors of the face, such as 3D Morphable Models (3DMMs) [19, 20, 21, 22], which are adopted for reenacting heads in [7, 8, 17]. This modeling enables to disentangle shape (identity) from expression-related deformations, and therefore helps to tackle the identity preservation problem in cross-identity motion transfer, which is neither straightforward nor trivial with sparse landmarks. In a quite different line of work, Siarohin el al. [15, 16] attempt to solve the most general problem of motion transfer for arbitrary objects, proposing a model-free method based on unsupervised 2D key-point detection. Following up, Wang el al. [6] present a model that focuses on faces and learns to detect canonical 3D key-points without supervision, as a way to disengage identity from expression and pose.
+
+Given that they deal with motion transfer, most recent systems are flow-based [13, 18, 14, 15, 16, 6, 17], meaning that they make use of optical flow to warp the source image(s) or visual features into the target facial pose and expression, as a first step prior to image synthesis. The aforementioned model-free approaches [15, 16, 6] are able to learn important key-points for motion, as they approximate optical flow in areas near these points. For example, [16] and [6] use a first order approximation of motion. On the contrary, methods such as [14, 13, 17] learn a dense optical flow in all spatial locations, without resorting to approximations.
+
+In this work, we do not use a first order approximation of motion, but rather use a neural network that learns to predict dense optical flow, similarly to HeadGAN [17]. We propose Free-HeadGAN, a system based on the architecture of [17] which is ”free” from statistical priors of faces like 3DMMs. In order to overcome the identity preservation obstacles in reenactment and inspired from [6], we propose a network for regressing 3D key-points along with head pose and expression deformations. Different from [6] our method does not predict canonical key-points directly. Instead, we compute them based on the estimated 3D points after removing pose and expression. Moreover, we supervise our key-point detector with pseudo ground-truth 3D facial landmarks extracted with RetinaFace [23]. In this way, we ensure that key-points are always placed on meaningful parts of the face, avoiding cases where no key-points are assigned to important regions such as the eyes and mouth, as it commonly happens with unsupervised models [15, 16, 6]. Lastly, we propose a gaze estimation network that makes explicit eye gaze transfer possible. The contributions of our work can be summarised in the following:
+
+• We release HeadGAN [17] from its 3DMM priors, using sparse 3D landmarks. We achieve comparable and in many cases improved results, as suggested by our qualitative and quantitative experiments.
+• We design a module that performs disentanglement of identity, expression and pose through the computation of canonical 3D key-points.
+• We propose a network that regresses 3D meshes of the eyes. We use these meshes to obtain the direction of gaze, which is then used to condition image synthesis. To the best of our knowledge, we deliver the first person-generic reenactment system with explicit gaze control.
+• We show a N-shot extension of our framework.
+2Background
+TABLE I:Checklist of key features and design choices of state-of-the-art head synthesis systems that support full head animation and reenactment
+Method	Person	N-shot	Face	Free-view	Identity	Gaze	Warping	Sequential
+generic	modeling	control	preservation	control	flow
+DVP [7] 	✗	-	3DMM	✓	✓	✓	✗	✗
+Head2Head [8] 	✗	-	3DMM	✓	✓	✓	✗	✓
+Zakharov et al. [10] 	✓	✓	2D landmarks	✗	✗	✗	✗	✗
+Few-shot vid2vid [11] 	✓	✓	2D landmarks	✗	✗	✗	✗	✓
+Zakharov et al. [12] 	✓	✗	2D landmarks	✗	✗	✗	✗	✗
+MarioNETte [13] 	✓	✓	3D landmarks	✗	✓	✗	learned	✗
+Warp-Guided GANs [18] 	✓	✗	3D landmarks	✓	✗	✗	crafted	✗
+X2Face [14] 	✓	✓	embeddings	✗	✗	implicit	learned	✗
+Monkey-Net [15] 	✓	✗	2D key-points	✗	✗	implicit	approx.	✗
+FOMM [16] 	✓	✗	2D key-points	✗	✗	implicit	approx.	✗
+face-vid2vid [6] 	✓	✗	3D key-points	✓	✓	implicit	approx.	✗
+HeadGAN [17] 	✓	✗	3DMM	✓	✓	✗	learned	✗
+Free-HeadGAN	✓	✓	3D landmarks	✓	✓	✓	learned	✗
+2.1GANs and Image Synthesis
+Since their introduction, GANs [4] have been extensively used both for unconditional and conditional [24] data synthesis. They have been successfully applied to various computer vision tasks, such as image-to-image [25, 26, 27, 28], video-to-video [29, 11] and audio-to-image translation [30, 31]. In this work, we focus on the problem of conditional image synthesis and propose a GAN-based talking head synthesis system that achieves high photo-realism and improved identity preservation compared to current state-of-the-art approaches.
+
+2.2Talking Head Synthesis
+2.2.1Face Reenactment
+Most of the early attempts in human face synthesis focus on the task of face reenactment, which aims to transfer the facial expressions performed in a driving video to the face of another person. The majority of face reenactment methods, i.e. Face2Face [2], manipulate the source footage, by re-writing only the facial region of the source video stream, while keeping the remaining parts (e.g. hair, body, background) unchanged [32, 33]. A first exception to those systems has been Bringing Portraits to Life [34], which is able to slightly animate the entire head with the application of 2D warping on the source image.
+
+2.2.2Full Head Reenactment
+Deep Video Portraits (DVP) [7] is allegedly one of the earliest learning-based reenactment methods, as it utilises an image translation network that manages to fully transfer the head motions of the driver to the source, including eye gaze. In a more recent work, Head2Head [8, 9] adopts a sequential video-based translation network that performs full head reenactment while taking into consideration the temporal dynamics of talking faces. Both aforementioned methods rely on 3D information of faces and strong statistical priors, such as 3DMMs [19, 20, 21, 22]. Despite their remarkable results, these person-specific models are optimised on long videos of the source identity, being incapable of adapting and generalising to new identities without re-training.
+
+On the other hand, person-generic methods are able to adapt their generative process on the appearance of new source identities, even if they are not introduced to them during training. Numerous identity-agnostic talking head synthesis systems are 2D-based [10, 12, 11, 13], as they condition image synthesis on 2D facial landmarks. Zakharov et al. [10] introduce a few-shot framework that is composed of an identity embedding network and a generator with AdaIN [35] layers for receiving the embedding vectors. They propose a training strategy consisting of a meta-learning stage which involves optimisation on a multi-person dataset, followed by fine-tuning on an few images of a new and unseen face. The video-based system [11], namely few-shot vid2vid, employs a sequential generator equipped with dynamic SPADE [28] layers, enabling to adapt synthesis on the appearance of new reference images. Zakharov et al. [12] propose a SPADE-based system that achieves real-time one-shot talking head synthesis on mobile phones, focusing on the foreground as it disregards background information. In contrast to 2D face modeling, 3D-based approaches such as Warp-Guided GANs [18] and MarioNETte [13] depend on 3D landmarks to represent faces. As opposed to the preceding works, MarioNETte [13] applies a PCA-based disentanglement on identity and expression with 3D facial landmarks, in order to alleviate the identity mismatch problem during reenactment. HeadGAN [17] is among the first one-shot talking head synthesis systems that relies on identity and expression 3DMMs for the disentanglement of expression and identity parameters in dense 3D shapes. HeadGAN yields image samples of unprecedented quality in reenactment, while maintaining the identity of the source and exhibiting free-view control.
+
+There is a considerable amount of research involving person-generic model-free head synthesis [14, 15, 16, 6]. X2Face [14] is one of the pioneering approaches on the problem, which does not rely on any 2D or 3D priors. It is able to animate faces driven by multiple modalities, such as images, audio, and pose codes. In order to address motion transfer for arbitrary objects, Siarohin et al. [15] propose Monkey-Net, a framework composed of a 2D key-point detector which is jointly trained with a motion prediction and motion transfer network. Key-points are learned directly from data in an unsupervised way, while being assigned to meaningful regions of the objects, in order to enable reliable optical flow approximation for motion transfer. In the follow-up work, First Order Motion Model for Image Animation (FOMM) [16] learns a first order approximation of optical flow, based again on learnable 2D key-points, yielding very promising results. However, during cross-identity motion transfer it uses relative key-points to preserve the identity of the source, which makes the assumption that the face in the first driving frame is in the same pose with the source face. In their recent work, Wang et al. [6] apply first order motion approximation on 3D facial key-points. This enables their so called face-vid2vid model to perform free-view reenactment, as they can manipulate pose by rotating the 3D points. They further devise two networks, one for predicting canonical key-points and one that estimates pose and expression deformations, which enable to tackle the identity preservation problem. Unlike Wang et al. [6], we do not regress canonical key-points directly, but rather obtain them by removing the estimated head pose and expression deformations from regular 3D key-points, all of which are predicted from images using a unified network.
+
+In Table I we present a detailed summary of the key features and design choices of state-of-the-art systems for reenactment and motion transfer, as discussed in this section.
+
+2.3Gaze Estimation Systems
+Gaze estimation is the problem of predicting the direction that someone is looking at, based on input images or videos. Ever since [36] employed CNNs to tackle the task, appearance-based methods have been the default approach. Multiple methods attempt to recover geometric features of eyes and use them to infer gaze [37, 38, 39]. Others focus on adapting generic gaze estimation networks to specific test domains, aiming to produce person-specific models [40, 41, 42] or adapting to unseen image domains [43, 44]. Recently, significant progress has been made to reduce the labeled data required to build effective gaze estimation systems, by proposing to learn gaze in unsupervised or weakly-supervised settings [45, 46, 47]. In this work, we aim to recover gaze implicitly from the dense geometry of eyes, and employ it for driving our image generator.
+
+3Methodology
+Our proposed talking head synthesis system consists of three discrete networks: a network for inferring canonical key-points (Sec. 3.1), a gaze estimation network (Sec. 3.2) and an image generator (Sec. 3.3). Each component of Free-HeadGAN is trained separately on its individual task.
+
+3.1Computation of Canonical Key-points
+Given a portrait image, our goal here is to extract a set of key-points in a canonical space, which are independent both from the head pose and facial expressions of the subject. This representation merely depends on the geometry of the input face and therefore encodes only identity-related information. To that end, we propose a neural network 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ that learns to a) regress sparse 3D facial key-points 
+p
+=
+{
+p
+𝑘
+}
+𝑘
+=
+1
+,
+…
+,
+𝐾
+, with 
+p
+𝑘
+∈
+[
+−
+1
+,
+1
+]
+3
+, b) estimate head pose, as an affine transformation 
+𝒯
+=
+{
+𝑠
+,
+R
+,
+t
+}
+ and c) compute a 3D vector 
+d
+𝑘
+ for each key-point 
+𝑘
+, that models the non-linearity of deformations caused by facial expressions. The architecture of 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ follows that of the head pose and expression deformation estimator in [6], with the addition of one more affine output layer that predicts 
+𝐾
+ points p.
+
+Canonical key-points are obtained by first estimating the 3D points and then subtracting the expression deformations and removing translation, rotation, and scale:
+
+p
+𝑘
+𝑐
+​
+𝑎
+​
+𝑛
+=
+1
+𝑠
+​
+R
+−
+1
+​
+(
+p
+𝑘
+−
+d
+𝑘
+−
+t
+)
+,
+𝑘
+=
+1
+,
+…
+,
+𝐾
+.
+(1)
+We further define the inverse operation, which brings canonical points back to the original 3D space, by adding scale, rotation, translation as well as the expression deformation:
+
+p
+𝑘
+=
+𝑠
+​
+R
+p
+𝑘
+𝑐
+​
+𝑎
+​
+𝑛
++
+t
++
+d
+𝑘
+,
+𝑘
+=
+1
+,
+…
+,
+𝐾
+.
+(2)
+We observed that predicting the expression-related deformations 
+d
+𝑘
+ in the original 3D space, as in [6], yields significantly better results than placing the deformation on the canonical space.
+
+In order to train network 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+, we are given a source and a target image pair 
+(
+x
+𝑠
+,
+x
+𝑡
+)
+, which depict the same person performing a different and random pose and expression. We use 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ to regress 3D key-points as well as pose transformations and expression perturbations from both images: 
+p
+𝑠
+,
+𝒯
+𝑠
+,
+d
+𝑠
+ and 
+p
+𝑡
+,
+𝒯
+𝑡
+,
+d
+𝑡
+. After that, we apply Eq. 1 to get the corresponding canonical points 
+p
+𝑠
+,
+𝑐
+​
+𝑎
+​
+𝑛
+ and 
+p
+𝑡
+,
+𝑐
+​
+𝑎
+​
+𝑛
+, as shown in Fig. 2. Then, based on Eq. 2 we aim to recover the target key-points, by transforming the canonical representation of the source using the target pose and expression, and vice versa, which results in points 
+p
+𝑠
+,
+𝑟
+​
+𝑒
+​
+𝑐
+ and 
+p
+𝑡
+,
+𝑟
+​
+𝑒
+​
+𝑐
+. Having access to image pairs of the same identity is crucial for guiding 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ to focus on expression and pose discrepancies between images and thus not include identity-related information in deformation vectors 
+d
+𝑠
+ and 
+d
+𝑡
+.
+
+We optimise 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ in a supervised manner, using 
+𝐾
+=
+68
+ 3D facial landmarks estimated by a pre-trained RetinaFace [23] model as pseudo-ground truth data. That is, given the ground source and target landmarks 
+(
+l
+𝑠
+,
+l
+𝑡
+)
+, we minimise the distance
+
+ℒ
+𝑝
+=
+‖
+p
+𝑠
+−
+l
+𝑠
+‖
+2
+2
++
+‖
+p
+𝑡
+−
+l
+𝑡
+‖
+2
+2
+,
+(3)
+which forces 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ to predict accurate facial key-points. We noticed that learning to estimate the 3D key-points helps 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ to predict the perturbations caused due to expressions more efficiently. We further minimise the key-point reconstruction distance
+
+ℒ
+𝑟
+​
+𝑒
+​
+𝑐
+=
+‖
+p
+𝑠
+,
+𝑟
+​
+𝑒
+​
+𝑐
+−
+l
+𝑠
+‖
+|
+2
+2
++
+‖
+p
+𝑡
+,
+𝑟
+​
+𝑒
+​
+𝑐
+−
+l
+𝑡
+‖
+2
+2
+,
+(4)
+which forces 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ to learn the affine pose transformations as well as the deformation vectors, in an effort to recover the source and target key-points. In order to assist 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ distinguish between rigid and non-rigid transformations, we penalise the error between the predicted target head rotation 
+R
+𝑡
+ and the ground truth 
+R
+∗
+𝑡
+ (here expressed as Euler angles). Furthermore, a regularisation term on the expression deformation vectors ensures that key-point perturbations due to expressions are kept small, as we want to avoid encoding identity-specific details in these vectors:
+
+ℒ
+𝑅
+=
+‖
+R
+𝑡
+−
+R
+∗
+𝑡
+‖
+2
+2
+,
+ℒ
+𝑑
+=
+‖
+d
+𝑠
+‖
+2
+2
++
+‖
+d
+𝑡
+‖
+2
+2
+.
+(5)
+Combining the loss terms defined above, the overall objective function for network 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ is given as
+
+ℒ
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+=
+𝜆
+𝑝
+​
+ℒ
+𝑝
++
+𝜆
+𝑟
+​
+𝑒
+​
+𝑐
+​
+ℒ
+𝑟
+​
+𝑒
+​
+𝑐
++
+𝜆
+𝑅
+​
+ℒ
+𝑅
++
+𝜆
+𝑑
+,
+ℒ
+𝑑
+(6)
+with the hyper-parameters set to the following values: 
+𝜆
+𝑝
+=
+𝜆
+𝑟
+​
+𝑒
+​
+𝑐
+=
+200
+,
+𝜆
+𝑅
+=
+2
+ and 
+𝜆
+𝑑
+=
+5
+.
+
+Refer to caption
+Figure 2:Canonical key-points computation pipeline during training. Using a pair of frames from the same person, we train 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ to disentangle identity from expression and pose. We project the regressed 3D key-points into a canonical space and then try to reconstruct them, after swapping the canonical points of the source and target images.
+3.2Gaze estimation
+Refer to caption
+Figure 3:Outline of our gaze estimation method. Having defined an eyeball template, 
+𝐓
+𝑒
+​
+𝑦
+​
+𝑒
+ we generate pseudo-ground truth meshes for available gaze estimation dataset and employ them to train our 3D eye mesh regression network 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+, which given input images produces 3D coordinates adhering to 
+𝐓
+𝑒
+​
+𝑦
+​
+𝑒
+.
+The gaze estimation network 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+ learns to predict the 3D orientation of eyes from an input image of each eye. Particularly, our aim is to recover spherical coordinates 
+(
+𝜃
+,
+𝜙
+)
+ that represent gaze direction and employ them for training as well as driving our reenactment system. To that end, we adopt a mesh regression approach to gaze estimation, meaning that we train 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+ to predict 3D meshes of eyes instead of 3D gaze vectors or angles. This approach is based on the fact that estimating dense geometry instead of few pose parameters, has recently been shown to benefit face and body pose estimation systems [48, 49, 50].
+
+To train 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+, we first define a 3D eye mesh template, 
+𝐓
+𝑒
+​
+𝑦
+​
+𝑒
+, consisting of 
+𝑁
+𝑣
+𝑒
+​
+𝑦
+​
+𝑒
+=
+481
+ vertices and 
+𝑁
+𝑡
+𝑒
+​
+𝑦
+​
+𝑒
+=
+928
+ triangles, as shown in Fig. 3, and enforce our model’s predictions to adhere to this template so that exact correspondence exists. As common gaze estimation datasets provide gaze annotations as 3D vectors, angles or points on screen [36, 51, 52], we create training and validation data compatible with our mesh regression approach by automatically fitting 
+𝐓
+𝑒
+​
+𝑦
+​
+𝑒
+ on available images, based on 2D sparse landmarks around the iris contour and the available gaze labels. To obtain the iris landmarks we employ the network from [37], but any similar model could have been used.
+
+We adopt a simple architecture for 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+, consisting of a ResNet-34 backbone and a fully connected layer mapping eye image features to 
+𝐯
+, which is a vector of 
+3
+×
+𝑁
+𝑣
+𝑒
+​
+𝑦
+​
+𝑒
+ real values representing 
+𝑁
+𝑣
+𝑒
+​
+𝑦
+​
+𝑒
+ 3D eye coordinates on a normalized space. We optimize 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+ in a supervised fashion, based on the 3D eye meshes we fitted on available gaze estimation datasets. To recover 3D points from images, we minimise the distance
+
+ℒ
+𝑣
+=
+‖
+𝐯
+−
+𝐯
+∗
+‖
+1
+,
+(7)
+between predicted coordinates 
+𝐯
+ and the corresponding pseudo-ground truth ones 
+𝐯
+∗
+. Additionally, to maintain feasible eye shape, we minimize the distance
+
+ℒ
+𝑒
+=
+‖
+𝐞
+−
+𝐞
+∗
+‖
+1
+,
+(8)
+between the 
+3
+​
+𝑁
+𝑡
+𝑒
+​
+𝑦
+​
+𝑒
+ edge lengths 
+𝐞
+ computed from 
+𝐯
+ and those, 
+𝐞
+∗
+, computed from 
+𝐯
+∗
+. We define edge length to be the euclidean distance between vertices of the the same triangle according to 
+𝐓
+𝑒
+​
+𝑦
+​
+𝑒
+. Lastly, to boost gaze estimation accuracy we employ the gaze loss
+
+ℒ
+𝑔
+=
+(
+180
+/
+𝜋
+)
+​
+arccos
+⁡
+(
+𝐠
+𝑇
+​
+𝐠
+∗
+)
+,
+(9)
+where 
+𝐠
+ and 
+𝐠
+∗
+ are normalized 3D gaze vectors, calculated by the centers of the eye and iris, from the predicted and ground truth meshes respectively. Combining the above losses, the overall objective function for 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+ is given as
+
+ℒ
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+=
+𝜆
+𝑣
+​
+ℒ
+𝑣
++
+𝜆
+𝑒
+​
+ℒ
+𝑒
++
+𝜆
+𝑔
+​
+ℒ
+𝑔
+,
+(10)
+with the hyper-parameters set to the following values 
+𝜆
+𝑣
+=
+𝜆
+𝑒
+=
+0.1
+ and 
+𝜆
+𝑔
+=
+1
+. As in our reenactment system we code gaze using angles 
+(
+𝜃
+,
+𝜙
+)
+, we calculate them from predicted eye meshes using the gaze vector 
+𝐠
+=
+(
+𝑔
+𝑥
+,
+𝑔
+𝑦
+,
+𝑔
+𝑧
+)
+ as
+
+𝜃
+=
+arctan
+⁡
+𝑔
+𝑥
+2
++
+𝑔
+𝑦
+2
+/
+𝑔
+𝑧
+,
+𝜙
+=
+arctan
+⁡
+𝑔
+𝑦
+/
+𝑔
+𝑧
+.
+(11)
+3.3Image Synthesis
+Refer to caption
+Figure 4:Illustration of optical flows and weights predicted by the flow network, in case four source images are provided instead of one (4-shot). The warped image is calculated from the source images, flows and weighs with the application of Eq. 12.
+Refer to caption
+Figure 5:Overview of the image generation component. The generator is made up from two modules: a flow network and a rendering network. The flow network computes the optical flow for warping the reference image and features, according to the target sketch. The rendering network uses this visual information, in order to translate the target sketch into a photo-realistic image of the source. The two networks are trained jointly in an adversarial manner, with the assistance of image discriminators.
+We perform talking head synthesis with the assistance of an image-to-image translation network 
+𝐺
+, which is based on the generator of HeadGAN [17], without AdaIN layers[35] as we do not processing audio features. Given a source image 
+x
+𝑠
+ and a target frame 
+x
+𝑡
+, along with the corresponding facial key-points 
+p
+𝑠
+, 
+p
+𝑡
+ and gaze angles 
+g
+𝑠
+, 
+g
+𝑡
+, we draw a source and a target image sketch. Gaze angles are color coded in the sketches, within the areas defined by key-points that belong to the eyes. The two sketches, together with the source image, serve as inputs to network 
+𝐺
+, which learns to generate a photo-realistic image 
+x
+~
+ of the source, in the target head pose and facial expression. In more detail, as in [17] network G is comprised of two modules: a flow network and a rendering network.
+
+First, the flow network extracts visual feature maps from the source image and its corresponding key-point sketch in multiple spatial resolutions: 
+{
+h
+(
+𝑖
+)
+}
+𝑖
+=
+1
+,
+…
+,
+𝐿
+, 
+𝐿
+=
+3
+. Then, the target sketch is injected into the network through SPADE [28] layers, as modulation input, and guides the prediction of the optical flow w, which warps the source image to the target expression and pose. In addition, we perform warping on each feature map, in order to align them spatially with the desired expression and pose. In practice, we utilise the backward optical flow warping operator from FlowNet 2.0 [53, 54].
+
+The rendering network passes the target sketch through an encoder and combines the extracted feature map with the warped features 
+{
+h
+¯
+(
+𝑖
+)
+=
+w
+​
+(
+h
+(
+𝑖
+)
+)
+}
+𝑖
+=
+1
+,
+…
+,
+𝐿
+ and warped image 
+x
+¯
+=
+w
+​
+(
+x
+𝑠
+)
+, which enter the network through SPADE [28] layers, as modulation inputs. Up-sampling is performed with PixelShuffle [55] layers. The final output is a photo-realistic image 
+x
+~
+ of the source identity, imitating the facial expressions and head pose shown in the target image.
+
+N-shot extension. We further extend our method to enable few-shot learning, in cases where more than one source images are available. For that, we propose an optional attention mechanism, with the addition of one more output layer to the flow network, which now learns to compute a set of 2D weights 
+m
+∈
+ℝ
+𝐻
+×
+𝑊
+, alongside the optical flow field. Given 
+𝑀
+ source frames 
+{
+x
+𝑗
+𝑠
+}
+𝑗
+=
+1
+,
+…
+,
+𝑀
+, we pass each one through the flow network, gaining flows 
+{
+w
+𝑗
+}
+𝑗
+=
+1
+,
+…
+,
+𝑀
+ and weights 
+{
+m
+𝑗
+}
+𝑗
+=
+1
+,
+…
+,
+𝑀
+. Next, the warped image is computed with the assistance of a Softmax function
+
+x
+¯
+=
+∑
+𝑗
+𝑀
+exp
+⁡
+(
+m
+𝑗
+)
+​
+w
+𝑗
+​
+(
+x
+𝑗
+𝑠
+)
+∑
+𝑗
+𝑀
+exp
+⁡
+(
+m
+𝑗
+)
+(12)
+and the warped features are given as
+
+h
+¯
+(
+𝑖
+)
+=
+∑
+𝑗
+𝑀
+exp
+⁡
+(
+m
+𝑗
+)
+​
+w
+𝑗
+​
+(
+h
+𝑗
+(
+𝑖
+)
+)
+∑
+𝑗
+𝑀
+exp
+⁡
+(
+m
+𝑗
+)
+,
+𝑖
+=
+1
+,
+…
+,
+𝐿
+.
+(13)
+Fig. 4 shows a visual example of flows and weights.
+
+Refer to caption
+Figure 6:End-to-end pipeline of Free-HeadGAN during inference, for the task of reenactment. We adapt the target key-points to the facial shape (identity) of the source.
+Training. The optical flow and rendering networks that make 
+𝐺
+ are trained jointly, on the task of self-reenactment (reconstruction). To that end, we sample the source image from the frames of the target video to obtain image pairs that belong to the same person and scene. In this case, the generated image 
+x
+~
+ should match the target frame 
+x
+𝑡
+ that serves as ground truth. We optimise the generator G by minimising the distance between feature maps extracted from multiple layers of a pre-trained VGG network [56]:
+
+ℒ
+𝐺
+𝑉
+​
+𝐺
+​
+𝐺
+=
+∑
+𝑙
+‖
+𝑉
+​
+𝐺
+​
+𝐺
+𝑙
+​
+(
+x
+~
+)
+−
+𝑉
+​
+𝐺
+​
+𝐺
+𝑙
+​
+(
+x
+𝑡
+)
+‖
+1
+.
+(14)
+Additionally, we apply a VGG loss on the warped image, in order to force the flow network to learn a correct flow from the source image to the desired head pose, which gives the loss term 
+ℒ
+𝐹
+𝑉
+​
+𝐺
+​
+𝐺
+. We further improve the photo-realism of synthetic images by placing an adversarial loss term 
+ℒ
+𝐺
+𝑎
+​
+𝑑
+​
+𝑣
+ on 
+x
+~
+ and more specifically a Hinge GAN loss [57]. Similarly with [8] and [17], we employ two critics, a general image discriminator 
+𝐷
+𝐼
+ and a dedicated discriminator 
+𝐷
+𝑀
+ for the mouth area, which are optimised alongside G. Finally, we use these discriminators to compute visual features from both real (target) and synthetic images and compute a feature matching loss 
+ℒ
+𝐺
+𝑓
+​
+𝑚
+ [58] that is known to be effective at increasing the photo-realism of synthetic samples. Summing up, the overall objective function for G is given by:
+
+ℒ
+𝐺
+=
+ℒ
+𝐺
+𝑎
+​
+𝑑
+​
+𝑣
++
+𝜆
+𝑉
+​
+𝐺
+​
+𝐺
+​
+(
+ℒ
+𝐺
+𝑉
+​
+𝐺
+​
+𝐺
++
+ℒ
+𝐹
+𝑉
+​
+𝐺
+​
+𝐺
+)
++
+𝜆
+𝐹
+​
+𝑀
+​
+ℒ
+𝐺
+𝐹
+​
+𝑀
+(15)
+where 
+𝜆
+𝑉
+​
+𝐺
+​
+𝐺
+=
+𝜆
+𝐹
+​
+𝑀
+=
+10
+. Both discriminators are optimised under their corresponding adversarial loss terms and have a similar architecture with the one proposed in [28]. Please refer to Fig. 5 for an illustration of our model.
+
+3.4Free-HeadGAN inference
+During inference, in the task of reenactment the source and target images belong to different identities. In order to adapt the target key-points to the facial shape of the source identity, we use 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ to regress 3D key-points, head pose and expression deformations from 
+x
+𝑠
+, and then evaluate Eq. 1 to obtain the canonical key-points 
+p
+𝑠
+,
+𝑐
+​
+𝑎
+​
+𝑛
+. At the same time, we estimate the target pose and expression 
+𝒯
+𝑡
+,
+d
+𝑡
+ from 
+x
+𝑡
+. The adapted target key-points 
+p
+𝑠
+,
+𝑎
+​
+𝑑
+​
+𝑎
+​
+𝑝
+​
+𝑡
+ are obtained with the application of Eq. 2, which transforms the source canonical key-points using the estimated target pose and expression. In this way, we remove the target identity-related information from key-points and inject the source one, which helps to overcome to problem of identity mismatching. In parallel, we estimate eye gaze from both images with 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+ network and finally draw the sketches that serve as input to generator 
+𝐺
+, which hallucinates the output image 
+x
+~
+. For a visual inspection of our proposed pipeline in reenactment please refer to Fig 6.
+
+4Experiments
+4.1Dataset and Training
+We train each component of Free-HeadGAN independently. Both the network that infers the canonical key-points 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ and image synthesis network 
+𝐺
+ (with discriminators 
+𝐷
+𝐼
+, 
+𝐷
+𝑀
+) are optimised on VoxCeleb [59] video dataset, which contains over one hundred thousand clips and more than one thousand identities, at a 256 
+×
+ 256 resolution. We keep the original train and test split. As a pre-processing step, we prepare three-dimensional 68 landmarks for each frame in the training split with RetinaFace model [23], which serve as pseudo-ground truth annotations. We note that RetinaFace is pre-trained on WIDERFACE dataset [60]. For the extraction of ground truth head rotation angles, we employ a least-squares solver to determine the transformation between facial landmarks and a fixed landmark template that represents the frontal-neutral pose. The aforementioned annotations are used only for training Free-HeadGAN. During inference, our method requires only the pair of a source and a target image.
+
+For the optimisation of network 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+, we use ADAM solver [61] with 
+𝛽
+1
+=
+0.5
+, 
+𝛽
+2
+=
+0.999
+ and learning rate 
+𝜂
+=
+0.0002
+. We use the same optimiser and hyper-parameters for training 
+𝐺
+ and its adversaries 
+𝐷
+𝐼
+, 
+𝐷
+𝑀
+. All models are optimised for 5 epochs on the entire VoxCeleb database. We extend Free-HeadGAN to accommodate N-shot learning, by first training in one-shot without predicting attention weights. Then, we add the weight layer and fine-tune the GAN for one more epoch using two source images (2-shot), while freezing the parameters of the flow network.
+
+We optimize network 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+ on a combination of recent gaze estimation datasets, aiming to include variation from multiple image domains. Particularly we employ ETH-XGaze [62] which includes large variation in gaze and face pose and consists of 756 thousand frames from 80 subject, Gaze360 [51] which is captured both indoors and outdoors and includes 127 thousand training sequences from 365 subjects and MPIIGaze [36] which provides over 213 thousand frames of 15 subjects, captured with laptop cameras. We employ the default training and validation sets from Gaze360 and MPIIGaze, while we perform a manual split for ETH-XGaze as gaze labels for its test data are not available. Lastly, we use ADAM optimizer [61] with 
+𝛽
+1
+=
+0.9
+, 
+𝛽
+2
+=
+0.999
+ and learning rate 
+𝜂
+=
+0.0001
+.
+
+Refer to caption
+(a)Self-reenactment example
+Refer to caption
+(b)Reenactment example
+Figure 7:We evaluate the generative performance of Free-HeadGAN on the tasks of (a) same-identity reconstruction (self-reenactment) and (b) cross-identity motion transfer (reenactment).
+TABLE II:Numerical comparison with state-of-the-art methods on the tasks of self-reenactment (same-identity reconstruction) and reenactment (cross-identity motion transfer) for VoxCeleb [59] test set.
+Self-reenactment	Reenactment
+Method	L1 
+↓
+PSNR 
+↑
+LPIPS 
+↓
+FID 
+↓
+FVD 
+↓
+CSIM 
+↑
+FID 
+↓
+CSIM 
+↑
+ARD 
+↓
+AU-H 
+↓
+AGD 
+↓
+X2Face [14] 	13.49	20.69	0.260	130.2	697	0.600	122.1	0.520	4.39	0.346	21.4
+fs-vid2vid [11] 	17.15	18.52	0.197	62.8	471	0.542	-	-	-	-	-
+Bi-layer* [12] 	12.18	20.19	0.152	92.2	394	0.590	172.8	0.563	1.01	0.296	16.6
+FOMM-abs [16] 	12.34	20.93	0.153	64.9	338	0.754	100.7	0.587	1.46	0.298	13.8
+FOMM-rel [16] 	-	-	-	-	-	-	63.7	0.765	12.53	0.400	21.2
+HeadGAN [17] 	11.32	21.46	0.112	36.1	254	0.807	58.0	0.688	1.35	0.326	16.8
+Free-HeadGAN	9.96	22.16	0.100	35.4	248	0.810	53.9	0.789	1.26	0.351	13.3
+4.2Evaluation Metrics
+We evaluate the reconstruction capabilities of our method quantitatively, using L1 distance (L1), Peak signal-to-noise ratio (PSNR) and Learned Perceptual Image Patch Similarity (LPIPS) [63]. All three metrics measure the distance, between the synthesised and ground truth target frames. L1 distance is computed across RGB channels that are in the range [0, 255]. PSNR is the ratio between the maximum possible power of a signal and the power of noise that affects its correctness. It is defined as 
+20
+⋅
+log
+10
+⁡
+(
+𝑀𝐴𝑋
+𝐼
+)
+−
+10
+⋅
+log
+10
+⁡
+𝑀𝑆𝐸
+, where 
+𝑀𝐴𝑋
+𝐼
+=
+255
+ and 
+𝑀𝑆𝐸
+ denotes the mean squared distance. LPIPS [63] is another widely used metric to measure the fidelity of reconstruction, which uses a pre-trained AlexNet model for the extraction of a feature maps. The similarity score between two images is calculated as the distance of their visual features.
+
+Furthermore, we assess the photo-realism of generated images with Fréchet Inception Distance (FID) [64, 65] and Fréchet Video Distance (FVD) [66], as we handle video data and therefore crucial to measure the performance of models considering the temporal coherence among frames.
+
+The identity preservation in the synthesised data is calculated with Cosine Similarity (CSIM) between embedding vectors from the target and corresponding generated images. All embeddings are computed with the assistance of ArcFace [67]. For reenactment, where we have no access to ground truth data, we extract the embedding from the source image(s) and compare it with the embeddings coming from generated data. This leads to lower CSIM values, as the source and target pose do not usually match and ArcFace’s output is slightly affected by poses.
+
+We use Action Units Hamming distance (AU-H) to measure expression transferability of models. OpenFace [68] with [69], runs on target and synthetic images for the detection of Action Units (AU). OpenFace recognises whether or not a set of AUs is present in a facial image, with the prediction of an AU boolean vector. We measure the Hamming distance between boolean vectors that are extracted from the corresponding target and synthetic data.
+
+We measure the correctness of pose transfer with Average Rotation Distance (ARD), which is the 
+𝑙
+​
+1
+-distance of Euler angles that correspond to head pose, between the target and generated frames in degrees.
+
+Finally, we evaluate gaze transfer with Average Gaze Distance (AGD). Given the gaze vector 
+g
+𝑡
+ regressed with 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+ module from the target frame, and the vector 
+g
+~
+ extracted from the corresponding synthetic image, we compute the angle between vectors as 
+(
+180
+/
+𝜋
+)
+​
+arccos
+⁡
+(
+g
+~
+⊤
+​
+g
+𝑡
+)
+ and average across frames to obtain AGD in degrees.
+
+4.3Comparison with State-of-the-Art
+We compare our one-shot Free-HeadGAN system both numerically and visually with state-of-the-art methods under two setups: a) same-identity reconstruction or self-reenactment, where the source and target identities coincide, and b) cross-identity motion transfer or reenactment, in which source and target identities are different. Please refer to Fig. 7 for a visualisation of the two tasks. More specifically, we compare our approach with X2Face [14], few-shot vid2vid (fs-vid2vid) [11], Bi-layer Neural Avatars (Bi-layer) [12], First Order Motion Model (FOMM) [16] and HeadGAN [17]. Please note that we tested two variations of FOMM, one with absolute (FOMM-abs) and one with relative key-point coordinates (FOMM-rel), which is the default setting for cross-identity motion transfer. For X2Face [14], FOMM [16] and HeadGAN [17], we use the models provided by their authors, all trained on VoxCeleb [59] dataset. For Bi-layer method, we used the network parameters provided by its authors, trained on VoxCeleb2 dataset* [70]. We trained fs-vid2vid [11] using the official open source implementation, as pre-trained models are available. Given that the source code for MarioNETte [13], Warp-guided GANs [18] and face-vid2vid [6] is not publicly available, we were not able to measure Free-HeadGAN’s performance against these systems.
+
+Refer to caption
+source
+target
+X2Face
+[14]
+fs-vid2vid
+[11]
+Bi-layer
+[12]
+FOMM
+[16]
+HeadGAN
+[17]
+Free-HeadGAN
+Figure 8:Visual comparison of our method with baselines on the task of self-reenactment.
+Refer to caption
+source
+target
+X2Face
+[14]
+Bi-layer
+[12]
+FOMM-abs
+[16]
+FOMM-rel
+[16]
+HeadGAN
+[17]
+Free-HeadGAN
+Figure 9:Qualitative evaluation of our method against baselines on the task of reenactment.
+In Table II, we present a quantitative comparison of the proposed Free-HeadGAN with the aforementioned baselines. For self-reenactment, we reconstruct the entire test set of VoxCeleb, while we have chosen 15 pairs of reference images and driving videos for reenactment, the same as in [17]. As suggested by the results, our method creates superior samples, with respect to image quality and reconstruction fidelity, both in same-identity reconstruction and cross-identity motion transfer. In addition, our approach preserves the identity of the source better in all experiments. For expression transferability, we observe that Free-HeadGAN is left slightly behind from [12] and [17]. This is attributed to the following two reasons: First, the ground truth 3D facial landmarks annotations have been extracted with RetinaFace [23], which is not a model focusing exclusively on landmark prediction and occasionally misses fine details. Second, during reenactment the adaptation of target key-points to the source identity with network 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ relies on the regression of expression deformations, which also comes with small inaccuracies. This is compromise we make, as we have chosen 3D facial key-points instead of 2D and we pay particular attention to identity preservation of the source with network 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+.
+
+In Fig. 8 and Fig. 9 we show examples from a visual comparison of Free-HeadGAN with the baselines, on the task of reconstruction and reenactment respectively. As can be seen, the qualitative results confirm our numerical analysis. More specifically, our proposed system outperforms all previous state-of-the-art methods in terms of reconstruction fidelity, photo-realism, identity conservation and gaze transfer. The generated samples of HeadGAN [17] are comparable to ours in terms of visual quality. Nonetheless, our method appears to be significantly more reliable on eye gaze transfer than HeadGAN, thanks to our gaze prediction network and explicit gaze conditioning for image synthesis. We urge the reader to refer to our supplementary video for a better inspection of our synthesised data.
+
+4.4Ablation Study
+TABLE III:Evaluation of Free-HeadGAN N-shot extension, in case more than one source images are available.
+N-shot	L1 
+↓
+PSNR 
+↑
+LPIPS 
+↓
+FID 
+↓
+FVD 
+↓
+CSIM 
+↑
+1-shot	9.96	22.16	0.100	35.4	248	0.810
+2-shot	9.02	22.99	0.088	32.7	224	0.834
+4-shot	7.90	24.01	0.077	30.7	207	0.857
+8-shot	7.20	24.96	0.068	29.9	196	0.868
+Refer to caption
+1-shot
+2-shot
+4-shot
+8-shot
+Figure 10:Synthetic examples when using one, two, four or eight source images in the N-shot scenario. The results improve in terms of image quality as we get access to more source inputs.
+TABLE IV:Ablation study results on the significance of Free-HeadGAN components on the task of reenactment.
+Variation	FID 
+↓
+CSIM 
+↑
+AU-H 
+↓
+AGD 
+↓
+Free-HeadGAN	53.9	0.789	0.351	13.3
+Free-HeadGAN w/o 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ 	66.6	0.640	0.304	-
+Free-HeadGAN w/o 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+ 	-	-	-	17.7
+We follow a few-shot learning approach to adjust our system in a setting where multiple source images are available. Although our flow network extended to predict weights has been trained in a 2-shot scenario, during inference it can operate for any number of source frames 
+𝑁
+. We examine the setting where 
+𝑁
+=
+2
+,
+4
+ or 8 source frames are given and report the results on the task of reconstruction of VoxCeleb test set, in Table III. As suggested by all evaluation metrics, the generative performance of our system improves when the number of available images increases. In Fig. 10 we present visual examples that show the effect of the number of source images 
+𝑁
+ in the quality of synthesised data. The results clearly demonstrate the beneficial effect of N-shot learning.
+
+Next, we examine the significance of the two front-end components of our talking head synthesis system and more specifically networks 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ and 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+.
+
+We focus on cross-identity motion transfer, as the canonical key-point estimator 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ is particularly developed to tackle the identity mismatches in reenactment, since it allows to adapt the target key-points to the facial shape of the source. In order to evaluate its contribution, we develop a variation of Free-HeadGAN by replacing 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ network with RetinaFace [23]. That is, we utilise directly the 3D key-points regressed by RetinaFace in order to draw the sketches that serve as conditional input to the generator, without adapting them to the identity of the source. The quantitative results displayed in Table IV indicate that removing 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+ has a critical effect on CSIM metric that measures identity preservation. Moreover, the overall quality of samples degrades as FID score increases. On the contrary, expression transfer slightly improves, indicating that the canonical space key-points actually retain a small amount of expression information.
+
+In order to validate the importance of explicit eye gaze conditioning in image synthesis, we test a second variation of our system, where we do not encode any gaze information into key-point sketches. To that end, we train a Free-HeadGAN generator that learns to transfer gaze direction relying solely on the facial key-points that belong to the eyes, as we do not color code the gaze angles inside the eye cavities. We evaluate the performance of this variation with AGD metric, which measures the average angular distance between the driving and generated gaze on the test set for reenactment. We display AGD results in Table IV, which confirms the significance of gaze estimator 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+ quantitatively. Additionally, in Fig. 11 we illustrate some cases where the model variation without explicit gaze input fails to capture the target eyes direction.
+
+Refer to caption
+target
+Free-HeadGAN
+Free-HeadGAN
+w/o
+Figure 11:Examples where explicit gaze control is essential for successful gaze transfer, as 68 facial landmarks appear to be insufficient.
+Lastly, we quantitatively verify the benefit of implicitly inferring gaze from predicted dense 3D eye coordinates instead of learning to directly predict few gaze parameters. To that end, we train two versions of 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+ one predicting dense eye meshes as described in Sec. 3.2, 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+𝑚
+​
+𝑒
+​
+𝑠
+​
+ℎ
+​
+𝑒
+​
+𝑠
+, and one predicting 3D gaze vectors, 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+𝑣
+​
+𝑒
+​
+𝑐
+​
+𝑡
+​
+𝑜
+​
+𝑟
+​
+𝑠
+. We perform within-dataset, cross-subject experiments on the recent gaze estimation datasets MPIIGaze [36], Columbia [71], UTMV [72], and Gaze360 [51]. We compute the AGD and present results in Table V, which confirms our initial suggestion.
+
+TABLE V:Comparison between the 3D mesh and 3D vector regression approaches to gaze estimation, on within-dataset, cross-subject experiments.
+AGD 
+↓
+Variation	MPIIGaze	Columbia	UTMV	Gaze360
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+𝑣
+​
+𝑒
+​
+𝑐
+​
+𝑡
+​
+𝑜
+​
+𝑟
+​
+𝑠
+4.83	3.84	5.62	12.7
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+𝑚
+​
+𝑒
+​
+𝑠
+​
+ℎ
+​
+𝑒
+​
+𝑠
+3.35	1.12	4.11	10.4
+4.5Pose and Gaze Manipulation
+Apart from cross-identity motion transfer (reenactment) and facial video compression and reconstruction (self-reenactment) we can use Free-HeadGAN to edit portrait images. That is, we can set the driving head pose manually, simply by rotating the 3D source key-points. Moreover, we can change the gazing direction of the reference subject, by editing the estimated gaze angles before feeding them to the generator through the target sketch. In Fig. 12 we demonstrate the ability of our proposed system to edit the head pose and eye gaze of any given reference image. Here, the left column shows the original reference image, while the next three columns depict synthesised images by our method, after editing pose and gaze. Our image editing task makes Free-HeadGAN a powerful tool for data augmentation, as our method can replace the naive and widely-used affine transformations on image data with complex non-linear transformations of human heads. Moreover, considering that our system provides strong identity preservation, such image augmentation can benefit various computer vision tasks related to face recognition.
+
+Refer to caption
+Figure 12:The 3D key-point modeling of faces enables our system to perform free-view synthesis, as we are able to manually edit the head pose of a given reference image. Furthermore, we have explicit gaze control over the subject.
+5Limitations
+Although our method performs one-shot reenactment with unparalleled image quality and photo-realism while proving explicit gaze control and strong identity preservation properties, it does not come without any limitations. Considering that high quality data are crucial for deep learning algorithms, the same applies to our system. In particular, Free-HeadGAN’s performance in extreme target poses, such as large head rotations, highly depends on the quite limited pose distribution in open source databases such as [59]. Moreover, as suggested by our qualitative analysis and FID scores [64], there exists a significant performance gap between self-reenactment and reenactment. Aside from the adaptation of key-points in cross-identity motion transfer, this gap is caused by the random selection of source and target image pairs during training and could be improved by a more sophisticated learning strategy, where progressively tougher pairs are chosen. Last but not least, even though our method does not rely on 3DMMs [19, 20, 21, 22], the supervision of our networks depends on the quality of 3D landmark pseudo annotations with RetinaFace [23] and labeled gaze data, which come with their own inaccuracies.
+
+6Conclusion
+We presented Free-HeadGAN, a model that extends HeadGAN [17] while releasing it from 3DMM fitting and 3D face rendering requirements in pre-processing. Instead, we condition synthesis on 3D landmarks which also support free-view synthesis. We designed a network that takes care of the identity mismatches in cross-identity motion transfer. Finally, we proposed a gaze estimation module and demonstrated the advantage on utilising gaze signals for precisely controlling of eye movements of the generated samples.
+
+Architecture Details
+Network 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+. This network receives as input an image and regresses: a) an affine transformation (scale, rotation, translation), b) the expression-related deformation and c) the 68 3D key-points. The architecture of this module is inspired from that of the head pose estimator and expression deformation estimator in [6]. We present it in Table VI. Please note that for rotation we do not predict Euler degrees directly but compute the Softmax over 
+2
+​
+𝑛
+𝑑
+​
+𝑒
+​
+𝑔
++
+1
+ values, corresponding to degrees in the interval 
+{
+−
+𝑛
+𝑑
+​
+𝑒
+​
+𝑔
+.
+.
+𝑛
+𝑑
+​
+𝑒
+​
+𝑔
+}
+, with 
+𝑛
+𝑑
+​
+𝑒
+​
+𝑔
+=
+60
+. The ResBottleneck block architecture is depicted in Fig 13.
+
+Block		Output size
+Input image		
+(
+256
+,
+256
+,
+3
+)
+7
+×
+7
+ conv-32 
+↓
+2
+ 	Batch Norm.	ReLU	
+(
+128
+,
+128
+,
+32
+)
+ResBottleneck 
+↓
+2
+(
+64
+,
+64
+,
+128
+)
+ResBottleneck 
+(
+×
+3
+)
+(
+64
+,
+64
+,
+128
+)
+ResBottleneck 
+↓
+2
+(
+32
+,
+32
+,
+256
+)
+ResBottleneck 
+(
+×
+3
+)
+(
+32
+,
+32
+,
+256
+)
+ResBottleneck 
+↓
+2
+(
+16
+,
+16
+,
+512
+)
+ResBottleneck 
+(
+×
+5
+)
+(
+16
+,
+16
+,
+512
+)
+ResBottleneck 
+↓
+2
+(
+8
+,
+8
+,
+1024
+)
+ResBottleneck 
+(
+×
+2
+)
+(
+8
+,
+8
+,
+1024
+)
+8
+×
+8
+ AvgPool2d		
+1024
+Affine 
+1024
+×
+121
+Softmax	
+1
+ (pitch)
+Affine 
+1024
+×
+121
+Softmax	
+1
+ (yaw)
+Affine 
+1024
+×
+121
+Softmax	
+1
+ (roll)
+Affine 
+1024
+×
+3
+3
+ (translation)
+Affine 
+1024
+×
+1
+1
+ (scale)
+Affine 
+1024
+×
+68
+⋅
+3
+68
+⋅
+3
+ (expr.)
+Affine 
+1024
+×
+68
+⋅
+3
+68
+⋅
+3
+ (points)
+TABLE VI:Architecture of network 
+𝐸
+𝑐
+​
+𝑎
+​
+𝑛
+.
+Refer to caption
+Figure 13:(a) The ResBottleneck. (b) The ResBottleneck that downsamples the input tensor (stride
+=
+2
+) does not have a residual component. Here, C denotes the number of output channels.
+Network 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+.v The gaze estimation network 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+ takes as input a square image cropped around the eye, resized to resolution 
+128
+×
+128
+ and predicts 
+𝑁
+𝑣
+𝑒
+​
+𝑦
+​
+𝑒
+ vertices that correspond to the mesh of the eye. Table VII shows the architecture of 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+, which is based on ResNet-34.
+
+Block		Output size
+Input eye image		
+(
+128
+,
+128
+,
+3
+)
+ResNet-34		
+(
+4
+,
+4
+,
+512
+)
+3
+×
+3
+ conv-512 
+↓
+2
+ 		
+(
+2
+,
+2
+,
+512
+)
+Affine 
+2048
+×
+𝑁
+𝑣
+𝑒
+​
+𝑦
+​
+𝑒
+⋅
+3
+ 		
+𝑁
+𝑣
+𝑒
+​
+𝑦
+​
+𝑒
+⋅
+3
+ (eye mesh)
+TABLE VII:Architecture of network 
+𝐸
+𝑔
+​
+𝑎
+​
+𝑧
+​
+𝑒
+. Here 
+𝑁
+𝑣
+𝑒
+​
+𝑦
+​
+𝑒
+=
+481
+.
+Flow network 
+𝐹
+ (Table VIII). The flow network consists of an encoder and a decoder, as presented originally in HeadGAN [17]. The encoder has three convolutional layers, each one with instance normalization (IN) units [73] and ReLU activation layers. The last convolutions are performed with a stride of 2, for down-sampling the input. The SPADE blocks [28] of the decoder are used as modulation inputs for injecting the driving (target) sketch 
+x
+𝑡
+. Similarly with SPADE [28], we down-sample 
+x
+𝑡
+ to match the spatial size of each SPADE block. As in [17], we employ two Pixel Shuffle [55] layers for up-sampling. The dense optical flow is computed with a 
+7
+×
+7
+ convolutional layer. For the extension of our model to perform N-shot learning, we define an extra output layer, that estimates the weights.
+
+Block		Output size
+Input		
+(
+256
+,
+256
+,
+6
+)
+7
+×
+7
+ conv-32	Inst. Norm.	ReLU	
+(
+256
+,
+256
+,
+32
+)
+3
+×
+3
+ conv-128	Inst. Norm.	ReLU	
+(
+128
+,
+128
+,
+128
+)
+3
+×
+3
+ conv-512	Inst. Norm.	ReLU	
+(
+64
+,
+64
+,
+512
+)
+SPADE Block		
+(
+64
+,
+64
+,
+512
+)
+SPADE Block		
+(
+64
+,
+64
+,
+512
+)
+SPADE Block		
+(
+64
+,
+64
+,
+512
+)
+Pixel Shuffle		
+(
+128
+,
+128
+,
+128
+)
+SPADE Block		
+(
+128
+,
+128
+,
+128
+)
+Pixel Shuffle		
+(
+256
+,
+256
+,
+32
+)
+7
+×
+7
+ conv-2		
+(
+256
+,
+256
+,
+2
+)
+7
+×
+7
+ conv-1	
+tanh
+(
+256
+,
+256
+,
+1
+)
+TABLE VIII:Architecture of flow network 
+𝐹
+.
+Rendering network 
+𝑅
+ (Table IX). The rendering network has an architecture similar with the one of HeadGAN [17]. The encoder has exactly the same layers with the encoder of the rendering network in [17]. On the contrary, the decoder is equipped only with SPADE blocks, which are used to condition synthesis on the warped visual feature maps and the warped source image. Here, we do not include AdaIN layers [35], as we do not condition image synthesis on audio features. Pixel Shuffle layers [55] are used for up-sampling. After the final decoding block, a convolutional layer hallucinates of the generated image.
+
+Block		Output size
+Input		
+(
+256
+,
+256
+,
+9
+)
+7
+×
+7
+ conv-32	Inst. Norm.	ReLU	
+(
+256
+,
+256
+,
+32
+)
+3
+×
+3
+ conv-128	Inst. Norm.	ReLU	
+(
+128
+,
+128
+,
+128
+)
+3
+×
+3
+ conv-512	Inst. Norm.	ReLU	
+(
+64
+,
+64
+,
+512
+)
+SPADE Block		
+(
+64
+,
+64
+,
+512
+)
+Pixel Shuffle		
+(
+128
+,
+128
+,
+128
+)
+SPADE Block		
+(
+128
+,
+128
+,
+128
+)
+Pixel Shuffle		
+(
+256
+,
+256
+,
+32
+)
+SPADE Block		
+(
+256
+,
+256
+,
+32
+)
+SPADE Block		
+(
+256
+,
+256
+,
+32
+)
+LReLU	
+7
+×
+7
+ conv-3	
+tanh
+(
+256
+,
+256
+,
+3
+)
+TABLE IX:Architecture of rendering network 
+𝑅
+.
+Discriminators 
+𝐷
+ and 
+𝐷
+𝑚
+. The image and mouth discriminators 
+𝐷
+ and 
+𝐷
+𝑚
+ have a similar architecture to the discriminator presented in [17] and [28].
+
+Additional results
+In Fig. 14 to 19 we illustrate more generated samples with Free-HeadGAN model on VoxCeleb test set [59].
+
+Refer to caption
+source
+source sketch
+target sketch
+optical flow
+warped
+generated
+target
+Figure 14:Reenactment results (a)
+Refer to caption
+source
+source sketch
+target sketch
+optical flow
+warped
+generated
+target
+Figure 15:Reenactment results (b)
+Refer to caption
+source
+source sketch
+target sketch
+optical flow
+warped
+generated
+target
+Figure 16:Reenactment results (c)
+Refer to caption
+source
+source sketch
+target sketch
+optical flow
+warped
+generated
+target
+Figure 17:Reenactment results (d)
+Refer to caption
+source
+source sketch
+target sketch
+optical flow
+warped
+generated
+target
+Figure 18:Reenactment results (e)
+Refer to caption
+source
+source sketch
+target sketch
+optical flow
+warped
+generated
+target
+Figure 19:Reenactment results (f)
+References
+[1]J. Thies, M. Zollhöfer, M. Nießner, L. Valgaerts, M. Stamminger, and C. Theobalt, “Real-time expression transfer for facial reenactment,” ACM Transactions on Graphics (TOG), vol. 34, no. 6, 2015.
+[2]J. Thies, M. Zollhöfer, M. Stamminger, C. Theobalt, and M. Nießner, “Face2face: Real-time face capture and reenactment of rgb videos,” in Proc. Computer Vision and Pattern Recognition (CVPR), IEEE, 2016.
+[3]——, “Headon: Real-time reenactment of human portrait videos,” ACM Transactions on Graphics 2018 (TOG), 2018.
+[4]I. Goodfellow, J. Pouget-Abadie, M. Mirza, B. Xu, D. Warde-Farley, S. Ozair, A. Courville, and Y. Bengio, “Generative adversarial nets,” Advances in neural information processing systems, vol. 27, 2014.
+[5]T. Karras, S. Laine, M. Aittala, J. Hellsten, J. Lehtinen, and T. Aila, “Analyzing and improving the image quality of StyleGAN,” in Proc. CVPR, 2020.
+[6]T.-C. Wang, A. Mallya, and M.-Y. Liu, “One-shot free-view neural talking-head synthesis for video conferencing,” in Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, 2021.
+[7]H. Kim, P. Garrido, A. Tewari, W. Xu, J. Thies, M. Nießner, P. Pérez, C. Richardt, M. Zollöfer, and C. Theobalt, “Deep video portraits,” ACM Transactions on Graphics (TOG), vol. 37, no. 4, p. 163, 2018.
+[8]M. Koujan, M. Doukas, A. Roussos, and S. Zafeiriou, “Head2head: Video-based neural head synthesis,” in 2020 15th IEEE International Conference on Automatic Face and Gesture Recognition (FG 2020) (FG).   Los Alamitos, CA, USA: IEEE Computer Society, may 2020, pp. 319–326. [Online]. Available: https://doi.ieeecomputersociety.org/10.1109/FG47880.2020.00048
+[9]M. C. Doukas, M. R. Koujan, V. Sharmanska, A. Roussos, and S. Zafeiriou, “Head2head++: Deep facial attributes re-targeting,” IEEE Transactions on Biometrics, Behavior, and Identity Science, vol. 3, no. 1, pp. 31–43, 2021.
+[10]E. Zakharov, A. Shysheya, E. Burkov, and V. Lempitsky, “Few-shot adversarial learning of realistic neural talking head models,” 2019 IEEE/CVF International Conference on Computer Vision (ICCV), pp. 9458–9467, 2019.
+[11]T.-C. Wang, M.-Y. Liu, A. Tao, G. Liu, J. Kautz, and B. Catanzaro, “Few-shot video-to-video synthesis,” in Conference on Neural Information Processing Systems (NeurIPS), 2019.
+[12]E. Zakharov, A. Ivakhnenko, A. Shysheya, and V. Lempitsky, “Fast bi-layer neural synthesis of one-shot realistic head avatars,” in European Conference of Computer vision (ECCV), August 2020.
+[13]S. Ha, M. Kersner, B. Kim, S. Seo, and D. Kim, “Marionette: Few-shot face reenactment preserving identity of unseen targets,” in Proceedings of the AAAI Conference on Artificial Intelligence, 2020.
+[14]O. Wiles, A. S. Koepke, and A. Zisserman, “X2face: A network for controlling face generation using images, audio, and pose codes,” in Proceedings of the European Conference on Computer Vision (ECCV), September 2018.
+[15]A. Siarohin, S. Lathuilière, S. Tulyakov, E. Ricci, and N. Sebe, “Animating arbitrary objects via deep motion transfer,” in The IEEE Conference on Computer Vision and Pattern Recognition (CVPR), June 2019.
+[16]——, “First order motion model for image animation,” in Conference on Neural Information Processing Systems (NeurIPS), December 2019.
+[17]M. C. Doukas, S. Zafeiriou, and V. Sharmanska, “Headgan: One-shot neural head synthesis and editing,” in IEEE/CVF International Conference on Computer Vision (ICCV), 2021.
+[18]J. Geng, T. Shao, Y. Zheng, Y. Weng, and K. Zhou, “Warp-guided gans for single-photo facial animation,” ACM Transactions on Graphics (TOG), vol. 37, pp. 1 – 12, 2018.
+[19]V. Blanz and T. Vetter, “A morphable model for the synthesis of 3d faces,” in Proceedings of the 26th Annual Conference on Computer Graphics and Interactive Techniques, ser. SIGGRAPH ’99.   USA: ACM Press/Addison-Wesley Publishing Co., 1999, p. 187–194. [Online]. Available: https://doi.org/10.1145/311535.311556
+[20]J. Booth, A. Roussos, E. Ververas, E. Antonakos, S. Ploumpis, Y. Panagakis, and S. Zafeiriou, “3d reconstruction of “in-the-wild” faces in images and videos,” IEEE Transactions on Pattern Analysis and Machine Intelligence, vol. 40, no. 11, pp. 2638–2652, 2018.
+[21]J. Booth, A. Roussos, A. Ponniah, D. Dunaway, and S. Zafeiriou, “Large scale 3d morphable models,” Int. J. Comput. Vision, vol. 126, no. 2–4, p. 233–254, Apr. 2018. [Online]. Available: https://doi.org/10.1007/s11263-017-1009-7
+[22]J. Booth, A. Roussos, S. Zafeiriou, A. Ponniah, and D. Dunaway, “A 3d morphable model learnt from 10,000 faces,” in Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), June 2016.
+[23]J. Deng, J. Guo, E. Ververas, I. Kotsia, and S. Zafeiriou, “Retinaface: Single-shot multi-level face localisation in the wild,” in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), June 2020.
+[24]M. Mirza and S. Osindero, “Conditional generative adversarial nets,” arXiv preprint arXiv:1411.1784, 2014.
+[25]P. Isola, J.-Y. Zhu, T. Zhou, and A. A. Efros, “Image-to-image translation with conditional adversarial networks,” CVPR, 2017.
+[26]J.-Y. Zhu, T. Park, P. Isola, and A. A. Efros, “Unpaired image-to-image translation using cycle-consistent adversarial networks,” in Computer Vision (ICCV), 2017 IEEE International Conference on, 2017.
+[27]T.-C. Wang, M.-Y. Liu, J.-Y. Zhu, A. Tao, J. Kautz, and B. Catanzaro, “High-resolution image synthesis and semantic manipulation with conditional gans,” in Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, 2018.
+[28]T. Park, M.-Y. Liu, T.-C. Wang, and J.-Y. Zhu, “Semantic image synthesis with spatially-adaptive normalization,” in Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, 2019.
+[29]T.-C. Wang, M.-Y. Liu, J.-Y. Zhu, G. Liu, A. Tao, J. Kautz, and B. Catanzaro, “Video-to-video synthesis,” in Advances in Neural Information Processing Systems (NeurIPS), 2018.
+[30]K. Vougioukas, S. Petridis, and M. Pantic, “Realistic speech-driven facial animation with gans,” International Journal of Computer Vision, 10 2019.
+[31]J. Thies, M. Elgharib, A. Tewari, C. Theobalt, and M. Nießner, “Neural voice puppetry: Audio-driven facial reenactment,” ECCV 2020, 2020.
+[32]P. Garrido, L. Valgaerts, O. Rehmsen, T. Thormaehlen, P. Perez, and C. Theobalt, “Automatic face reenactment,” in 2014 IEEE Conference on Computer Vision and Pattern Recognition, CVPR 2014, Columbus, OH, USA, June 23-28, 2014, 2014, pp. 4217–4224. [Online]. Available: http://dx.doi.org/10.1109/CVPR.2014.537
+[33]S. Suwajanakorn, S. Seitz, and I. Kemelmacher, “Synthesizing obama: learning lip sync from audio,” ACM Transactions on Graphics, vol. 36, pp. 1–13, 07 2017.
+[34]H. Averbuch-Elor, D. Cohen-Or, J. Kopf, and M. F. Cohen, “Bringing portraits to life,” ACM Transactions on Graphics (Proceeding of SIGGRAPH Asia 2017), vol. 36, no. 6, p. 196, 2017.
+[35]X. Huang and S. Belongie, “Arbitrary style transfer in real-time with adaptive instance normalization,” in 2017 IEEE International Conference on Computer Vision (ICCV), 2017, pp. 1510–1519.
+[36]X. Zhang, Y. Sugano, M. Fritz, and A. Bulling, “Appearance-based gaze estimation in the wild,” in Proc. of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), June 2015, pp. 4511–4520.
+[37]S. Park, X. Zhang, A. Bulling, and O. Hilliges, “Learning to find eye region landmarks for remote gaze estimation in unconstrained settings,” in ACM Symposium on Eye Tracking Research and Applications (ETRA), ser. ETRA ’18.   New York, NY, USA: ACM, 2018.
+[38]S. Park, A. Spurr, and O. Hilliges, “Deep pictorial gaze estimation,” in Proceedings of the European Conference on Computer Vision (ECCV), September 2018.
+[39]K. Wang, R. Zhao, and Q. Ji, “A hierarchical generative model for eye image synthesis and eye gaze estimation,” in Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), June 2018.
+[40]S. Park, S. D. Mello, P. Molchanov, U. Iqbal, O. Hilliges, and J. Kautz, “Few-shot adaptive gaze estimation,” in International Conference on Computer Vision (ICCV), 2019.
+[41]J. He, K. Pham, N. Valliappan, P. Xu, C. Roberts, D. Lagun, and V. Navalpakkam, “On-device few-shot personalization for real-time gaze estimation,” in Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) Workshops, Oct 2019.
+[42]Y. Yu, G. Liu, and J.-M. Odobez, “Improving few-shot user-specific gaze adaptation via gaze redirection synthesis,” in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), June 2019.
+[43]Z. Guo, Z. Yuan, C. Zhang, W. Chi, Y. Ling, and S. Zhang, “Domain adaptation gaze estimation by embedding with prediction consistency,” in Proceedings of the Asian Conference on Computer Vision (ACCV), November 2020.
+[44]Y. Liu, R. Liu, H. Wang, and F. Lu, “Generalizing gaze estimation with outlier-guided collaborative adaptation,” in Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV), October 2021, pp. 3835–3844.
+[45]Y. Yu and J.-M. Odobez, “Unsupervised representation learning for gaze estimation,” in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), June 2020.
+[46]Y. Sun, J. Zeng, S. Shan, and X. Chen, “Cross-encoder for unsupervised gaze representation learning,” in Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV), October 2021, pp. 3702–3711.
+[47]R. Kothari, S. De Mello, U. Iqbal, W. Byeon, S. Park, and J. Kautz, “Weakly-supervised physically unconstrained gaze estimation,” in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), June 2021, pp. 9980–9989.
+[48]J. Deng, J. Guo, E. Ververas, I. Kotsia, and S. Zafeiriou, “Retinaface: Single-shot multi-level face localisation in the wild,” in CVPR, 2020.
+[49]D. Kulon, R. A. Guler, I. Kokkinos, M. M. Bronstein, and S. Zafeiriou, “Weakly-supervised mesh-convolutional hand reconstruction in the wild,” in CVPR, 2020.
+[50]I. K. Riza Alp Guler, Natalia Neverova, “Densepose: Dense human pose estimation in the wild,” in CVPR, 2018.
+[51]P. Kellnhofer, A. Recasens, S. Stent, W. Matusik, , and A. Torralba, “Gaze360: Physically unconstrained gaze estimation in the wild,” in IEEE International Conference on Computer Vision (ICCV), October 2019.
+[52]K. Krafka, A. Khosla, P. Kellnhofer, H. Kannan, S. Bhandarkar, W. Matusik, and A. Torralba, “Eye tracking for everyone,” in IEEE Conference on Computer Vision and Pattern Recognition (CVPR), 2016.
+[53]F. Reda, R. Pottorff, J. Barker, and B. Catanzaro, “flownet2-pytorch: Pytorch implementation of flownet 2.0: Evolution of optical flow estimation with deep networks,” https://github.com/NVIDIA/flownet2-pytorch, 2017.
+[54]E. Ilg, N. Mayer, T. Saikia, M. Keuper, A. Dosovitskiy, and T. Brox, “Flownet 2.0: Evolution of optical flow estimation with deep networks,” in IEEE Conference on Computer Vision and Pattern Recognition (CVPR), Jul 2017. [Online]. Available: http://lmb.informatik.uni-freiburg.de//Publications/2017/IMKDB17
+[55]W. Shi, J. Caballero, F. Huszár, J. Totz, A. P. Aitken, R. Bishop, D. Rueckert, and Z. Wang, “Real-time single image and video super-resolution using an efficient sub-pixel convolutional neural network,” in 2016 IEEE Conference on Computer Vision and Pattern Recognition (CVPR), 2016, pp. 1874–1883.
+[56]C. Ledig, L. Theis, F. Huszár, J. Caballero, A. Cunningham, A. Acosta, A. Aitken, A. Tejani, J. Totz, Z. Wang, and W. Shi, “Photo-realistic single image super-resolution using a generative adversarial network,” in 2017 IEEE Conference on Computer Vision and Pattern Recognition (CVPR), 2017, pp. 105–114.
+[57]J. H. Lim and J. C. Ye, “Geometric gan,” 2017.
+[58]X. Xu, D. Sun, J. Pan, Y. Zhang, H. Pfister, and M.-H. Yang, “Learning to super-resolve blurry face and text images,” in Proceedings of the IEEE international conference on computer vision, 2017, pp. 251–260.
+[59]A. Nagrani, J. S. Chung, and A. Zisserman, “Voxceleb: a large-scale speaker identification dataset,” in INTERSPEECH, 2017.
+[60]S. Yang, P. Luo, C. C. Loy, and X. Tang, “Wider face: A face detection benchmark,” in IEEE Conference on Computer Vision and Pattern Recognition (CVPR), 2016.
+[61]D. P. Kingma and J. Ba, “Adam: A method for stochastic optimization,” in International Conference on Learning Representations (ICLR), 2015.
+[62]X. Zhang, S. Park, T. Beeler, D. Bradley, S. Tang, and O. Hilliges, “Eth-xgaze: A large scale dataset for gaze estimation under extreme head pose and gaze variation,” in European Conference on Computer Vision (ECCV), 2020.
+[63]R. Zhang, P. Isola, A. Efros, E. Shechtman, and O. Wang, “The unreasonable effectiveness of deep features as a perceptual metric,” in Proceedings - 2018 IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2018, ser. Proceedings of the IEEE Computer Society Conference on Computer Vision and Pattern Recognition.   IEEE Computer Society, 2018, pp. 586–595.
+[64]M. Heusel, H. Ramsauer, T. Unterthiner, B. Nessler, and S. Hochreiter, “Gans trained by a two time-scale update rule converge to a local nash equilibrium,” in Advances in Neural Information Processing Systems, I. Guyon, U. V. Luxburg, S. Bengio, H. Wallach, R. Fergus, S. Vishwanathan, and R. Garnett, Eds., vol. 30.   Curran Associates, Inc., 2017, pp. 6626–6637.
+[65]M. Seitzer, “pytorch-fid: FID Score for PyTorch,” https://github.com/mseitzer/pytorch-fid, August 2020, version 0.1.1.
+[66]T. Unterthiner, S. van Steenkiste, K. Kurach, R. Marinier, M. Michalski, and S. Gelly, “Towards accurate generative models of video: A new metric & challenges,” arXiv preprint arXiv:1812.01717, 2018.
+[67]J. Deng, J. Guo, X. Niannan, and S. Zafeiriou, “Arcface: Additive angular margin loss for deep face recognition,” in CVPR, 2019.
+[68]B. Amos, B. Ludwiczuk, and M. Satyanarayanan, “Openface: A general-purpose face recognition library with mobile applications,” CMU-CS-16-118, CMU School of Computer Science, Tech. Rep., 2016.
+[69]T. Baltrušaitis, M. Mahmoud, and P. Robinson, “Cross-dataset learning and person-specific normalisation for automatic action unit detection,” in 2015 11th IEEE International Conference and Workshops on Automatic Face and Gesture Recognition (FG), vol. 06, 2015, pp. 1–6.
+[70]J. S. Chung, A. Nagrani, and A. Zisserman, “Voxceleb2: Deep speaker recognition,” in INTERSPEECH, 2018.
+[71]B. Smith, Q. Yin, S. Feiner, and S. Nayar, “Gaze Locking: Passive Eye Contact Detection for Human?Object Interaction,” in ACM Symposium on User Interface Software and Technology (UIST), 2013.
+[72]Y. Sugano, Y. Matsushita, and Y. Sato, “Learning-by-synthesis for appearance-based 3d gaze estimation,” in CVPR, 2014.
+[73]D. Ulyanov, A. Vedaldi, and V. S. Lempitsky, “Instance normalization: The missing ingredient for fast stylization,” CoRR, vol. abs/1607.08022, 2016. [Online]. Available: http://arxiv.org/abs/1607.08022
+[Uncaptioned image]	
+Michail Christos Doukas is a 4th year PhD Student at Imperial College London, supervised by Dr. Viktoriia Sharmanska and Prof. Stefanos Zafeiriou. He is currently an intern at Huawei UK Research Centre. He received the MSc degree in Computing from Imperial College London, in 2017. Prior to that, he has studied Electrical and Computer Engineering (MEng 2016) at the National Technical University of Athens (NTUA), Greece. His research interests lie in the fields of Deep Learning and Computer Vision and include generative adversarial neural networks, image and video synthesis, visual speech synthesis, face reenactment and few-shot learning.
+ 
+[Uncaptioned image]	
+Evangelos Ververas graduated in September 2016 from the Department of Electrical and Computer Engineering in Aristotle University of Thessaloniki (AUTH), in Greece. He is currently a PhD student at the Department of Computing at Imperial College London, supervised by Prof. Stefanos Zafeiriou, and a researcher at Huawei UK Research Centre. His research interests lie in the fileds of Computer Vision and Deep Learning for 3D face analysis and reconstruction, as well as 3D gaze estimation.
+ 
+[Uncaptioned image]	
+Viktoriia Sharmanska Viktoriia Sharmanska is passionate about designing intelligent systems that can learn concepts from visual data using machine learning models. She has joined the University of Sussex as a Lecturer in Artificial Intelligence in 2020. Prior to this, 2017-2020, she was an Imperial College Research Fellow at the Department of Computing, Imperial College London, working on deep learning methods for emotion and human behaviour recognition. She is also an honorary lecturer at Imperial College London since 2021. Dr Sharmanska has co-authored numerous papers on novel statistical machine learning methodologies applied to computer vision problems, such as attribute-based object recognition, learning using privileged information, cross-modal learning, human facial behaviour analysis, and recently on algorithmic fairness methods, published in the most prestigious conferences in her field of research, such as CVPR, ICCV/ECCV, NeurIPS. She has built an international reputation such as being among the youngest Area Chair for top-tier international conferences in computer vision and deep learning such as International Conference on Learning Representations (ICLR) 2019-2021 and Conference on Computer Vision and Pattern Recognition (CVPR) 2021. Viktoriia is actively involved in organising and promoting Women in Computer Vision, Women in Machine Learning, and in increasing visibility of the underrepresented groups in computing. In 2018, together with colleagues from Facebook AI, Stanford University, Autonomous University of Barcelona she co-organised the international Women in Computer Vision Workshop, held in conjunction with CVPR2018.
+ 
+[Uncaptioned image]	
+Stefanos Zafeiriou (M’09) is a Reader in Machine Learning and Computer Vision with the Department of Computing, Imperial College London, U.K, and a Distinguishing Research Fellow with University of Oulu. He was a recipient of the Prestigious Junior Research Fellowships from Imperial College London in 2011 to start his own independent research group. He was the recipient of the President’s Medal for Excellence in Research Supervision for 2016. He currently serves as an Associate Editor of the IEEE Transactions on Affective Computing and Computer Vision and Image Understanding journal. He has been a Guest Editor of over six journal special issues and coorganised over 13 workshops/special sessions on specialised computer vision topics in top venues, such as CVPR/FG/ICCV/ECCV. He has coauthored over 55 journal papers mainly on novel statistical machine learning methodologies applied to computer vision problems, such as 2-D/3-D face analysis, deformable object fitting and tracking, published in the most prestigious journals in his field of research, such as the IEEE T-PAMI, the International Journal of Computer Vision, the IEEE T-IP, the IEEE T-NNLS, the IEEE T-VCG, and the IEEE T-IFS, and many papers in top conferences. He has more than 18000 citations to his work, h-index 51.
+ 
+◄ ar5iv homepage Feeling
+lucky? Conversion
+report Report
+an issue View original
+on arXiv►
+Copyright Privacy Policy Generated on Wed Mar 13 18:55:21 2024 by LaTeXMLMascot Sammy

@@ -33,6 +33,7 @@ import torch
 import torch.nn as nn
 from torch.nn.functional import cosine_similarity
 from insightface.app import FaceAnalysis
+from data_util.face3d_helper import Face3DHelper
 
 class DisentanglementLosses(nn.Module):
     def __init__(self):
@@ -88,6 +89,7 @@ class FaceEncoder(nn.Module):
         self.appearance_extractor = AppearanceFeatureExtractor()
         self.canonical_kp_detector = CanonicalKeypointDetector()
         self.pose_exp_estimator = PoseExpressionEstimator()
+        self.face3d_helper = Face3DHelper(bfm_dir='BFM')
         
     def forward(self, x):
         appearance_volume = self.appearance_extractor(x)
@@ -95,7 +97,17 @@ class FaceEncoder(nn.Module):
         yaw, pitch, roll, t, delta = self.pose_exp_estimator(x)
         head_pose = torch.cat([yaw.unsqueeze(1), pitch.unsqueeze(1), roll.unsqueeze(1), t], dim=1)
         facial_dynamics = delta
-        return appearance_volume, canonical_keypoints, head_pose, facial_dynamics
+        
+        # Concatenate identity and expression coefficients
+        coeff = torch.cat([facial_dynamics, head_pose], dim=-1)
+        
+        # Disentangle face components using Face3DHelper
+        id_coeff = self.face3d_helper.split_coeff(coeff)['identity']
+        exp_coeff = self.face3d_helper.split_coeff(coeff)['expression']
+        face_mesh = self.face3d_helper.reconstruct_face_mesh(id_coeff, exp_coeff)
+        
+        return appearance_volume, canonical_keypoints, head_pose, facial_dynamics, id_coeff, exp_coeff, face_mesh
+
         
 
 
@@ -107,8 +119,7 @@ class FaceEncoder(nn.Module):
 #     def forward(self, appearance_volume, deformation, occlusion):
 #         reconstructed_face = self.generator(appearance_volume, deformation, occlusion)
 #         return reconstructed_face
-    
-class FaceDecoder(nn.Module):
+    class FaceDecoder(nn.Module):
     def __init__(self, use_weight_norm=True):
         super(FaceDecoder, self).__init__()
         self.in_conv = ConvBlock2D("CNA", 32 * 16, 256, 3, 1, 1, use_weight_norm, nonlinearity_type="leakyrelu")
@@ -129,21 +140,36 @@ class FaceDecoder(nn.Module):
             ConvBlock2D("CNA", 64, 3, 7, 1, 3, use_weight_norm, activation_type="tanh")
         )
         self.motion_field_estimator = MotionFieldEstimator(model_scale='small')
+        self.face3d_helper = Face3DHelper(bfm_dir='BFM')
 
     def forward(self, appearance_volume, identity_code, head_pose, facial_dynamics):
         N, _, D, H, W = appearance_volume.shape
         x = appearance_volume.view(N, -1, H, W)
         x = self.in_conv(x)
         x = self.res(x)
-        
+
+        # Apply head pose and facial dynamics to the 3D face mesh
+        euler = head_pose[:, :3]
+        trans = head_pose[:, 3:]
+        face_mesh = self.face3d_helper.reconstruct_lm3d(identity_code, facial_dynamics, euler, trans)
+
+        # Project 3D face mesh back to 2D
+        lm2d = self.face3d_helper.reconstruct_lm2d(identity_code, facial_dynamics, euler, trans)
+
         # Generate motion field using the MotionFieldEstimator
         deformation, occlusion = self.motion_field_estimator(appearance_volume, head_pose, facial_dynamics)
-        
-        # Apply deformation to the feature volume
-        deformed_x = F.grid_sample(x, deformation, align_corners=True, padding_mode='border')
-        
+
+        # Apply deformation to the feature volume using the projected 2D landmarks
+        grid = make_coordinate_grid_2d(x.shape[2:]).unsqueeze(0).repeat(N, 1, 1, 1).to(x.device)
+        grid = grid.view(N, -1, 2)
+        lm2d = lm2d.view(N, -1, 2)
+        grid_transformed = grid + lm2d
+        grid_transformed = grid_transformed.view(N, x.shape[2], x.shape[3], 2)
+        deformed_x = F.grid_sample(x, grid_transformed, align_corners=True, padding_mode='border')
+
         # Apply occlusion-aware decoding
         face_image = self.up(deformed_x * occlusion)
+
         return face_image
 
 # Define the diffusion transformer for holistic facial dynamics generation
