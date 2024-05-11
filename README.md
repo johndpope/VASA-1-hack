@@ -1,5 +1,13 @@
 # VASA-1-hack
 Using Claude Opus to reverse engineer code from white paper (this is for La Raza)
+https://www.youtube.com/watch?v=bZ8AS300WH4
+
+
+![Image](pipeline_.jpg)
+
+
+
+THIS PROJECT IS ACAMEDIC EXCERCISE
 
 
 
@@ -7,13 +15,11 @@ The Real3DPortrait code seems to provide warping / volumetric models as a downst
 https://github.com/yerfor/Real3DPortrait/
 
 
-
-fyi - keep eyes on this repo - Egor Zakharov who worked on MegaPortraits as lead AI worked on this 
-https://github.com/MBZUAI-Metaverse/VOODOO3D-official
-
-
-fyi - Kevin Fringe attempted to implement the MegaPortrait by samsung / russia team - I've added some suggested fixes from Claude.
-https://github.com/johndpope/MegaPortrait/
+**MegaPortrait** - side quest
+https://github.com/johndpope/MegaPortrait-hack
+fyi - Kevin Fringe attempted to implement the MegaPortraits paper by SamsungLabs / Russia team 
+I rebuilt it using Claude + and cherry pick some code from SamsungLabs Rome project. 
+I'm hopeful I can get this to boot / train. Though I need help crafting training set https://github.com/Kandy22/rome/blob/eae4ff2fb8eddac7b0d7c382f0389567aac66d6e/src/dataset/voxceleb2hq_pairs.py#L131
 
 
 
