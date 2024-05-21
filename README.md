@@ -15,11 +15,24 @@ The Real3DPortrait code seems to provide warping / volumetric models as a downst
 https://github.com/yerfor/Real3DPortrait/
 
 
-**MegaPortrait** - side quest
+**MegaPortrait** - side quest 
 https://github.com/johndpope/MegaPortrait-hack
 fyi - Kevin Fringe attempted to implement the MegaPortraits paper by SamsungLabs / Russia team 
 I rebuilt it using Claude + and cherry pick some code from SamsungLabs Rome project. 
-I'm hopeful I can get this to boot / train. Though I need help crafting training set https://github.com/Kandy22/rome/blob/eae4ff2fb8eddac7b0d7c382f0389567aac66d6e/src/dataset/voxceleb2hq_pairs.py#L131
+I'm hopeful I can get this to boot / train. (it's hard because the dimensions are not explicit from paper) 
+Though I need help crafting training set 
+https://github.com/Kandy22/rome/blob/eae4ff2fb8eddac7b0d7c382f0389567aac66d6e/src/dataset/voxceleb2hq_pairs.py#L131
+
+
+
+**EMOPortrait** - SAVE the date - code drops 1st July
+this should give us the resnet50 warp code that MegaPortrait's is based on - not keypoints.
+The CanonicalKeypointDetector is erroneous - but once EMOPortrait's comes online - should be easy to switch out.
+
+https://github.com/neeek2303/EMOPortraits
+https://arxiv.org/pdf/2404.19110
+
+
 
 
 
