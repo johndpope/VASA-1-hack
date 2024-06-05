@@ -19,9 +19,11 @@ https://github.com/yerfor/Real3DPortrait/
 https://github.com/johndpope/MegaPortrait-hack
 fyi - Kevin Fringe attempted to implement the MegaPortraits paper by SamsungLabs / Russia team 
 I rebuilt it using Claude + and cherry pick some code from SamsungLabs Rome project. 
-I'm hopeful I can get this to boot / train. (it's hard because the dimensions are not explicit from paper) 
-Though I need help crafting training set 
-https://github.com/Kandy22/rome/blob/eae4ff2fb8eddac7b0d7c382f0389567aac66d6e/src/dataset/voxceleb2hq_pairs.py#L131
+I'm hopeful I can get this to boot / train. 
+ 
+UPDATE - it's training / converging 
+https://github.com/johndpope/MegaPortrait-hack/issues/36
+
 
 
 
