@@ -11,7 +11,60 @@ from EmoDataset import EMODataset
 from omegaconf import OmegaConf
 from score_sde_pytorch import VPSDE,get_score_fn
 
-fh = FaceHelper()
+
+output_dir = "output_images"
+os.makedirs(output_dir, exist_ok=True)
+
+use_cuda = torch.cuda.is_available()
+device = torch.device("cuda" if use_cuda else "cpu")
+
+
+
+
+
+
+# align to cyclegan
+def discriminator_loss(real_pred, fake_pred, loss_type='lsgan'):
+    if loss_type == 'lsgan':
+        real_loss = torch.mean((real_pred - 1)**2)
+        fake_loss = torch.mean(fake_pred**2)
+    elif loss_type == 'vanilla':
+        real_loss = F.binary_cross_entropy_with_logits(real_pred, torch.ones_like(real_pred))
+        fake_loss = F.binary_cross_entropy_with_logits(fake_pred, torch.zeros_like(fake_pred))
+    else:
+        raise NotImplementedError(f'Loss type {loss_type} is not implemented.')
+    
+    return ((real_loss + fake_loss) * 0.5).requires_grad_()
+
+
+# cosine distance formula
+# s · (⟨zi, zj⟩ − m)
+def cosine_loss(pos_pairs, neg_pairs, s=5.0, m=0.2):
+    assert isinstance(pos_pairs, list) and isinstance(neg_pairs, list), "pos_pairs and neg_pairs should be lists"
+    assert len(pos_pairs) > 0, "pos_pairs should not be empty"
+    assert len(neg_pairs) > 0, "neg_pairs should not be empty"
+    assert s > 0, "s should be greater than 0"
+    assert 0 <= m <= 1, "m should be between 0 and 1"
+    
+    loss = torch.tensor(0.0, requires_grad=True).to(device)
+
+    for pos_pair in pos_pairs:
+        assert isinstance(pos_pair, tuple) and len(pos_pair) == 2, "Each pos_pair should be a tuple of length 2"
+        pos_sim = F.cosine_similarity(pos_pair[0], pos_pair[1], dim=0)
+        pos_dist = s * (pos_sim - m)
+        
+        neg_term = torch.tensor(0.0, requires_grad=True).to(device)
+        for neg_pair in neg_pairs:
+            assert isinstance(neg_pair, tuple) and len(neg_pair) == 2, "Each neg_pair should be a tuple of length 2"
+            neg_sim = F.cosine_similarity(pos_pair[0], neg_pair[1], dim=0)
+            neg_term = neg_term + torch.exp(s * (neg_sim - m))
+        
+        assert pos_dist.shape == neg_term.shape, f"Shape mismatch: pos_dist {pos_dist.shape}, neg_term {neg_term.shape}"
+        loss = loss + torch.log(torch.exp(pos_dist) / (torch.exp(pos_dist) + neg_term))
+        
+    assert len(pos_pairs) > 0, "pos_pairs should not be empty"
+    return torch.mean(-loss / len(pos_pairs)).requires_grad_()
+
 
 def compute_lip_sync_loss(original_landmarks, generated_landmarks):
     loss_fn = torch.nn.MSELoss()
@@ -101,6 +154,7 @@ def train_stage2(cfg,  encoder, decoder, diffusion_transformer, dataloader):
     # SDE parameters
     sde = VPSDE(beta_min=0.1, beta_max=20, N=1000)
 
+    fh = FaceHelper()
     for epoch in range( cfg.training.epochs):
         for batch in dataloader:
             video_frames, _, audio_features, _ = batch
