@@ -25,6 +25,56 @@ from insightface.app import FaceAnalysis
 from torchvision.models import resnet50
 
 
+# keep the code in one mega class for copying and pasting into Claude.ai
+FEATURE_SIZE_AVG_POOL = 2 # use 2 - not 4. https://github.com/johndpope/MegaPortrait-hack/issues/23
+FEATURE_SIZE = (2, 2) 
+COMPRESS_DIM = 512 # 🤷 TODO 1: maybe 256 or 512, 512 may be more reasonable for Emtn/app compression
+
+
+class FaceEncoder(nn.Module):
+    def __init__(self):
+        super(FaceEncoder, self).__init__()
+        self.appearanceEncoder = Eapp()
+        self.identityEncoder = CustomResNet50()
+        self.headPoseEstimator = resnet18(pretrained=True)
+        self.headPoseEstimator.fc = nn.Linear(self.headPoseEstimator.fc.in_features, 6)
+        self.facialDynamicsEncoder = nn.Sequential(*list(resnet18(pretrained=False, num_classes=512).children())[:-1])
+        self.facialDynamicsEncoder.adaptive_pool = nn.AdaptiveAvgPool2d(FEATURE_SIZE)
+        self.facialDynamicsEncoder.fc = nn.Linear(2048, COMPRESS_DIM)
+
+    def forward(self, x):
+        appearance_volume = self.appearanceEncoder(x)[0]  # Get only the appearance volume
+        identity_code = self.identityEncoder(x)
+        head_pose = self.headPoseEstimator(x)
+        rotation = head_pose[:, :3]
+        translation = head_pose[:, 3:]
+        facial_dynamics_features = self.facialDynamicsEncoder(x) # es
+        facial_dynamics = self.facialDynamicsEncoder.fc(torch.flatten(facial_dynamics_features, start_dim=1))
+        return appearance_volume, identity_code, rotation, translation, facial_dynamics
+
+
+class FaceDecoder(nn.Module):
+    def __init__(self):
+        super(FaceDecoder, self).__init__()
+        self.warp_generator_s2c = WarpGeneratorS2C(num_channels=512)
+        self.warp_generator_c2d = WarpGeneratorC2D(num_channels=512)
+        self.G3d = G3d(in_channels=96)
+        self.G2d = G2d(in_channels=96)
+
+    def forward(self, appearance_volume, identity_code, rotation, translation, facial_dynamics):
+        w_s2c = self.warp_generator_s2c(rotation, translation, facial_dynamics, identity_code)
+        canonical_volume = apply_warping_field(appearance_volume, w_s2c)
+        assert canonical_volume.shape[1:] == (96, 16, 64, 64)
+
+        vc2d = self.G3d(canonical_volume)
+        w_c2d = self.warp_generator_c2d(rotation, translation, facial_dynamics, identity_code)
+        vc2d_warped = apply_warping_field(vc2d, w_c2d)
+        assert vc2d_warped.shape[1:] == (96, 16, 64, 64)
+
+        vc2d_projected = torch.sum(vc2d_warped, dim=2)
+        xhat = self.G2d(vc2d_projected)
+        return xhat
+
 
 
 '''
@@ -179,34 +229,6 @@ class CustomResNet50(nn.Module):
         
         return x
 
-'''
-Eapp Class:
-
-The Eapp class represents the appearance encoder (Eapp) in the diagram.
-It consists of two parts: producing volumetric features (vs) and producing a global descriptor (es).
-
-Producing Volumetric Features (vs):
-
-The conv layer corresponds to the 7x7-Conv-64 block in the diagram.
-The resblock_128, resblock_256, resblock_512 layers correspond to the ResBlock2D-128, ResBlock2D-256, ResBlock2D-512 blocks respectively, with average pooling (self.avgpool) in between.
-The conv_1 layer corresponds to the GN, ReLU, 1x1-Conv2D-1536 block in the diagram.
-The output of conv_1 is reshaped to (batch_size, 96, 16, height, width) and passed through resblock3D_96 and resblock3D_96_2, which correspond to the two ResBlock3D-96 blocks in the diagram.
-The final output of this part is the volumetric features (vs).
-
-Producing Global Descriptor (es):
-
-The resnet50 layer corresponds to the ResNet50 block in the diagram.
-It takes the input image (x) and produces the global descriptor (es).
-
-Forward Pass:
-
-During the forward pass, the input image (x) is passed through both parts of the Eapp network.
-The first part produces the volumetric features (vs) by passing the input through the convolutional layers, residual blocks, and reshaping operations.
-The second part produces the global descriptor (es) by passing the input through the ResNet50 network.
-The Eapp network returns both vs and es as output.
-
-In summary, the Eapp class in the code aligns well with the appearance encoder (Eapp) shown in the diagram. The network architecture follows the same structure, with the corresponding layers and blocks mapped accurately. The conv, resblock_128, resblock_256, resblock_512, conv_1, resblock3D_96, and resblock3D_96_2 layers in the code correspond to the respective blocks in the diagram for producing volumetric features. The resnet50 layer in the code corresponds to the ResNet50 block in the diagram for producing the global descriptor.
-'''
 
 
 class Eapp(nn.Module):
@@ -480,30 +502,6 @@ class FlowField(nn.Module):
     
     
 
-'''
-The ResBlock3D class represents a 3D residual block. It consists of two 3D convolutional layers (conv1 and conv2) with group normalization (norm1 and norm2) and ReLU activation. The residual connection is implemented using a shortcut connection.
-Let's break down the code:
-
-The init method initializes the layers of the residual block.
-
-conv1 and conv2 are 3D convolutional layers with the specified input and output channels, kernel size of 3, and padding of 1.
-norm1 and norm2 are group normalization layers with 32 groups and the corresponding number of channels.
-If the input and output channels are different, a shortcut connection is created using a 1x1 convolutional layer and group normalization to match the dimensions.
-
-
-The forward method defines the forward pass of the residual block.
-
-The input x is stored as the residual.
-The input is passed through the first convolutional layer (conv1), followed by group normalization (norm1) and ReLU activation.
-The output is then passed through the second convolutional layer (conv2) and group normalization (norm2).
-If a shortcut connection exists (i.e., input and output channels are different), the residual is passed through the shortcut connection.
-The residual is added to the output of the second convolutional layer.
-Finally, ReLU activation is applied to the sum.
-
-
-
-The ResBlock3D class can be used as a building block in a larger 3D convolutional neural network architecture. It allows for the efficient training of deep networks by enabling the gradients to flow directly through the shortcut connection, mitigating the vanishing gradient problem.
-You can create an instance of the ResBlock3D class by specifying the input and output channels:'''
 class ResBlock3D(nn.Module):
     def __init__(self, in_channels, out_channels, upsample=False, scale_factors=(1, 1, 1)):
         super(ResBlock3D, self).__init__()
@@ -535,45 +533,6 @@ class ResBlock3D(nn.Module):
         return out
     
     
-'''
-G3d Class:
-- The G3d class represents the 3D convolutional network (G3D) in the diagram.
-- It consists of a downsampling path and an upsampling path.
-
-Downsampling Path:
-- The downsampling block in the code corresponds to the downsampling path in the diagram.
-- It consists of a series of ResBlock3D and 3D average pooling (nn.AvgPool3d) operations.
-- The architecture of the downsampling path follows the structure shown in the diagram:
-  - ResBlock3D(in_channels, 96) corresponds to the ResBlock3D-96 block.
-  - nn.AvgPool3d(kernel_size=2, stride=2) corresponds to the downsampling operation after ResBlock3D-96.
-  - ResBlock3D(96, 192) corresponds to the ResBlock3D-192 block.
-  - nn.AvgPool3d(kernel_size=2, stride=2) corresponds to the downsampling operation after ResBlock3D-192.
-  - ResBlock3D(192, 384) corresponds to the ResBlock3D-384 block.
-  - nn.AvgPool3d(kernel_size=2, stride=2) corresponds to the downsampling operation after ResBlock3D-384.
-  - ResBlock3D(384, 768) corresponds to the ResBlock3D-768 block.
-
-Upsampling Path:
-- The upsampling block in the code corresponds to the upsampling path in the diagram.
-- It consists of a series of ResBlock3D and 3D upsampling (nn.Upsample) operations.
-- The architecture of the upsampling path follows the structure shown in the diagram:
-  - ResBlock3D(768, 384) corresponds to the ResBlock3D-384 block.
-  - nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True) corresponds to the upsampling operation after ResBlock3D-384.
-  - ResBlock3D(384, 192) corresponds to the ResBlock3D-192 block.
-  - nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True) corresponds to the upsampling operation after ResBlock3D-192.
-  - ResBlock3D(192, 96) corresponds to the ResBlock3D-96 block.
-  - nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True) corresponds to the upsampling operation after ResBlock3D-96.
-
-Final Convolution:
-- The final_conv layer in the code corresponds to the GN, ReLU, 3x3x3-Conv3D-96 block in the diagram.
-- It takes the output of the upsampling path and applies a 3D convolution with a kernel size of 3 and padding of 1 to produce the final output.
-
-Forward Pass:
-- During the forward pass, the input tensor x is passed through the downsampling path, then through the upsampling path, and finally through the final convolution layer.
-- The output of the G3d network is a tensor of the same spatial dimensions as the input, but with 96 channels.
-
-In summary, the G3d class in the code aligns well with the 3D convolutional network (G3D) shown in the diagram. The downsampling path, upsampling path, and final convolution layer in the code correspond to the respective blocks in the diagram. The ResBlock3D and pooling/upsampling operations are consistent with the diagram, and the forward pass follows the expected flow of data through the network.
-'''
-
 
 class G3d(nn.Module):
     def __init__(self, in_channels):
@@ -645,28 +604,7 @@ class ResBlock2D(nn.Module):
         out = nn.ReLU(inplace=True)(out)
         
         return out
-'''
-The G2d class consists of the following components:
 
-The input has 96 channels (C96)
-The input has a depth dimension of 16 (D16)
-The output should have 1536 channels (C1536)
-
-The depth dimension (D16) is present because the input to G2d is a 3D tensor 
-(volumetric features) with shape (batch_size, 96, 16, height/4, width/4).
-The reshape operation is meant to collapse the depth dimension and increase the number of channels.
-
-
-The ResBlock2D layers have 512 channels, not 1536 channels as I previously stated. 
-The diagram clearly shows 8 ResBlock2D-512 layers before the upsampling blocks that reduce the number of channels.
-To summarize, the G2D network takes the orthographically projected 2D feature map from the 3D volumetric features as input.
-It first reshapes the number of channels to 512 using a 1x1 convolution layer. 
-Then it passes the features through 8 residual blocks (ResBlock2D) that maintain 512 channels. 
-This is followed by upsampling blocks that progressively halve the number of channels while doubling the spatial resolution, 
-going from 512 to 256 to 128 to 64 channels.
-Finally, a 3x3 convolution outputs the synthesized image with 3 color channels.
-
-'''
 
 class G2d(nn.Module):
     def __init__(self, in_channels):
@@ -811,16 +749,6 @@ def compute_rotation_matrix(rotation):
     return rotation_matrix
 
 
-
-'''
-In the updated Emtn class, we use two separate networks (head_pose_net and expression_net) to predict the head pose and expression parameters, respectively.
-
-The head_pose_net is a ResNet-18 model pretrained on ImageNet, with the last fully connected layer replaced to output 6 values (3 for rotation and 3 for translation).
-The expression_net is another ResNet-18 model with the last fully connected layer adjusted to output the desired dimensions of the expression vector (e.g., 50).
-
-In the forward method, we pass the input x through both networks to obtain the head pose and expression predictions. We then split the head pose output into rotation and translation parameters.
-The Emtn module now returns the rotation parameters (Rs, Rd), translation parameters (ts, td), and expression vectors (zs, zd) for both the source and driving images.
-Note: Make sure to adjust the dimensions of the rotation, translation, and expression parameters according to your specific requirements and the details provided in the MegaPortraits paper.'''
 class Emtn(nn.Module):
     def __init__(self):
         super().__init__()
@@ -864,21 +792,6 @@ class Emtn(nn.Module):
 
 
 
-'''
-Rotation and Translation Warping (𝑤𝑟𝑡_wrt_):
-
-For 𝑤𝑟𝑡→𝑑_wrt_→_d_​: This warping applies a transformation matrix (rotation and translation) to an identity grid.
-For 𝑤𝑟𝑡𝑠→_wrts_→​: This warping applies an inverse transformation matrix to an identity grid.
-
-
-Expression Warping (𝑤𝑒𝑚_wem_​):
-
-Separate warping generators are used for source to canonical (𝑤𝑒𝑚𝑠→_wems_→​) and canonical to driver (𝑤𝑒𝑚→𝑑_wem_→_d_​).
-Both warping generators share the same architecture, which includes several 3D residual blocks with Adaptive GroupNorms.
-Inputs to these generators are the sums of the expression and appearance descriptors (𝑧𝑠+𝑒𝑠_zs_​+_es_​ for source and 𝑧𝑑+𝑒𝑠_zd_​+_es_​ for driver).
-Adaptive parameters are generated by multiplying these sums with learned matrices.
-
-'''
 class WarpGeneratorS2C(nn.Module):
     def __init__(self, num_channels):
         super(WarpGeneratorS2C, self).__init__()
@@ -899,16 +812,7 @@ class WarpGeneratorS2C(nn.Module):
         # Sum es with zs
         zs_sum = zs + es
 
-        # Generate adaptive parameters
-        # adaptive_gamma = torch.matmul(zs_sum, self.adaptive_matrix_gamma.T)
-        # adaptive_beta = torch.matmul(zs_sum, self.adaptive_matrix_beta.T)
-        '''
-        ### TODO 3: add adaptive_matrix_gamma
-        According to the description of the paper (Page11: To generate adaptive parameters, 
-        we multiply the foregoing sums and additionally learned matrices for each pair of parameters.), 
-        adaptive_matrix_gamma should be retained. It is not used to change the shape, but can generate learning parameters, 
-        which is more reasonable than just using sum.
-        '''
+       
         zs_sum = torch.matmul(zs_sum, self.adaptive_matrix_gamma) 
         zs_sum = zs_sum.unsqueeze(-1).unsqueeze(-1) ### TODO 3: add unsqueeze(-1).unsqueeze(-1) to match the shape of w_em_s2c
 
@@ -950,16 +854,7 @@ class WarpGeneratorC2D(nn.Module):
         # Sum es with zd
         zd_sum = zd + es
         
-        # Generate adaptive parameters
-        # adaptive_gamma = torch.matmul(zd_sum, self.adaptive_matrix_gamma)
-        # adaptive_beta = torch.matmul(zd_sum, self.adaptive_matrix_beta)
-        '''
-        ### TODO 3: add adaptive_matrix_gamma
-        According to the description of the paper (Page11: To generate adaptive parameters, 
-        we multiply the foregoing sums and additionally learned matrices for each pair of parameters.), 
-        adaptive_matrix_gamma should be retained. It is not used to change the shape, but can generate learning parameters, 
-        which is more reasonable than just using sum.
-        '''
+
         zd_sum = torch.matmul(zd_sum, self.adaptive_matrix_gamma) 
         zd_sum = zd_sum.unsqueeze(-1).unsqueeze(-1) ### TODO 3 add unsqueeze(-1).unsqueeze(-1) to match the shape of w_em_c2d
 
@@ -1020,40 +915,6 @@ def apply_warping_field(v, warp_field):
     return v_canonical
 
 
-
-
-'''
-The main changes made to align the code with the training stages are:
-
-Introduced Gbase class that combines the components of the base model.
-Introduced Genh class for the high-resolution model.
-Introduced GHR class that combines the base model Gbase and the high-resolution model Genh.
-Introduced Student class for the student model, which includes an encoder, decoder, and SPADE blocks for avatar conditioning.
-Added separate training functions for each stage: train_base, train_hr, and train_student.
-Demonstrated the usage of the training functions and saving the trained models.
-
-Note: The code assumes the presence of appropriate dataloaders (dataloader, dataloader_hr, dataloader_avatars) and the implementation of the SPADEResBlock class for the student model. Additionally, the specific training loop details and loss functions need to be implemented based on the paper's description.
-
-The main changes made to align the code with the paper are:
-
-The Emtn (motion encoder) is now a single module that outputs the rotation parameters (Rs, Rd), translation parameters (ts, td), and expression vectors (zs, zd) for both the source and driving images.
-The warping generators (Ws2c and Wc2d) now take the rotation, translation, expression, and appearance features as separate inputs, as described in the paper.
-The warping process is updated to match the paper's description. First, the volumetric features (vs) are warped using ws2c to obtain the canonical volume (vc). Then, vc is processed by G3d to obtain vc2d. Finally, vc2d is warped using wc2d to impose the driving motion.
-The orthographic projection (denoted as P in the paper) is implemented as an average pooling operation followed by a squeeze operation to reduce the spatial dimensions.
-The projected features (vc2d_projected) are passed through G2d to obtain the final output image (xhat).
-
-These changes align the code more closely with the architecture and processing steps described in the MegaPortraits paper.
-
-
-The volumetric features (vs) obtained from the appearance encoder (Eapp) are warped using the warping field ws2c generated by Ws2c. This warping transforms the volumetric features into the canonical coordinate space, resulting in the canonical volume (vc).
-The canonical volume (vc) is then processed by the 3D convolutional network G3d to obtain vc2d.
-The vc2d features are warped using the warping field wc2d generated by Wc2d. This warping imposes the driving motion onto the features.
-The warped vc2d features are then orthographically projected using average pooling along the depth dimension (denoted as P in the paper). This step reduces the spatial dimensions of the features.
-Finally, the projected features (vc2d_projected) are passed through the 2D convolutional network G2d to obtain the final output image (xhat).
-
-
-
-'''
 
 import matplotlib.pyplot as plt
 
@@ -1240,13 +1101,3 @@ class ClassifierFreeGuidance(nn.Module):
             guidance_output = guidance_output + scale * (conditional_output - unconditional_output)
 
         return guidance_output + unconditional_output
-# Example usage
-# guidance_scales = [1.0, 0.5]  # Adjust the scales as needed
-# guided_model = ClassifierFreeGuidance(diffusion_model, guidance_scales)
-
-# # During training or sampling
-# x = ...  # Input noise or image
-# t = ...  # Timestep
-# cond = ...  # Conditioning information (e.g., class labels, text embeddings)
-# output = guided_model(x, t, cond)
-
