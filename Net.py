@@ -26,9 +26,9 @@ from torchvision.models import resnet50
 
 
 # keep the code in one mega class for copying and pasting into Claude.ai
-FEATURE_SIZE_AVG_POOL = 2 # use 2 - not 4. https://github.com/johndpope/MegaPortrait-hack/issues/23
+FEATURE_SIZE_AVG_POOL = 2 
 FEATURE_SIZE = (2, 2) 
-COMPRESS_DIM = 512 # 🤷 TODO 1: maybe 256 or 512, 512 may be more reasonable for Emtn/app compression
+COMPRESS_DIM = 512 
 
 
 class FaceEncoder(nn.Module):
