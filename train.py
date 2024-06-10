@@ -247,6 +247,8 @@ def main(cfg: OmegaConf) -> None:
     train_stage1(cfg,  encoder, decoder, diffusion_transformer, dataloader)
 
     # Stage 2 training
+    dataset.stage = 'stage2'
+    dataloader = DataLoader(dataset, batch_size=cfg.training.batch_size, shuffle=True, num_workers=0)
     train_stage2(cfg,  encoder, decoder, diffusion_transformer, dataloader)
 
 

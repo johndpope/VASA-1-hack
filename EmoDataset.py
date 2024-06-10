@@ -16,6 +16,8 @@ from tqdm import tqdm
 import cv2
 from pathlib import Path
 from torchvision.transforms.functional import to_pil_image, to_tensor
+from decord import VideoReader,AVReader
+
 
 # face warp
 from skimage.transform import PiecewiseAffineTransform, warp
@@ -44,6 +46,9 @@ class EMODataset(Dataset):
 
         decord.bridge.set_bridge('torch')  # Optional: This line sets decord to directly output PyTorch tensors.
         self.ctx = cpu()
+
+        self.feature_extractor = Wav2VecFeatureExtractor(model_name='facebook/wav2vec2-base-960h', device='cuda')
+
 
         # TODO - make this more dynamic
         driving = os.path.join(self.video_dir, "-2KGPYEFnsU_11.mp4")
@@ -258,18 +263,49 @@ class EMODataset(Dataset):
         return processed_frames
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
-        video_id = self.video_ids[index]
-        # Use next item in the list for video_id_star, wrap around if at the end
-        video_id_star = self.video_ids_star[(index + 1) % len(self.video_ids_star)]
-        vid_pil_image_list = self.load_and_process_video(os.path.join(self.video_dir, f"{video_id}.mp4"))
-        vid_pil_image_list_star = self.load_and_process_video(os.path.join(self.video_dir, f"{video_id_star}.mp4"))
 
-        sample = {
-            "video_id": video_id,
-            "source_frames": vid_pil_image_list,
-            "driving_frames": self.driving_vid_pil_image_list,
-            "video_id_star": video_id_star,
-            "source_frames_star": vid_pil_image_list_star,
-            "driving_frames_star": self.driving_vid_pil_image_list_star,
-        }
-        return sample
+        if  self.stage == 'stage1':
+            video_id = self.video_ids[index]
+            # Use next item in the list for video_id_star, wrap around if at the end
+            video_id_star = self.video_ids_star[(index + 1) % len(self.video_ids_star)]
+            vid_pil_image_list = self.load_and_process_video(os.path.join(self.video_dir, f"{video_id}.mp4"))
+            vid_pil_image_list_star = self.load_and_process_video(os.path.join(self.video_dir, f"{video_id_star}.mp4"))
+            sample = {
+                "video_id": video_id,
+                "source_frames": vid_pil_image_list,
+                "driving_frames": self.driving_vid_pil_image_list,
+                "video_id_star": video_id_star,
+                "source_frames_star": vid_pil_image_list_star,
+                "driving_frames_star": self.driving_vid_pil_image_list_star,
+            }
+            return sample
+        elif self.stage == 'stage2':
+            av_reader = AVReader(mp4_path, ctx=self.ctx)
+            av_length = len(av_reader)
+            transform_to_tensor = ToTensor()
+            
+            # Read frames and generate masks
+            vid_pil_image_list = []
+            audio_frame_tensor_list = []
+            
+            for frame_idx in range(av_length):
+                audio_frame, video_frame = av_reader[frame_idx]
+                
+                # Read frame and convert to PIL Image
+                frame = Image.fromarray(video_frame.numpy())
+                
+                # Transform the frame
+                state = torch.get_rng_state()
+                pixel_values_frame = self.augmentation(frame, self.pixel_transform, state)
+                vid_pil_image_list.append(pixel_values_frame)
+                
+                # Convert audio frame to tensor
+                audio_frame_tensor = transform_to_tensor(audio_frame.asnumpy())
+                audio_frame_tensor_list.append(audio_frame_tensor)
+            
+            sample = {
+                "video_id": video_id,
+                "images": vid_pil_image_list,
+                "audio_frames": audio_frame_tensor_list,
+            }
+            return sample
