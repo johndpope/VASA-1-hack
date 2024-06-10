@@ -13,6 +13,11 @@ from score_sde_pytorch import VPSDE,get_score_fn
 
 fh = FaceHelper()
 
+def compute_lip_sync_loss(original_landmarks, generated_landmarks):
+    loss_fn = torch.nn.MSELoss()
+    return loss_fn(original_landmarks, generated_landmarks)
+
+
 def train_stage1(cfg, encoder, decoder, diffusion_transformer, dataloader):
     patch = (1, cfg.data.train_width // 2 ** 4, cfg.data.train_height // 2 ** 4)
     hinge_loss = nn.HingeEmbeddingLoss(reduction='mean')
