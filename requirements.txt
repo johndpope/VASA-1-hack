@@ -3,3 +3,4 @@ insightface
 transformers
 decord
 torchaudio
+vgg19

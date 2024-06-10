@@ -5,12 +5,12 @@ from transformers import get_cosine_schedule_with_warmup
 from Net import FaceEncoder, FaceDecoder, DiffusionTransformer, IdentityLoss, DPELoss
 import torchvision.transforms as transforms
 from FaceHelper import FaceHelper
-from mae import VideoMAE
+# from mae import VideoMAE
 from vgg19 import VGGLoss
 from EmoDataset import EMODataset
 from omegaconf import OmegaConf
 from score_sde_pytorch import VPSDE,get_score_fn
-
+import os
 
 output_dir = "output_images"
 os.makedirs(output_dir, exist_ok=True)
