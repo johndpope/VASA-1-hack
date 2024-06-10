@@ -93,7 +93,7 @@ def train_stage1(cfg, encoder, decoder, diffusion_transformer, dataloader):
 def train_stage2(cfg,  encoder, decoder, diffusion_transformer, dataloader):
     print("Stage 2: Holistic Facial Dynamics Generation")
     params_stage2 = list(diffusion_transformer.parameters())
-    optimizer_stage2 = optim.Adam(params_stage2, lr=learning_rate, weight_decay=1e-5)
+    optimizer_stage2 = optim.Adam(params_stage2, lr=cfg.training.lr, weight_decay=1e-5)
     scheduler_stage2 = get_cosine_schedule_with_warmup(optimizer_stage2, num_warmup_steps=0, num_training_steps=len(dataloader) *  cfg.training.epochs)
 
     guidance_scale = 1.5  # Set the guidance scale for CFG
