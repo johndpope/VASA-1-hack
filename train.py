@@ -19,10 +19,6 @@ use_cuda = torch.cuda.is_available()
 device = torch.device("cuda" if use_cuda else "cpu")
 
 
-
-
-
-
 # align to cyclegan
 def discriminator_loss(real_pred, fake_pred, loss_type='lsgan'):
     if loss_type == 'lsgan':
@@ -73,7 +69,7 @@ def compute_lip_sync_loss(original_landmarks, generated_landmarks):
 
 def train_stage1(cfg, encoder, decoder, diffusion_transformer, dataloader):
     patch = (1, cfg.data.train_width // 2 ** 4, cfg.data.train_height // 2 ** 4)
-    hinge_loss = nn.HingeEmbeddingLoss(reduction='mean')
+    # hinge_loss = nn.HingeEmbeddingLoss(reduction='mean')
     feature_matching_loss = nn.MSELoss()
     optimizer_G = torch.optim.AdamW(list(encoder.parameters()) + list(decoder.parameters()) + list(diffusion_transformer.parameters()), lr=cfg.training.lr, betas=(0.5, 0.999), weight_decay=1e-2)
     scheduler_G = get_cosine_schedule_with_warmup(optimizer_G, num_warmup_steps=0, num_training_steps=len(dataloader) * cfg.training.epochs)
@@ -84,7 +80,7 @@ def train_stage1(cfg, encoder, decoder, diffusion_transformer, dataloader):
     # SDE parameters
     sde = VPSDE(beta_min=0.1, beta_max=20, N=1000)
 
-    for epoch in range(cfg.training.epochs):
+    for epoch in range(cfg.training.base_epochs):
         print("Epoch:", epoch)
 
         for batch in dataloader:
@@ -155,7 +151,7 @@ def train_stage2(cfg,  encoder, decoder, diffusion_transformer, dataloader):
     sde = VPSDE(beta_min=0.1, beta_max=20, N=1000)
 
     fh = FaceHelper()
-    for epoch in range( cfg.training.epochs):
+    for epoch in range( cfg.training.diffusion_epochs):
         for batch in dataloader:
             video_frames, _, audio_features, _ = batch
             video_frames = video_frames.cuda()
