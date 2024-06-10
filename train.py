@@ -268,8 +268,6 @@ for epoch in range(num_epochs_stage2):
             score = score_fn(noisy_facial_dynamics, t)
             diffusion_loss = torch.mean(torch.sum((score * std[:, None] + noise) ** 2, dim=(1, 2)))
 
-            # Generate motion field using the MotionFieldEstimator
-            deformation, occlusion = motion_field_estimator(appearance_volume, head_pose, generated_dynamics)
 
             # Face reconstruction using the modified FaceDecoder
             reconstructed_face = decoder(appearance_volume, identity_code, head_pose, generated_dynamics)
