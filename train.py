@@ -11,6 +11,9 @@ from EmoDataset import EMODataset
 from omegaconf import OmegaConf
 from score_sde_pytorch import VPSDE,get_score_fn
 import os
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 output_dir = "output_images"
 os.makedirs(output_dir, exist_ok=True)
@@ -208,7 +211,7 @@ def train_stage2(cfg,  encoder, decoder, diffusion_transformer, dataloader):
                 optimizer_stage2.step()
                 scheduler_stage2.step()
 
-            print(f"Stage 2 - Epoch [{epoch+1}/{num_epochs_stage2}], Total Loss: {total_loss.item()}, Diffusion Loss: {diffusion_loss.item()}, Lip Sync Loss: {lip_sync_loss.item()}, Perceptual Loss: {vgg_loss_frame.item()}, Identity Loss: {identity_loss_value.item()}")
+            print(f"Stage 2 - Epoch [{epoch+1}/{cfg.training.epochs}], Total Loss: {total_loss.item()}, Diffusion Loss: {diffusion_loss.item()}, Lip Sync Loss: {lip_sync_loss.item()}, Perceptual Loss: {vgg_loss_frame.item()}, Identity Loss: {identity_loss_value.item()}")
 
         # Save the diffusion transformer model
         torch.save(diffusion_transformer.state_dict(), f"diffusion_transformer_stage2_epoch{epoch+1}.pth")
