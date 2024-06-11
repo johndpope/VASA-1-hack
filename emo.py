@@ -2,6 +2,10 @@
 import soundfile as sf
 import librosa
 from transformers import Wav2Vec2Model, Wav2Vec2Processor
+import torch
+import numpy as np
+
+# from here - https://github.com/johndpope/Emote-hack/blob/7ee104354d52a5461504c27b9f38d269eac86893/Net.py#L8
 class Wav2VecFeatureExtractor:
     def __init__(self, model_name='facebook/wav2vec2-base-960h', device='cpu'):
         self.model_name = model_name

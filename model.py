@@ -7,21 +7,20 @@ import math
 import colored_traceback.auto
 from torchsummary import summary
 from resnet50 import ResNet50
-from memory_profiler import profile
+
 import logging
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from resnet import ResNet,Bottleneck, resnet18
-import torchvision.models as models
+
+import numpy as np
+
+
 import math
 import colored_traceback.auto
 from torchsummary import summary
 from resnet50 import ResNet50
-from memory_profiler import profile
-import logging
+
+
 import cv2
-import torchvision.models as models
+
 from facenet_pytorch import InceptionResnetV1
 import torchvision.transforms as transforms
 from torchvision.transforms.functional import to_pil_image, to_tensor
