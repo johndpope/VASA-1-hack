@@ -4,3 +4,4 @@ __pycache__
 *.png
 *.npz
 state_dicts.zip
+*.pt

@@ -71,11 +71,11 @@ def compute_lip_sync_loss(original_landmarks, generated_landmarks):
 
 
 def train_stage1(cfg, encoder, decoder, diffusion_transformer, dataloader):
-    patch = (1, cfg.data.train_width // 2 ** 4, cfg.data.train_height // 2 ** 4)
+    # patch = (1, cfg.data.train_width // 2 ** 4, cfg.data.train_height // 2 ** 4)
     # hinge_loss = nn.HingeEmbeddingLoss(reduction='mean')
     feature_matching_loss = nn.MSELoss()
     optimizer_G = torch.optim.AdamW(list(encoder.parameters()) + list(decoder.parameters()) + list(diffusion_transformer.parameters()), lr=cfg.training.lr, betas=(0.5, 0.999), weight_decay=1e-2)
-    scheduler_G = get_cosine_schedule_with_warmup(optimizer_G, num_warmup_steps=0, num_training_steps=len(dataloader) * cfg.training.epochs)
+    scheduler_G = get_cosine_schedule_with_warmup(optimizer_G, num_warmup_steps=0, num_training_steps=len(dataloader) * cfg.training.base_epochs)
 
     perceptual_loss_fn = PerceptualLoss(device, weights={'vgg19': 20.0, 'vggface': 4.0, 'gaze': 5.0,'lpips':10.0})
 
@@ -135,7 +135,7 @@ def train_stage1(cfg, encoder, decoder, diffusion_transformer, dataloader):
                 optimizer_G.step()
                 scheduler_G.step()
 
-        print(f"Epoch [{epoch+1}/{cfg.training.epochs}], Total Loss: {total_loss.item()}")
+        print(f"Epoch [{epoch+1}/{cfg.training.base_epochs}], Total Loss: {total_loss.item()}")
 
         # Save models
         torch.save(encoder.state_dict(), f"encoder_epoch{epoch+1}.pth")
@@ -148,7 +148,7 @@ def train_stage2(cfg,  encoder, decoder, diffusion_transformer, dataloader):
     print("Stage 2: Holistic Facial Dynamics Generation")
     params_stage2 = list(diffusion_transformer.parameters())
     optimizer_stage2 = optim.Adam(params_stage2, lr=cfg.training.lr, weight_decay=1e-5)
-    scheduler_stage2 = get_cosine_schedule_with_warmup(optimizer_stage2, num_warmup_steps=0, num_training_steps=len(dataloader) *  cfg.training.epochs)
+    scheduler_stage2 = get_cosine_schedule_with_warmup(optimizer_stage2, num_warmup_steps=0, num_training_steps=len(dataloader) *  cfg.training.diffusion_epochs)
 
     guidance_scale = 1.5  # Set the guidance scale for CFG
 
@@ -216,7 +216,7 @@ def train_stage2(cfg,  encoder, decoder, diffusion_transformer, dataloader):
                 optimizer_stage2.step()
                 scheduler_stage2.step()
 
-            print(f"Stage 2 - Epoch [{epoch+1}/{cfg.training.epochs}], Total Loss: {total_loss.item()}, Diffusion Loss: {diffusion_loss.item()}, Lip Sync Loss: {lip_sync_loss.item()}, Perceptual Loss: {vgg_loss_frame.item()}, Identity Loss: {identity_loss_value.item()}")
+            print(f"Stage 2 - Epoch [{epoch+1}/{cfg.training.diffusion_epochs}], Total Loss: {total_loss.item()}, Diffusion Loss: {diffusion_loss.item()}, Lip Sync Loss: {lip_sync_loss.item()}, Perceptual Loss: {vgg_loss_frame.item()}, Identity Loss: {identity_loss_value.item()}")
 
         # Save the diffusion transformer model
         torch.save(diffusion_transformer.state_dict(), f"diffusion_transformer_stage2_epoch{epoch+1}.pth")
