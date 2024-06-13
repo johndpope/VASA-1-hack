@@ -1,3 +1,6 @@
 venv
 __pycache__
 *.swp
+*.png
+*.npz
+state_dicts.zip
