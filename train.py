@@ -6,7 +6,7 @@ from Net import FaceEncoder, FaceDecoder, DiffusionTransformer, IdentityLoss, DP
 import torchvision.transforms as transforms
 from FaceHelper import FaceHelper
 # from mae import VideoMAE
-from vgg19 import VGGLoss
+from model import PerceptualLoss
 from EmoDataset import EMODataset
 from omegaconf import OmegaConf
 from score_sde_pytorch import VPSDE,get_score_fn
@@ -77,7 +77,9 @@ def train_stage1(cfg, encoder, decoder, diffusion_transformer, dataloader):
     optimizer_G = torch.optim.AdamW(list(encoder.parameters()) + list(decoder.parameters()) + list(diffusion_transformer.parameters()), lr=cfg.training.lr, betas=(0.5, 0.999), weight_decay=1e-2)
     scheduler_G = get_cosine_schedule_with_warmup(optimizer_G, num_warmup_steps=0, num_training_steps=len(dataloader) * cfg.training.epochs)
 
-    perceptual_loss_fn = VGGLoss(device)
+    perceptual_loss_fn = PerceptualLoss(device, weights={'vgg19': 20.0, 'vggface': 4.0, 'gaze': 5.0,'lpips':10.0})
+
+
     identity_loss = IdentityLoss()
     dpe_loss = DPELoss()
     # SDE parameters
@@ -152,6 +154,9 @@ def train_stage2(cfg,  encoder, decoder, diffusion_transformer, dataloader):
 
     # SDE parameters
     sde = VPSDE(beta_min=0.1, beta_max=20, N=1000)
+    perceptual_loss_fn = PerceptualLoss(device, weights={'vgg19': 20.0, 'vggface': 4.0, 'gaze': 5.0,'lpips':10.0})
+
+    identity_loss = IdentityLoss()
 
     fh = FaceHelper()
     for epoch in range( cfg.training.diffusion_epochs):
@@ -197,7 +202,7 @@ def train_stage2(cfg,  encoder, decoder, diffusion_transformer, dataloader):
                 lip_sync_loss = compute_lip_sync_loss(original_lip_landmarks, generated_lip_landmarks)
 
                 # VGG perceptual loss
-                vgg_loss_frame = vgg_loss(reconstructed_face, frame)
+                vgg_loss_frame = perceptual_loss_fn(reconstructed_face, frame)
 
                 # Identity loss
                 identity_loss_value = identity_loss(frame, reconstructed_face)

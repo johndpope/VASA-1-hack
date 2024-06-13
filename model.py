@@ -27,7 +27,7 @@ from torchvision.transforms.functional import to_pil_image, to_tensor
 from PIL import Image
 from skimage.transform import PiecewiseAffineTransform, warp
 import face_recognition
-
+from lpips import LPIPS
 
 from mysixdrepnet import SixDRepNet_Detector
 # Set this flag to True for DEBUG mode, False for INFO mode
@@ -1846,7 +1846,7 @@ class Discriminator(nn.Module):
         return self.model(img_input)
 
 class PerceptualLoss(nn.Module):
-    def __init__(self, device, weights={'vgg19': 20.0, 'vggface':5.0, 'gaze': 4.0}):
+    def __init__(self, device, weights={'vgg19': 20.0, 'vggface': 5.0, 'gaze': 4.0, 'lpips': 10.0}):
         super(PerceptualLoss, self).__init__()
         self.device = device
         self.weights = weights
@@ -1863,11 +1863,10 @@ class PerceptualLoss(nn.Module):
         # Gaze loss
         self.gaze_loss = MPGazeLoss(device)
 
+        # LPips   
+        self.lpips = LPIPS(net='vgg').to(device).eval()
 
-
-    # Trick shot to reduce memory 3.3 - use random sub_sample
-    # https://arxiv.org/pdf/2404.09736#page=5.58
-    def forward(self, predicted, target, sub_sample_size=(128, 128),use_fm_loss=False):
+    def forward(self, predicted, target, use_fm_loss=False):
         # Normalize input images
         predicted = self.normalize_input(predicted)
         target = self.normalize_input(target)
@@ -1880,11 +1879,15 @@ class PerceptualLoss(nn.Module):
 
         # Compute gaze loss
         # gaze_loss = self.gaze_loss(predicted, target)
+        
+        # Compute LPIPS loss
+        lpips_loss = self.lpips(predicted, target).mean()
 
         # Compute total perceptual loss
         total_loss = (
             self.weights['vgg19'] * vgg19_loss +
             self.weights['vggface'] * vggface_loss +
+            self.weights['lpips'] * lpips_loss +
             self.weights['gaze'] * 1 #gaze_loss
         )
 
@@ -1894,19 +1897,6 @@ class PerceptualLoss(nn.Module):
             total_loss += fm_loss
 
         return total_loss
-
-    def sub_sample_tensor(self, tensor, sub_sample_size):
-        assert tensor.ndim == 4, "Input tensor should have 4 dimensions (batch_size, channels, height, width)"
-        assert tensor.shape[-2] >= sub_sample_size[0] and tensor.shape[-1] >= sub_sample_size[1], "Sub-sample size should not exceed the tensor dimensions"
-
-        batch_size, channels, height, width = tensor.shape
-        # randomly sample so we cover all the image over training.
-        random_offset_x = np.random.randint(0, height - sub_sample_size[0])
-        random_offset_y = np.random.randint(0, width - sub_sample_size[1])
-
-        sub_sampled_tensor = tensor[..., random_offset_x:random_offset_x+sub_sample_size[0], random_offset_y:random_offset_y+sub_sample_size[1]]
-
-        return sub_sampled_tensor
 
     def compute_vgg19_loss(self, predicted, target):
         return self.compute_perceptual_loss(self.vgg19, self.vgg19_layers, predicted, target)
@@ -1950,7 +1940,6 @@ class PerceptualLoss(nn.Module):
         mean = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(1, 3, 1, 1)
         std = torch.tensor([0.229, 0.224, 0.225], device=self.device).view(1, 3, 1, 1)
         return (x - mean) / std
-
 
 
 
