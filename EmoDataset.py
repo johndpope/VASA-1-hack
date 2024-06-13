@@ -17,7 +17,7 @@ import cv2
 from pathlib import Path
 from torchvision.transforms.functional import to_pil_image, to_tensor
 from decord import VideoReader,AVReader
-
+from emo import Wav2VecFeatureExtractor
 
 # face warp
 from skimage.transform import PiecewiseAffineTransform, warp
