@@ -27,7 +27,14 @@ from sklearn.metrics.pairwise import cosine_similarity
 from lpips import LPIPS
 from EmoDataset import EMODataset
 
+import wandb
+from accelerate import Accelerator
+from accelerate.utils import LoggerType
+import accelerate
+from tqdm import tqdm
 
+
+from helper import log_grad_flow,consistent_sub_sample,count_model_params,normalize,visualize_latent_token, add_gradient_hooks, sample_recon
 
 output_dir = "output_images"
 os.makedirs(output_dir, exist_ok=True)
@@ -38,6 +45,8 @@ use_cuda = torch.cuda.is_available()
 device = torch.device("cuda" if use_cuda else "cpu")
 
 
+
+# work from here https://github.com/johndpope/MegaPortrait-hack
 
 
 # Function to calculate FID
@@ -125,228 +134,235 @@ def cosine_loss(positive_pairs, negative_pairs, margin=0.5, scale=5):
 
 
 
-
-
 def train_base(cfg, Gbase, Dbase, dataloader, start_epoch=0):
+    """
+    Main training function for the base stage of VASA
+    
+    Args:
+        cfg: Configuration object containing training parameters
+        Gbase: Generator model
+        Dbase: Discriminator model
+        dataloader: DataLoader for training data
+        start_epoch: Epoch to start training from
+    """
+    # Initialize accelerator and wandb
+    accelerator = Accelerator(
+        log_with="wandb",
+        gradient_accumulation_steps=cfg.training.gradient_accumulation_steps
+    )
+    
+    accelerator.init_trackers(
+        project_name=cfg.training.project_name,
+        config={
+            "learning_rate": cfg.training.lr,
+            "epochs": cfg.training.base_epochs,
+            "batch_size": cfg.training.batch_size,
+            "architecture": "VASA-Base",
+            **cfg.training
+        }
+    )
+
+    # Initialize losses and compute patch size for discriminator
     patch = (1, cfg.data.train_width // 2 ** 4, cfg.data.train_height // 2 ** 4)
     hinge_loss = nn.HingeEmbeddingLoss(reduction='mean')
     feature_matching_loss = nn.MSELoss()
-    Gbase.train()
-    Dbase.train()
+
+    # Initialize optimizers and schedulers
     optimizer_G = torch.optim.AdamW(Gbase.parameters(), lr=cfg.training.lr, betas=(0.5, 0.999), weight_decay=1e-2)
     optimizer_D = torch.optim.AdamW(Dbase.parameters(), lr=cfg.training.lr, betas=(0.5, 0.999), weight_decay=1e-2)
     scheduler_G = CosineAnnealingLR(optimizer_G, T_max=cfg.training.base_epochs, eta_min=1e-6)
     scheduler_D = CosineAnnealingLR(optimizer_D, T_max=cfg.training.base_epochs, eta_min=1e-6)
 
-    perceptual_loss_fn = PerceptualLoss(device, weights={'vgg19': 20.0, 'vggface': 4.0, 'gaze': 5.0,'lpips':10.0})
+    # Prepare models, optimizers, etc. with accelerator
+    Gbase, Dbase, optimizer_G, optimizer_D, scheduler_G, scheduler_D, dataloader = accelerator.prepare(
+        Gbase, Dbase, optimizer_G, optimizer_D, scheduler_G, scheduler_D, dataloader
+    )
+
+    # Initialize loss functions
+    perceptual_loss_fn = PerceptualLoss(accelerator.device, 
+                                       weights={'vgg19': 20.0, 'vggface': 4.0, 'gaze': 5.0, 'lpips': 10.0})
     pairwise_transfer_loss = PairwiseTransferLoss()
-  #  identity_similarity_loss = IdentitySimilarityLoss()
-    identity_similarity_loss = PerceptualLoss(device, weights={'vgg19': 0.0, 'vggface': 1.0, 'gaze': 0.0,'lpips':0.0}) # focus on face
+    identity_similarity_loss = PerceptualLoss(accelerator.device, 
+                                            weights={'vgg19': 0.0, 'vggface': 1.0, 'gaze': 0.0, 'lpips': 0.0})
 
-    scaler = GradScaler()
+    global_step = start_epoch * len(dataloader)
 
-
+    # Training loop
     for epoch in range(start_epoch, cfg.training.base_epochs):
-        print("Epoch:", epoch)
-
-        epoch_loss_G = 0
-        epoch_loss_D = 0
-
-        fid_score = 0
-        csim_score = 0
-        lpips_score = 0
-
-
+        Gbase.train()
+        Dbase.train()
         
-        for batch in dataloader:
+        metrics = {
+            "train/loss_G": 0.0,
+            "train/loss_D": 0.0,
+            "train/loss_perceptual": 0.0,
+            "train/loss_adversarial": 0.0,
+            "train/loss_feature_matching": 0.0,
+            "train/loss_cosine": 0.0,
+            "train/loss_pairwise": 0.0,
+            "train/loss_identity": 0.0,
+        }
 
-                source_frames = batch['source_frames']
-                driving_frames = batch['driving_frames']
-                video_id = batch['video_id'][0]
-
-                # Access videos from dataloader2 for cycle consistency
-                source_frames2 = batch['source_frames_star']
-                driving_frames2 = batch['driving_frames_star']
-                video_id2 = batch['video_id_star'][0]
-
-
-                num_frames = len(driving_frames)
-                len_source_frames = len(source_frames)
-                len_driving_frames = len(driving_frames)
-                len_source_frames2 = len(source_frames2)
-                len_driving_frames2 = len(driving_frames2)
-
-      
-                for idx in range(num_frames):
-                    # loop around if idx exceeds video length
-                    source_frame = source_frames[idx % len_source_frames].to(device)
-                    driving_frame = driving_frames[idx % len_driving_frames].to(device)
-
-                    source_frame_star = source_frames2[idx % len_source_frames2].to(device)
-                    driving_frame_star = driving_frames2[idx % len_driving_frames2].to(device)
+        progress_bar = tqdm(total=len(dataloader), desc=f"Epoch {epoch+1}")
 
 
-                    with autocast():
+        for batch_idx, batch in enumerate(dataloader):
+            # Extract frames from batch
+            source_frames = batch['source_frames']
+            driving_frames = batch['driving_frames']
+            source_frames2 = batch['source_frames_star']
+            driving_frames2 = batch['driving_frames_star']
 
-                        # We use multiple loss functions for training, which can be split  into two groups.
-                        # The first group consists of the standard training objectives for image synthesis. 
-                        # These include perceptual [14] and GAN [ 33 ] losses that match 
-                        # the predicted image ˆx𝑠→𝑑 to the  ground-truth x𝑑 . 
-                        pred_frame,pred_pyramids = Gbase(source_frame, driving_frame)
+            num_frames = len(driving_frames)
+            len_source_frames = len(source_frames)
+            len_driving_frames = len(driving_frames)
+            len_source_frames2 = len(source_frames2)
+            len_driving_frames2 = len(driving_frames2)
 
-                        # Obtain the foreground mask for the driving image
-                        # foreground_mask = get_foreground_mask(source_frame)
+            for idx in range(num_frames):
+                # Get current frames
+                source_frame = source_frames[idx % len_source_frames]
+                driving_frame = driving_frames[idx % len_driving_frames]
+                source_frame_star = source_frames2[idx % len_source_frames2]
+                driving_frame_star = driving_frames2[idx % len_driving_frames2]
 
-                        # # Move the foreground mask to the same device as output_frame
-                        # foreground_mask = foreground_mask.to(pred_frame.device)
+                # Generator forward pass
+                with accelerator.accumulate(Gbase):
+                    # Generate frames and pyramids
+                    pred_frame, pred_pyramids = Gbase(source_frame, driving_frame)
+                    cross_reenacted_image, _ = Gbase(source_frame_star, driving_frame)
 
-                        # # Multiply the predicted and driving images with the foreground mask
-                        # # masked_predicted_image = pred_frame * foreground_mask
-                        # masked_target_image = driving_frame * foreground_mask
+                    # Calculate perceptual loss across pyramid levels
+                    loss_G_per = 0
+                    for scale, pred_scaled in pred_pyramids.items():
+                        target_scaled = F.interpolate(driving_frame, size=pred_scaled.shape[2:], 
+                                                    mode='bilinear', align_corners=False)
+                        loss_G_per += perceptual_loss_fn(pred_scaled, target_scaled)
 
-                        save_images = True
-                        # Save the images
-                        if save_images:
-                            # vutils.save_image(source_frame, f"{output_dir}/source_frame_{idx}.png")
-                            # vutils.save_image(driving_frame, f"{output_dir}/driving_frame_{idx}.png")
-                            vutils.save_image(pred_frame, f"{output_dir}/pred_frame_{idx}.png")
-                            # vutils.save_image(source_frame_star, f"{output_dir}/source_frame_star_{idx}.png")
-                            # vutils.save_image(driving_frame_star, f"{output_dir}/driving_frame_star_{idx}.png")
-                            # vutils.save_image(masked_predicted_image, f"{output_dir}/masked_predicted_image_{idx}.png")
-                            # vutils.save_image(masked_target_image, f"{output_dir}/masked_target_image_{idx}.png")
+                    # Calculate adversarial ground truths
+                    valid = Variable(torch.ones((driving_frame.size(0), *patch)), 
+                                   requires_grad=False).to(accelerator.device)
+                    fake = Variable(torch.ones((driving_frame.size(0), *patch)) * -1, 
+                                  requires_grad=False).to(accelerator.device)
 
-                        # Calculate perceptual losses - use pyramid 
-                        # loss_G_per = perceptual_loss_fn(pred_frame, source_frame)
-                      
-                        loss_G_per = 0
-                        for scale, pred_scaled in pred_pyramids.items():
-                            target_scaled = F.interpolate(driving_frame, size=pred_scaled.shape[2:], mode='bilinear', align_corners=False)
-                            loss_G_per += perceptual_loss_fn(pred_scaled, target_scaled)
+                    # Discriminator predictions
+                    real_pred = Dbase(driving_frame, source_frame)
+                    fake_pred = Dbase(pred_frame.detach(), source_frame)
+                    
+                    # Calculate GAN losses
+                    loss_real = hinge_loss(real_pred, valid)
+                    loss_fake = hinge_loss(fake_pred, fake)
+                    loss_G_adv = 0.5 * (loss_real + loss_fake)
 
-                        # Adversarial ground truths - from Kevin Fringe
-                        valid = Variable(torch.Tensor(np.ones((driving_frame.size(0), *patch))), requires_grad=False).to(device)
-                        fake = Variable(torch.Tensor(-1 * np.ones((driving_frame.size(0), *patch))), requires_grad=False).to(device)
+                    # Feature matching loss
+                    loss_fm = feature_matching_loss(pred_frame, driving_frame)
 
-                        # real loss
-                        real_pred = Dbase(driving_frame, source_frame)
-                        loss_real = hinge_loss(real_pred, valid)
+                    # Calculate disentanglement losses
+                    next_idx = (idx + 20) % len_source_frames
+                    I1 = source_frame
+                    I2 = source_frames[next_idx].to(accelerator.device)
+                    I3 = source_frame_star
+                    I4 = source_frames2[next_idx % len_source_frames2].to(accelerator.device)
+                    
+                    loss_pairwise = pairwise_transfer_loss(Gbase, I1, I2)
+                    loss_identity = identity_similarity_loss(I3, I4)
 
-                        # fake loss
-                        fake_pred = Dbase(pred_frame.detach(), source_frame)
-                        loss_fake = hinge_loss(fake_pred, fake)
+                    # Get motion descriptors for cycle consistency
+                    _, _, z_pred = Gbase.motionEncoder(pred_frame)
+                    _, _, zd = Gbase.motionEncoder(driving_frame)
+                    _, _, z_star_pred = Gbase.motionEncoder(cross_reenacted_image)
+                    _, _, zd_star = Gbase.motionEncoder(driving_frame_star)
 
-                        # Train discriminator
-                        optimizer_D.zero_grad()
-                        
-                        # Calculate adversarial losses
-                        real_pred = Dbase(driving_frame, source_frame)
-                        fake_pred = Dbase(pred_frame.detach(), source_frame)
-                        loss_D = discriminator_loss(real_pred, fake_pred, loss_type='lsgan')
+                    # Calculate cycle consistency loss
+                    P = [(z_pred, zd), (z_star_pred, zd)]
+                    N = [(z_pred, zd_star), (z_star_pred, zd_star)]
+                    loss_G_cos = cosine_loss(P, N)
 
-                        scaler.scale(loss_D).backward()
-                        scaler.step(optimizer_D)
-                        scaler.update()
+                    # Total generator loss
+                    total_loss_G = (cfg.training.w_per * loss_G_per + 
+                                  cfg.training.w_adv * loss_G_adv + 
+                                  cfg.training.w_fm * loss_fm + 
+                                  cfg.training.w_cos * loss_G_cos + 
+                                  cfg.training.w_pairwise * loss_pairwise + 
+                                  cfg.training.w_identity * loss_identity)
 
-                        # Calculate adversarial losses
-                        loss_G_adv = 0.5 * (loss_real + loss_fake)
+                    # Backward pass
+                    accelerator.backward(total_loss_G)
+                    optimizer_G.step()
+                    optimizer_G.zero_grad()
 
-                         # Feature matching loss
-                        loss_fm = feature_matching_loss(pred_frame, driving_frame)
+                # Discriminator forward pass
+                with accelerator.accumulate(Dbase):
+                    real_pred = Dbase(driving_frame, source_frame)
+                    fake_pred = Dbase(pred_frame.detach(), source_frame)
+                    loss_D = discriminator_loss(real_pred, fake_pred, loss_type='lsgan')
+                    
+                    accelerator.backward(loss_D)
+                    optimizer_D.step()
+                    optimizer_D.zero_grad()
 
-                        
+                # Update metrics
+                metrics["train/loss_G"] += total_loss_G.item()
+                metrics["train/loss_D"] += loss_D.item()
+                metrics["train/loss_perceptual"] += loss_G_per.item()
+                metrics["train/loss_adversarial"] += loss_G_adv.item()
+                metrics["train/loss_feature_matching"] += loss_fm.item()
+                metrics["train/loss_cosine"] += loss_G_cos.item()
+                metrics["train/loss_pairwise"] += loss_pairwise.item()
+                metrics["train/loss_identity"] += loss_identity.item()
 
-
-
-                        # New disentangling losses - from VASA paper
-                        # I1 and I2 are from the same video, I3 and I4 are from different videos
-    
-                        # Get the next frame index, wrapping around if necessary
-                        next_idx = (idx + 20) % len_source_frames
-
-                        I1 = source_frame
-                        I2 = source_frames[next_idx].to(device)
-                        I3 = source_frame_star
-                        I4 = source_frames2[next_idx % len_source_frames2].to(device)
-                        loss_pairwise = pairwise_transfer_loss(Gbase,I1, I2)
-                        loss_identity = identity_similarity_loss(I3, I4)
-
-
-                        
-
-                        # The other objective CycleGAN regularizes the training and introduces disentanglement between the motion and canonical space
-                        # In order to calculate this loss, we use an additional source-driving  pair x𝑠∗ and x𝑑∗ , 
-                        # which is sampled from a different video! and therefore has different appearance from the current x𝑠 , x𝑑 pair.
-
-                        # produce the following cross-reenacted image: ˆx𝑠∗→𝑑 = Gbase (x𝑠∗ , x𝑑 )
-                        # 
-                        cross_reenacted_image,_ = Gbase(source_frame_star, driving_frame)
-                        if save_images:
-                            vutils.save_image(cross_reenacted_image, f"{output_dir}/cross_reenacted_image_{idx}.png")
-                
-                        # # Store the motion descriptors z𝑠→𝑑(predicted) and z𝑠∗→𝑑 (star predicted) from the 
-                        # # respective forward passes of the base network.                        
-                        _, _, z_pred = Gbase.motionEncoder(pred_frame) 
-                        _, _, zd = Gbase.motionEncoder(driving_frame) 
-                        
-                        _, _, z_star__pred = Gbase.motionEncoder(cross_reenacted_image) 
-                        _, _, zd_star = Gbase.motionEncoder(driving_frame_star) 
-
-                
-                        # # Calculate cycle consistency loss 
-                        # # We then arrange the motion descriptors into positive pairs P that
-                        # # should align with each other: P = (z𝑠→𝑑 , z𝑑 ), (z𝑠∗→𝑑 , z𝑑 ) , and
-                        # # the negative pairs: N = (z𝑠→𝑑 , z𝑑∗ ), (z𝑠∗→𝑑 , z𝑑∗ ) . These pairs are
-                        # # used to calculate the following cosine distance:
-
-                        P = [(z_pred, zd)     ,(z_star__pred, zd)]
-                        N = [(z_pred, zd_star),(z_star__pred, zd_star)]
-                        loss_G_cos = cosine_loss(P, N)
-                        
-                
-                        
-                        # Backpropagate and update generator
-                        optimizer_G.zero_grad()
-                          # Total generator loss
-                        total_loss = cfg.training.w_per * loss_G_per + \
-                            cfg.training.w_adv * loss_G_adv + \
-                            cfg.training.w_fm * loss_fm + \
-                            cfg.training.w_cos * loss_G_cos + \
-                            cfg.training.w_pairwise * loss_pairwise + \
-                            cfg.training.w_identity * loss_identity
-                        scaler.scale(total_loss).backward()
-                        scaler.step(optimizer_G)
-                        scaler.update()
+                # Save sample images periodically
+                if batch_idx % cfg.training.sample_interval == 0:
+                    img_samples = {
+                        "source": source_frame,
+                        "driving": driving_frame,
+                        "predicted": pred_frame,
+                        "cross_reenacted": cross_reenacted_image
+                    }
+                    accelerator.log({"samples": img_samples}, step=epoch)
 
 
-                        epoch_loss_G += total_loss.item()
-                        epoch_loss_D += loss_D.item()
+                # Sample and log images
+                if global_step % cfg.training.sample_interval == 0:
+                    sample_data = (pred_frame, source_frame, driving_frame)
+                    sample_recon(Gbase, sample_data, accelerator,
+                               f"samples/sample_{global_step}.png",
+                               num_samples=min(4, pred_frame.size(0)))
 
+                # Log gradients
+                if global_step % cfg.training.log_grad_interval == 0:
+                    log_grad_flow(Gbase.named_parameters(), global_step)
+                    log_grad_flow(Dbase.named_parameters(), global_step)
 
+                global_step += 1
 
+            progress_bar.update(1)
 
-
-        avg_loss_G = epoch_loss_G / len(dataloader)
-        avg_loss_D = epoch_loss_D / len(dataloader)
+        # Average and log metrics
+        num_batches = len(dataloader)
+        for key in metrics:
+            metrics[key] /= num_batches
         
- 
+        metrics["learning_rate"] = scheduler_G.get_last_lr()[0]
+        accelerator.log(metrics, step=epoch)
 
-
+        # Step schedulers
         scheduler_G.step()
         scheduler_D.step()
 
-        if (epoch + 1) % cfg.training.log_interval == 0:
-            print(f"Epoch [{epoch+1}/{cfg.training.base_epochs}], "
-                  f"Loss_G: {loss_G_cos.item():.4f}, Loss_D: {loss_D.item():.4f}")
-
+        # Save checkpoint
         if (epoch + 1) % cfg.training.save_interval == 0:
-            torch.save({
-                'epoch': epoch,
-                'model_G_state_dict': Gbase.state_dict(),
-                'model_D_state_dict': Dbase.state_dict(),
-                'optimizer_G_state_dict': optimizer_G.state_dict(),
-                'optimizer_D_state_dict': optimizer_D.state_dict(),
-            }, f"checkpoint_epoch{epoch+1}.pth")
+            accelerator.save_state(f"checkpoint_epoch{epoch+1}")
 
+        # Print progress
+        if accelerator.is_main_process:
+            accelerator.print(
+                f"Epoch [{epoch+1}/{cfg.training.base_epochs}] "
+                f"Loss_G: {metrics['train/loss_G']:.4f} "
+                f"Loss_D: {metrics['train/loss_D']:.4f}"
+            )
+
+    accelerator.end_training()
 
 
 

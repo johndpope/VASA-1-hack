@@ -5,6 +5,8 @@ data:
   n_sample_frames: 1
   n_motion_frames: 2
 training:
+  project_name: "vasa-training"
+  gradient_accumulation_steps: 1
   frame_offset: 20
   checkpoint_path: './checkpoint_epoch100.pth'
   save_interval: 50

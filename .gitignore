@@ -5,3 +5,5 @@ __pycache__
 *.npz
 state_dicts.zip
 *.pt
+wandb/*
+outputs/*
