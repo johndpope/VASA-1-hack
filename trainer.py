@@ -20,6 +20,7 @@ from vasa_config import VASAConfig
 from generator import VideoGenerator,MotionGenerator,VideoPostProcessor
 import wandb
 from dataset import VASADataset
+from omegaconf import OmegaConf
 
 
 class TrainingLogger:
@@ -109,6 +110,255 @@ class VASATrainer:
         if resume_path:
             self.resume_from_checkpoint(resume_path)
 
+      # Track training stages
+        self.current_stage = None
+        self.stages_completed = set()
+
+    def train_all_stages(self):
+        """Execute all training stages in order"""
+        # Stage 1: Face Latent Space Learning
+        if not self.is_stage_completed('latent_space'):
+            self.train_latent_space()
+            self.mark_stage_completed('latent_space')
+        
+        # Stage 2: Holistic Facial Dynamics Generation
+        if not self.is_stage_completed('dynamics'):
+            self.train_dynamics()
+            self.mark_stage_completed('dynamics')
+
+    def train_latent_space(self):
+        """Stage 1: Face Latent Space Learning"""
+        self.logger.info("Starting Stage 1: Face Latent Space Learning")
+        self.current_stage = 'latent_space'
+        
+        # Initialize models for stage 1
+        face_encoder = VASAFaceEncoder(
+            feature_dim=self.config.d_model
+        ).to(self.device)
+        
+        # Initialize loss components
+        identity_loss = IdentityLoss().to(self.device)
+        dpe_loss = DPELoss().to(self.device)
+        
+        # Optimizer for stage 1
+        optimizer = torch.optim.Adam(
+            face_encoder.parameters(),
+            lr=self.config.latent_space_lr
+        )
+        
+        # Training loop for stage 1
+        for epoch in range(self.config.latent_space_epochs):
+            face_encoder.train()
+            epoch_losses = defaultdict(float)
+            
+            for batch in self.train_loader:
+                batch = {k: v.to(self.device) for k, v in batch.items()}
+                
+                # Extract face components
+                face_components = face_encoder(batch['frames'])
+                
+                # Compute disentanglement losses
+                losses = {}
+                
+                # Identity preservation loss
+                losses['identity'] = identity_loss(
+                    face_components['identity'],
+                    batch['frames']
+                )
+                
+                # DPE loss for disentanglement
+                dpe_losses = dpe_loss(
+                    batch['frames'][:, 0],  # Source frame
+                    batch['frames'][:, 1:],  # Target frames
+                    face_components['pose_transfer'],
+                    face_components['expression_transfer']
+                )
+                losses.update(dpe_losses)
+                
+                # Total loss for stage 1
+                total_loss = (
+                    self.config.lambda_identity * losses['identity'] +
+                    self.config.lambda_dpe * losses['dpe']
+                )
+                
+                # Backward pass
+                optimizer.zero_grad()
+                total_loss.backward()
+                optimizer.step()
+                
+                # Accumulate losses
+                for k, v in losses.items():
+                    epoch_losses[k] += v.item()
+            
+            # Log epoch metrics
+            self.logger.log_metrics({
+                'stage': 1,
+                'epoch': epoch,
+                **{f'stage1_{k}': v/len(self.train_loader) 
+                   for k, v in epoch_losses.items()}
+            })
+        
+        # Save stage 1 checkpoint
+        self.save_stage_checkpoint(face_encoder, 'latent_space')
+
+    def train_dynamics(self):
+        """Stage 2: Holistic Facial Dynamics Generation"""
+        self.logger.info("Starting Stage 2: Facial Dynamics Generation")
+        self.current_stage = 'dynamics'
+        
+        # Load pre-trained face encoder
+        face_encoder = self.load_stage_checkpoint('latent_space')
+        face_encoder.eval()  # Freeze face encoder weights
+        
+        # Initialize diffusion model
+        diffusion_model = VASADiffusionTransformer(
+            d_model=self.config.d_model,
+            nhead=self.config.nhead,
+            num_layers=self.config.num_layers
+        ).to(self.device)
+        
+        # Initialize diffusion process
+        diffusion = VASADiffusion(
+            num_steps=self.config.num_steps,
+            beta_start=self.config.beta_start,
+            beta_end=self.config.beta_end
+        )
+        
+        # Optimizer for stage 2
+        optimizer = torch.optim.Adam(
+            diffusion_model.parameters(),
+            lr=self.config.dynamics_lr
+        )
+        
+        # Training loop for stage 2
+        for epoch in range(self.config.dynamics_epochs):
+            diffusion_model.train()
+            epoch_losses = defaultdict(float)
+            
+            for batch in self.train_loader:
+                batch = {k: v.to(self.device) for k, v in batch.items()}
+                
+                # Extract face dynamics with frozen encoder
+                with torch.no_grad():
+                    face_components = face_encoder(batch['frames'])
+                
+                # Sample timestep and add noise
+                t = torch.randint(
+                    0,
+                    self.config.num_steps,
+                    (batch['frames'].shape[0],),
+                    device=self.device
+                )
+                
+                noise = torch.randn_like(face_components['dynamics'])
+                noisy_dynamics = diffusion.q_sample(
+                    face_components['dynamics'],
+                    t,
+                    noise
+                )
+                
+                # Prepare conditions
+                conditions = {
+                    'gaze': batch['gaze'],
+                    'distance': batch['distance'],
+                    'emotion': batch['emotion']
+                }
+                
+                # Forward pass with CFG
+                diffusion_output = diffusion_model(
+                    noisy_dynamics,
+                    t,
+                    batch['audio_features'],
+                    conditions,
+                    {
+                        'audio': self.config.cfg_audio_scale,
+                        'gaze': self.config.cfg_gaze_scale
+                    }
+                )
+                
+                # Compute stage 2 losses
+                losses = {}
+                
+                # Diffusion loss
+                losses['diffusion'] = F.mse_loss(
+                    diffusion_output['full'],
+                    face_components['dynamics']
+                )
+                
+                # CFG losses
+                for cond_type in ['audio', 'gaze']:
+                    if f'masked_{cond_type}' in diffusion_output:
+                        losses[f'cfg_{cond_type}'] = F.mse_loss(
+                            diffusion_output[f'masked_{cond_type}'],
+                            diffusion_output['uncond']
+                        )
+                
+                # Total loss for stage 2
+                total_loss = (
+                    losses['diffusion'] +
+                    sum(self.config.lambda_cfg * losses[f'cfg_{k}']
+                        for k in ['audio', 'gaze'])
+                )
+                
+                # Backward pass
+                optimizer.zero_grad()
+                total_loss.backward()
+                optimizer.step()
+                
+                # Accumulate losses
+                for k, v in losses.items():
+                    epoch_losses[k] += v.item()
+            
+            # Log epoch metrics
+            self.logger.log_metrics({
+                'stage': 2,
+                'epoch': epoch,
+                **{f'stage2_{k}': v/len(self.train_loader) 
+                   for k, v in epoch_losses.items()}
+            })
+        
+        # Save stage 2 checkpoint
+        self.save_stage_checkpoint(diffusion_model, 'dynamics')
+
+    def save_stage_checkpoint(self, model: nn.Module, stage: str):
+        """Save stage-specific checkpoint"""
+        checkpoint = {
+            'model_state': model.state_dict(),
+            'stage': stage,
+            'config': self.config
+        }
+        path = self.logger.log_dir / f'checkpoint_stage_{stage}.pt'
+        torch.save(checkpoint, path)
+
+    def load_stage_checkpoint(self, stage: str) -> nn.Module:
+        """Load stage-specific checkpoint"""
+        path = self.logger.log_dir / f'checkpoint_stage_{stage}.pt'
+        checkpoint = torch.load(path, map_location=self.device)
+        
+        if stage == 'latent_space':
+            model = VASAFaceEncoder(
+                feature_dim=self.config.d_model
+            ).to(self.device)
+        elif stage == 'dynamics':
+            model = VASADiffusionTransformer(
+                d_model=self.config.d_model,
+                nhead=self.config.nhead,
+                num_layers=self.config.num_layers
+            ).to(self.device)
+            
+        model.load_state_dict(checkpoint['model_state'])
+        return model
+
+    def is_stage_completed(self, stage: str) -> bool:
+        """Check if a training stage has been completed"""
+        return stage in self.stages_completed
+
+    def mark_stage_completed(self, stage: str):
+        """Mark a training stage as completed"""
+        self.stages_completed.add(stage)
+        self.logger.info(f"Completed training stage: {stage}")
+
+        
     def setup_distributed(self):
         """Initialize distributed training if needed"""
         self.distributed = self.local_rank != -1
@@ -888,65 +1138,71 @@ def setup_experiment(args) -> Dict[str, Any]:
     }
 
 
+'''
+Stage 1: Latent Space Learning
+- Focus on disentanglement
+- Identity preservation
+- DPE losses
+
+Stage 2: Dynamics Generation
+- Frozen face encoder
+- Diffusion training
+- CFG losses
+
+'''
+
+
+def setup_config(args) -> VASAConfig:
+    """Setup and validate configuration"""
+    # Create experiment directory
+    exp_dir = Path(args.output_dir) / args.experiment_name
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Load and merge configurations
+    config = VASAConfig.load(args.config)
+    
+    # Override with command line arguments
+    cli_overrides = OmegaConf.from_dotlist([
+        f"{k}={v}" for k, v in vars(args).items() 
+        if v is not None and k not in ['config', 'output_dir']
+    ])
+    config = OmegaConf.merge(config, cli_overrides)
+    
+    # Save merged config
+    config.save(exp_dir / 'config.yaml')
+    
+    return config
 
 def main():
     # Parse arguments
-    args = parse_args()
+    parser = argparse.ArgumentParser(description='Train VASA model')
+    parser.add_argument('--config', type=str, required=True,
+                       help='Path to config file')
+    parser.add_argument('--experiment_name', type=str,
+                       help='Override experiment name')
+    parser.add_argument('--output_dir', type=str, default='outputs',
+                       help='Output directory')
+    # Add other CLI arguments as needed
+    args = parser.parse_args()
     
-    # Setup experiment
-    exp_setup = setup_experiment(args)
-    
-    # Create config, logger, and trainer
-    config = VASAConfig.from_yaml(config.yaml)
-    logger = TrainingLogger(
-        args.exp_name,
-        exp_setup['exp_dir'],
-        use_wandb=True
-    )
-    
-    # Initialize trainer
-    trainer = VASATrainer(config, logger)
-    
-    start_epoch = 0 
-    
-    
-    # Training loop
-    best_metric = float('inf')  # For sync_distance, lower is better
-    
-    for epoch in range(start_epoch, config.num_epochs):
-        # Train for one epoch
-        trainer.train_epoch(epoch)
+    try:
+        # Setup configuration
+        config = setup_config(args)
         
-        # Run validation
-        # metrics = validate(trainer, epoch)
+        # Setup logger
+        logger = TrainingLogger(
+            config.experiment_name,
+            Path(config.output_dir),
+            use_wandb=config.use_wandb
+        )
         
-        # Save checkpoint
-        # is_best = metrics['sync_distance'] < best_metric
-        # if is_best:
-        #     best_metric = metrics['sync_distance']
-        
-       
-        # Update schedulers
-        trainer.encoder_scheduler.step()
-        trainer.diffusion_scheduler.step()
-        trainer.decoder_scheduler.step()
-        
-        # # Log epoch summary
-        # logger.logger.info(
-        #     f"Epoch {epoch} | "
-        #     f"Train Loss: {trainer.train_loss:.4f} | "
-        #     f"Val Sync Distance: {metrics['sync_distance']:.4f} | "
-        #     f"Val CAPP Score: {metrics['capp_score']:.4f}"
-        # )
-        
-        # Generate and save samples
-        if epoch % 5 == 0:
-            trainer.generate_samples(
-                next(iter(trainer.val_loader)),
-                epoch
-            )
-    
-    logger.logger.info("Training completed!")
+        # Initialize trainer
+        trainer = VASATrainer(config, logger)
+        trainer.train_all_stages()
+    except Exception as e:
+        print(f"Error during setup: {str(e)}")
+        raise
 
 if __name__ == "__main__":
     main()
+

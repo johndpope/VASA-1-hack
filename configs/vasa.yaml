@@ -1,0 +1,69 @@
+# Training settings
+experiment_name: vasa_experiment
+output_dir: outputs/vasa
+
+training:
+  batch_size: 32
+  num_epochs: 100
+  learning_rate: 1e-4
+  min_lr: 1e-6
+  warmup_epochs: 5
+  num_workers: 4
+  max_grad_norm: 1.0
+  gradient_accumulation_steps: 1
+
+model:
+  d_model: 512
+  nhead: 8
+  num_layers: 8
+  motion_dim: 256
+  audio_dim: 128
+  dropout: 0.1
+
+diffusion:
+  num_steps: 50
+  beta_start: 1e-4
+  beta_end: 0.02
+
+generation:
+  sequence_length: 25
+  overlap: 5
+  smoothing_window: 5
+  generation_interval: 100
+  apply_post_processing: true
+
+cfg:
+  audio_scale: 0.5
+  gaze_scale: 1.0
+  condition_dropout: 0.1
+
+loss:
+  lambda_recon: 1.0
+  lambda_identity: 0.1
+  lambda_dpe: 0.1
+  lambda_pose: 1.0
+  lambda_expr: 1.0
+  lambda_cfg: 0.1
+
+data:
+  frame_size: [512, 512]
+  train_data: data/voxceleb2/train
+  val_data: data/voxceleb2/val
+  max_videos: null
+  cache_audio: true
+  preextract_audio: true
+
+stage:
+  # Stage 1: Latent Space Learning
+
+  latent_space_epochs: 100
+  latent_space_lr: 1e-4
+  dynamics_epochs: 200
+  dynamics_lr: 1e-4
+  lambda_identity: 0.1,
+  lambda_dpe: 0.1,
+
+  # Stage 2: Dynamics Generation
+  cfg_audio_scale: 0.5,
+  cfg_gaze_scale: 1.0,
+  lambda_cfg: 0.1

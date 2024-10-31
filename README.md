@@ -20,6 +20,15 @@ this latest code seems to nail it.
 I update progress here - https://github.com/johndpope/VASA-1-hack/issues/20
 
 
+✅ dataset is good
+trainer in progress.
+```
+python dataset_testing.py 
+ 
+python trainer.py --config configs/vasa.yaml --exp-name vasa_experiment
+```
+
+
 
 
 # VASA Classes Documentation
