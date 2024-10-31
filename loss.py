@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import resnet50, ResNet50_Weights
 from typing import Dict, Tuple
-from VASAConfig import VASAConfig
+from vasa_config import VASAConfig
 
 
 class IdentityLoss(nn.Module):

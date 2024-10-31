@@ -16,7 +16,7 @@ import yaml
 from typing import List, Optional, Tuple
 from VASA import *
 from loss import *
-from VASAConfig import VASAConfig
+from vasa_config import VASAConfig
 from generator import VideoGenerator,MotionGenerator,VideoPostProcessor
 import wandb
 from dataset import VASADataset
@@ -897,7 +897,7 @@ def main():
     exp_setup = setup_experiment(args)
     
     # Create config, logger, and trainer
-    config = VASAConfig(exp_setup['config'])
+    config = VASAConfig.from_yaml(config.yaml)
     logger = TrainingLogger(
         args.exp_name,
         exp_setup['exp_dir'],
