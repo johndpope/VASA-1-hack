@@ -312,9 +312,17 @@ class VASADatasetTester:
 
 if __name__ == "__main__":
     # Example usage
-    video_paths = ["path/to/videos/*.mp4"]  # Replace with actual paths
-    dataset = VASADataset(video_paths)
-    
+
+
+    dataset = VASADataset(
+        video_folder="/media/oem/12TB/Downloads/CelebV-HQ/celebvhq/35666/",
+        max_videos=100, 
+        frame_size=(512, 512),
+        sequence_length=25,
+        cache_audio=True,  # Enable audio caching
+        preextract_audio=True,
+        random_seed=42
+    )
     tester = VASADatasetTester(dataset)
     tester.run_all_tests()
 
