@@ -5,11 +5,15 @@ from torch.utils.data import Dataset, DataLoader
 from typing import Dict, Tuple, Optional, List
 import math
 
+from dataset import VASADataset
 
 from resnet import resnet18,resnet50
  
 # Megaportraits - https://github.com/johndpope/MegaPortrait-hack/issues/36
 from model import CustomResNet50,Eapp,FEATURE_SIZE,COMPRESS_DIM,WarpGeneratorS2C,WarpGeneratorC2D,G3d,G2d,apply_warping_field
+
+from transformers import Wav2Vec2Model, Wav2Vec2Processor
+from insightface.app import FaceAnalysis
 
 
 # TODO - wire this up as off the shelf pretrained model for Head Pose Encoder
@@ -475,132 +479,8 @@ class VASALoss(nn.Module):
         
         return losses
     
-from transformers import Wav2Vec2Model, Wav2Vec2Processor
-from insightface.app import FaceAnalysis
-from VASADataset import VASADataset
-
-class CAPPScore(nn.Module):
-    """
-    Contrastive Audio and Pose Pretraining (CAPP) score implementation
-    """
-    def __init__(self, pose_dim: int, audio_dim: int, hidden_dim: int = 512):
-        super().__init__()
-        
-        # Pose encoder (6-layer transformer)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_dim,
-            nhead=8,
-            dim_feedforward=hidden_dim * 4,
-            dropout=0.1,
-            batch_first=True
-        )
-        self.pose_encoder = nn.Sequential(
-            nn.Linear(pose_dim, hidden_dim),
-            nn.TransformerEncoder(encoder_layer, num_layers=6),
-            nn.AdaptiveAvgPool1d(1),
-            nn.Linear(hidden_dim, hidden_dim)
-        )
-        
-        # Audio encoder (initialized from Wav2Vec2)
-        self.audio_encoder = Wav2Vec2Model.from_pretrained('facebook/wav2vec2-base')
-        self.audio_proj = nn.Linear(768, hidden_dim)  # Wav2Vec2 dim to hidden_dim
-        
-        # Temperature parameter
-        self.temperature = nn.Parameter(torch.ones([]) * 0.07)
-        
-    def forward(self, pose_sequences: torch.Tensor, audio_features: torch.Tensor) -> torch.Tensor:
-        """
-        Compute CAPP score for pose-audio pairs
-        """
-        # Encode pose sequences
-        pose_embeddings = self.pose_encoder(pose_sequences)
-        pose_embeddings = F.normalize(pose_embeddings, dim=-1)
-        
-        # Encode audio features
-        audio_embeddings = self.audio_encoder(audio_features).last_hidden_state
-        audio_embeddings = self.audio_proj(audio_embeddings)
-        audio_embeddings = audio_embeddings.mean(dim=1)  # Global pooling
-        audio_embeddings = F.normalize(audio_embeddings, dim=-1)
-        
-        # Compute similarity matrix
-        similarity = torch.matmul(pose_embeddings, audio_embeddings.T) / self.temperature
-        
-        return similarity
 
 
 
-class Evaluator:
-    """
-    Evaluation metrics for VASA
-    """
-    def __init__(self):
-        self.syncnet = SyncNet()  # Load pretrained SyncNet
-        self.capp_scorer = CAPPScore(pose_dim=6, audio_dim=768)
-        
-    @torch.no_grad()
-    def compute_metrics(self,
-                       generated_video: torch.Tensor,
-                       audio_features: torch.Tensor,
-                       real_video: Optional[torch.Tensor] = None) -> Dict[str, float]:
-        """
-        Compute evaluation metrics for generated video
-        """
-        metrics = {}
-        
-        # Compute SyncNet confidence and distance
-        sync_conf, sync_dist = self.syncnet(generated_video, audio_features)
-        metrics['sync_confidence'] = sync_conf.mean().item()
-        metrics['sync_distance'] = sync_dist.mean().item()
-        
-        # Compute CAPP score
-        pose_sequences = extract_pose_sequences(generated_video)  # Extract pose from video
-        capp_similarity = self.capp_scorer(pose_sequences, audio_features)
-        metrics['capp_score'] = capp_similarity.diagonal().mean().item()
-        
-        # Compute pose variation intensity
-        metrics['pose_intensity'] = compute_pose_intensity(pose_sequences)
-        
-        # Compute FVD if real video is provided
-        if real_video is not None:
-            metrics['fvd'] = compute_fvd(generated_video, real_video)
-        
-        return metrics
+
     
-
-
-
-
-class VASAConfig:
-    """Configuration manager for VASA training"""
-    def __init__(self, config_path: str):
-        with open(config_path) as f:
-            self.config = yaml.safe_load(f)
-        
-        # Training settings
-        self.train_config = self.config['training']
-        self.batch_size = self.train_config.get('batch_size', 32)
-        self.num_epochs = self.train_config.get('num_epochs', 100)
-        self.learning_rate = self.train_config.get('learning_rate', 1e-4)
-        
-        # Model settings
-        self.model_config = self.config['model']
-        self.d_model = self.model_config.get('d_model', 512)
-        self.nhead = self.model_config.get('nhead', 8)
-        self.num_layers = self.model_config.get('num_layers', 8)
-        
-        # Diffusion settings
-        self.diffusion_config = self.config['diffusion']
-        self.num_steps = self.diffusion_config.get('num_steps', 50)
-        
-        # CFG settings
-        self.cfg_config = self.config['cfg']
-        self.audio_scale = self.cfg_config.get('audio_scale', 0.5)
-        self.gaze_scale = self.cfg_config.get('gaze_scale', 1.0)
-        
-        # Data settings
-        self.data_config = self.config['data']
-        self.frame_size = tuple(self.data_config.get('frame_size', [512, 512]))
-        self.sequence_length = self.data_config.get('sequence_length', 25)
-
-
-

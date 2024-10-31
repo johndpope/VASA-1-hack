@@ -82,10 +82,10 @@ class VASADatasetTester:
             assert self.dataset.emotion_recognizer is not None, "Emotion recognizer not initialized"
             assert self.dataset.audio_model is not None, "Audio model not initialized"
             
-            self.logger.info("✓ Dataset initialization tests passed")
+            self.logger.info("✅ Dataset initialization tests passed")
             
         except Exception as e:
-            self.logger.error(f"Dataset initialization failed: {str(e)}")
+            self.logger.error(f"🔥Dataset initialization failed: {str(e)}")
             raise
     def test_single_sample(self) -> Dict[str, torch.Tensor]:
         """Test single sample extraction"""
@@ -110,11 +110,11 @@ class VASADatasetTester:
                     assert not torch.isinf(value).any(), f"Inf values found in {key}"
             
             self.visualize_sample(sample)
-            self.logger.info("✓ Single sample test passed")
+            self.logger.info("✅ Single sample test passed")
             return sample
             
         except Exception as e:
-            self.logger.error(f"Single sample test failed: {str(e)}")
+            self.logger.error(f"🔥Single sample test failed: {str(e)}")
             raise
 
     def test_batch_loading(self):
@@ -138,10 +138,10 @@ class VASADatasetTester:
                     self.logger.info(f"{key}: {value.shape}")
                     assert value.shape[0] == 4, f"Incorrect batch size for {key}"
             
-            self.logger.info("✓ Batch loading test passed")
+            self.logger.info("✅ Batch loading test passed")
             
         except Exception as e:
-            self.logger.error(f"Batch loading test failed: {str(e)}")
+            self.logger.error(f"🔥Batch loading test failed: {str(e)}")
             raise
 
     def test_emotion_extraction(self, sample: Dict[str, torch.Tensor]):
@@ -160,10 +160,10 @@ class VASADatasetTester:
             # Visualize emotion distributions
             self.visualize_emotions(emotion_tensor)
             
-            self.logger.info("✓ Emotion extraction test passed")
+            self.logger.info("✅ Emotion extraction test passed")
             
         except Exception as e:
-            self.logger.error(f"Emotion extraction test failed: {str(e)}")
+            self.logger.error(f"🔥Emotion extraction test failed: {str(e)}")
             raise
 
     def test_audio_features(self, sample: Dict[str, torch.Tensor]):
@@ -180,10 +180,10 @@ class VASADatasetTester:
             # Visualize audio features
             self.visualize_audio_features(audio_features)
             
-            self.logger.info("✓ Audio feature test passed")
+            self.logger.info("✅ Audio feature test passed")
             
         except Exception as e:
-            self.logger.error(f"Audio feature test failed: {str(e)}")
+            self.logger.error(f"🔥Audio feature test failed: {str(e)}")
             raise
 
     def test_face_attributes(self, sample: Dict[str, torch.Tensor]):
@@ -202,10 +202,10 @@ class VASADatasetTester:
             
             self.visualize_face_attributes(sample)
             
-            self.logger.info("✓ Face attribute test passed")
+            self.logger.info("✅ Face attribute test passed")
             
         except Exception as e:
-            self.logger.error(f"Face attribute test failed: {str(e)}")
+            self.logger.error(f"🔥Face attribute test failed: {str(e)}")
             raise
 
     def analyze_distributions(self):
@@ -228,10 +228,10 @@ class VASADatasetTester:
             
             self.visualize_distributions(distributions)
             
-            self.logger.info("✓ Distribution analysis completed")
+            self.logger.info("✅ Distribution analysis completed")
             
         except Exception as e:
-            self.logger.error(f"Distribution analysis failed: {str(e)}")
+            self.logger.error(f"🔥Distribution analysis failed: {str(e)}")
             raise
 
     def visualize_sample(self, sample: Dict[str, torch.Tensor]):
@@ -273,7 +273,9 @@ class VASADatasetTester:
         plt.figure(figsize=(10, 6))
         sns.boxplot(data=emotions_prob.numpy())
         plt.title('Emotion Distribution')
-        plt.xticks(range(8), self.dataset.emotion_recognizer.emotion_labels, rotation=45)
+        emotion_labels = ['Anger', 'Contempt', 'Disgust', 'Fear', 
+                             'Happy', 'Sad', 'Surprise', 'Neutral']
+        plt.xticks(range(8), emotion_labels, rotation=45)
         plt.tight_layout()
         plt.savefig(self.save_dir / 'emotion_distribution.png')
         plt.close()

@@ -7,7 +7,7 @@ from scipy.spatial.transform import Rotation
 from torchmetrics.functional import structural_similarity_index_measure as ssim
 from torchmetrics.image.fid import FrechetInceptionDistance
 
-
+from mysixdrepnet import *
 
 '''
 Key components:
@@ -54,11 +54,16 @@ for batch in val_loader:
         val_metrics[k] = val_metrics.get(k, 0) + v
 '''
 class SyncNet(nn.Module):
-    """Audio-visual synchronization evaluation network"""
-    def __init__(self, pretrained_path: Optional[str] = None):
+    """
+    SyncNet implementation for lip-sync evaluation
+    As referenced in paper for computing Cl and Dl
+    """
+    def __init__(self):
         super().__init__()
         # Initialize SyncNet architecture
+        # This should be pretrained SyncNet as used in paper
         self.video_encoder = nn.Sequential(
+            # Conv3D layers for video processing
             nn.Conv3d(3, 96, kernel_size=(5, 7, 7), stride=(1, 2, 2), padding=(2, 3, 3)),
             nn.BatchNorm3d(96),
             nn.ReLU(inplace=True),
@@ -67,16 +72,19 @@ class SyncNet(nn.Module):
             nn.BatchNorm3d(256),
             nn.ReLU(inplace=True),
             nn.MaxPool3d(kernel_size=(1, 3, 3), stride=(1, 2, 2)),
-            nn.Conv3d(256, 512, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
-            nn.BatchNorm3d(512),
+            nn.Conv3d(256, 256, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
+            nn.BatchNorm3d(256),
             nn.ReLU(inplace=True),
-            nn.Conv3d(512, 512, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
-            nn.BatchNorm3d(512),
+            nn.Conv3d(256, 256, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
+            nn.BatchNorm3d(256),
             nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool3d((1, 1, 1))
+            nn.Conv3d(256, 256, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
+            nn.BatchNorm3d(256),
+            nn.ReLU(inplace=True)
         )
         
         self.audio_encoder = nn.Sequential(
+            # 1D Conv layers for audio processing
             nn.Conv1d(1, 96, kernel_size=7, stride=2, padding=3),
             nn.BatchNorm1d(96),
             nn.ReLU(inplace=True),
@@ -85,49 +93,42 @@ class SyncNet(nn.Module):
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
             nn.MaxPool1d(kernel_size=3, stride=2),
-            nn.Conv1d(256, 512, kernel_size=3, padding=1),
-            nn.BatchNorm1d(512),
+            nn.Conv1d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
-            nn.Conv1d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm1d(512),
+            nn.Conv1d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool1d(1)
+            nn.Conv1d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm1d(256),
+            nn.ReLU(inplace=True)
         )
-        
-        if pretrained_path:
-            self.load_state_dict(torch.load(pretrained_path))
-        
-        self.eval()
 
-    def forward(self, video: torch.Tensor, audio: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        video: torch.Tensor,
+        audio: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Compute synchronization confidence and distance
-        Args:
-            video: Video frames [B, T, C, H, W]
-            audio: Audio features [B, T, C]
-        Returns:
-            confidence: Synchronization confidence score
-            distance: Feature distance between modalities
+        Compute confidence score (Cl) and feature distance (Dl)
         """
         # Extract features
         video_features = self.video_encoder(video)
         audio_features = self.audio_encoder(audio)
         
-        # Compute similarity
-        similarity = F.cosine_similarity(
+        # Compute confidence score (cosine similarity)
+        confidence = F.cosine_similarity(
             video_features.view(video_features.size(0), -1),
-            audio_features.view(audio_features.size(0), -1),
-            dim=1
+            audio_features.view(audio_features.size(0), -1)
         )
         
-        # Compute distance
+        # Compute feature distance
         distance = F.pairwise_distance(
             video_features.view(video_features.size(0), -1),
-            audio_features.view(audio_features.size(0), -1),
-            p=2
+            audio_features.view(audio_features.size(0), -1)
         )
         
-        return similarity, distance
+        return confidence, distance
 
 class PoseExtractor(nn.Module):
     """Extract pose sequences from videos"""

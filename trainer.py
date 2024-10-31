@@ -19,6 +19,7 @@ from loss import *
 from VASAConfig import VASAConfig
 from generator import VideoGenerator,MotionGenerator,VideoPostProcessor
 import wandb
+from dataset import VASADataset
 
 
 class TrainingLogger:
@@ -119,6 +120,34 @@ class VASATrainer:
             f'cuda:{self.local_rank}' if self.local_rank != -1 else 'cuda'
         )
 
+    def _collate_fn(self, batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+            """Custom collate function to handle variable length sequences"""
+            # Filter out any None or invalid samples
+            batch = [b for b in batch if b is not None and all(v is not None for v in b.values())]
+            if not batch:
+                return self._get_empty_batch()
+            
+            # Stack tensors
+            return {
+                'frames': torch.stack([b['frames'] for b in batch]),
+                'audio_features': torch.stack([b['audio_features'] for b in batch]),
+                'gaze': torch.stack([b['gaze'] for b in batch]),
+                'distance': torch.stack([b['distance'] for b in batch]),
+                'emotion': torch.stack([b['emotion'] for b in batch]),
+                'metadata': [b['metadata'] for b in batch]
+            }
+
+    def _get_empty_batch(self) -> Dict[str, torch.Tensor]:
+        """Return an empty batch with correct dimensions"""
+        return {
+            'frames': torch.zeros((0, self.config.sequence_length, 3, *self.config.frame_size)),
+            'audio_features': torch.zeros((0, self.config.sequence_length, 768)),
+            'gaze': torch.zeros((0, self.config.sequence_length, 2)),
+            'distance': torch.zeros((0, self.config.sequence_length, 1)),
+            'emotion': torch.zeros((0, self.config.sequence_length, 8)),
+            'metadata': []
+        }
+
     def setup_models(self):
         """Initialize all model components"""
         # Create models
@@ -199,27 +228,39 @@ class VASATrainer:
         )
 
     def setup_data(self):
-        """Initialize data loaders"""
-        # Create datasets
+        """Initialize data loaders with updated dataset configuration"""
+        # Create datasets with new parameters
         train_dataset = VASADataset(
-            video_paths=self.config.data_config['train_videos'],
+            video_folder=self.config.data_config['train_videos'],
             frame_size=self.config.frame_size,
-            sequence_length=self.config.sequence_length
+            sequence_length=self.config.sequence_length,
+            hop_length=self.config.hop_length,
+            cache_audio=True,
+            preextract_audio=self.config.preextract_audio,
+            max_videos=self.config.max_videos,
+            random_seed=self.config.random_seed
         )
         
         val_dataset = VASADataset(
-            video_paths=self.config.data_config['val_videos'],
+            video_folder=self.config.data_config['val_videos'],
             frame_size=self.config.frame_size,
-            sequence_length=self.config.sequence_length
+            sequence_length=self.config.sequence_length,
+            hop_length=self.config.hop_length,
+            cache_audio=True,
+            preextract_audio=self.config.preextract_audio,
+            max_videos=self.config.max_val_videos,
+            random_seed=self.config.random_seed
         )
         
         # Setup samplers for distributed training
         if self.distributed:
             train_sampler = torch.utils.data.distributed.DistributedSampler(
-                train_dataset
+                train_dataset,
+                shuffle=True
             )
             val_sampler = torch.utils.data.distributed.DistributedSampler(
-                val_dataset
+                val_dataset,
+                shuffle=False
             )
         else:
             train_sampler = None
@@ -233,7 +274,8 @@ class VASATrainer:
             sampler=train_sampler,
             num_workers=self.config.num_workers,
             pin_memory=True,
-            drop_last=True
+            drop_last=True,
+            collate_fn=self._collate_fn
         )
         
         self.val_loader = DataLoader(
@@ -242,7 +284,8 @@ class VASATrainer:
             shuffle=False,
             sampler=val_sampler,
             num_workers=self.config.num_workers,
-            pin_memory=True
+            pin_memory=True,
+            collate_fn=self._collate_fn
         )
 
     def setup_video_generator(self):
@@ -272,83 +315,96 @@ class VASATrainer:
         self.evaluator = Evaluator()
 
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
-            """Single training step with integrated losses"""
-            # Zero gradients
-            self.encoder_optimizer.zero_grad()
-            self.diffusion_optimizer.zero_grad()
-            self.decoder_optimizer.zero_grad()
-            
-            # Move batch to device
-            batch = {k: v.to(self.device) for k, v in batch.items()}
-            
-            # Extract face components
-            face_components = self.face_encoder(batch['frames'])
-            
-            # Sample timestep and add noise
-            t = torch.randint(
-                0,
-                self.config.num_steps,
-                (batch['frames'].shape[0],),
-                device=self.device
-            )
-            
-            noise = torch.randn_like(face_components['dynamics'])
-            noisy_dynamics = self.diffusion.q_sample(
-                face_components['dynamics'],
-                t,
-                noise
-            )
-            
-            # Prepare conditions
-            conditions = {
-                'gaze': batch['gaze'],
-                'distance': batch['distance'],
-                'emotion': batch['emotion']
-            }
-            
-            # CFG scales
-            cfg_scales = {
+        """Single training step with updated data handling"""
+        # Skip empty batches
+        if batch['frames'].size(0) == 0:
+            return {'total': 0.0}
+        
+        # Zero gradients
+        self.encoder_optimizer.zero_grad()
+        self.diffusion_optimizer.zero_grad()
+        self.decoder_optimizer.zero_grad()
+        
+        # Move batch to device
+        batch = {k: v.to(self.device) if torch.is_tensor(v) else v 
+                for k, v in batch.items()}
+        
+        # Extract face components
+        face_components = self.face_encoder(batch['frames'])
+        
+        # Sample timestep and add noise
+        t = torch.randint(
+            0,
+            self.config.num_steps,
+            (batch['frames'].shape[0],),
+            device=self.device
+        )
+        
+        noise = torch.randn_like(face_components['dynamics'])
+        noisy_dynamics = self.diffusion.q_sample(
+            face_components['dynamics'],
+            t,
+            noise
+        )
+        
+        # Prepare conditions with updated structure
+        conditions = {
+            'gaze': batch['gaze'],
+            'distance': batch['distance'],
+            'emotion': batch['emotion']
+        }
+        
+        # Forward pass through diffusion model
+        diffusion_output = self.diffusion_model(
+            noisy_dynamics,
+            t,
+            batch['audio_features'],
+            conditions,
+            {
                 'audio': self.config.cfg_audio_scale,
                 'gaze': self.config.cfg_gaze_scale
             }
-            
-            # Forward pass through diffusion model
-            diffusion_output = self.diffusion_model(
-                noisy_dynamics,
-                t,
-                batch['audio_features'],
-                conditions,
-                cfg_scales
+        )
+        
+        # Generate frames
+        generated_frames = self.face_decoder(
+            face_components['appearance_volume'],
+            face_components['identity'],
+            diffusion_output['full']
+        )
+        
+        # Compute losses
+        losses = self.loss_module.compute_losses(
+            generated_frames=generated_frames,
+            batch=batch,
+            face_components=face_components,
+            diffusion_output=diffusion_output
+        )
+        
+        # Backward pass
+        losses['total'].backward()
+        
+        # Clip gradients
+        if self.config.max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(
+                self.face_encoder.parameters(),
+                self.config.max_grad_norm
             )
-            
-            # Generate frames
-            generated_frames = self.face_decoder(
-                face_components['appearance_volume'],
-                face_components['identity'],
-                diffusion_output['full']
+            torch.nn.utils.clip_grad_norm_(
+                self.diffusion_model.parameters(),
+                self.config.max_grad_norm
             )
-            
-            # Compute losses
-            losses = self.loss_module.compute_losses(
-                generated_frames=generated_frames,
-                batch=batch,
-                face_components=face_components,
-                diffusion_output=diffusion_output
+            torch.nn.utils.clip_grad_norm_(
+                self.face_decoder.parameters(),
+                self.config.max_grad_norm
             )
-            
-            # Backward pass
-            losses['total'].backward()
-            
-            # Update model parameters
-            self.encoder_optimizer.step()
-            self.diffusion_optimizer.step()
-            self.decoder_optimizer.step()
-            
-            # Store loss for logging
-            self._last_train_loss = losses['total'].item()
-            
-            return {k: v.item() for k, v in losses.items()}
-
+        
+        # Update model parameters
+        self.encoder_optimizer.step()
+        self.diffusion_optimizer.step()
+        self.decoder_optimizer.step()
+        
+        return {k: v.item() for k, v in losses.items()}
     @torch.no_grad()
     def validate(self, epoch: int) -> Dict[str, float]:
         """Run validation"""
@@ -553,14 +609,20 @@ class VASATrainer:
             dist.destroy_process_group()
         self.logger.logger.info("Training completed!")
 
+    
+    
     @torch.no_grad()
     def generate_samples(self, batch: Dict[str, torch.Tensor], step: int):
-        """Generate and log video samples during training"""
+        """Generate and log video samples with updated data structure"""
         self.face_encoder.eval()
         self.diffusion_model.eval()
         self.face_decoder.eval()
         
         try:
+            # Skip empty batches
+            if batch['frames'].size(0) == 0:
+                return
+            
             # Generate video
             generated_video = self.video_generator.generate_video(
                 source_image=batch['frames'][:1],
@@ -571,12 +633,12 @@ class VASATrainer:
                     'emotion': batch['emotion'][:1]
                 },
                 cfg_scales={
-                    'audio': self.config.audio_scale,
-                    'gaze': self.config.gaze_scale
+                    'audio': self.config.cfg_audio_scale,
+                    'gaze': self.config.cfg_gaze_scale
                 }
             )
             
-            # Post-process video
+            # Post-process video if enabled
             if self.config.apply_post_processing:
                 generated_video = self.post_processor.apply_temporal_smoothing(
                     generated_video,
@@ -585,29 +647,16 @@ class VASATrainer:
             
             # Save video sample
             if self.is_main_process():
+                metadata = batch['metadata'][0]  # Get metadata for first sample
                 self.save_video_sample(
-                    generated_video, 
+                    generated_video,
                     step,
-                    batch['audio_features'][:1]
-                )
-            
-            # Compute metrics
-            gen_metrics = self.evaluator.compute_metrics(
-                generated_video=generated_video,
-                audio_features=batch['audio_features'][:1],
-                real_video=batch['frames'][:1]
-            )
-            
-            # Log metrics
-            if self.is_main_process():
-                self.logger.log_metrics(
-                    {f'gen_{k}': v for k, v in gen_metrics.items()},
-                    step
+                    batch['audio_features'][:1],
+                    metadata
                 )
             
             # Store for later reference
             self.last_generated_video = generated_video
-            self.last_gen_metrics = gen_metrics
             
         except Exception as e:
             self.logger.logger.error(f"Error in sample generation: {str(e)}")
@@ -617,22 +666,34 @@ class VASATrainer:
             self.diffusion_model.train()
             self.face_decoder.train()
 
-    def save_video_sample(self, video: torch.Tensor, step: int, audio: torch.Tensor):
-        """Save generated video sample with audio"""
+    def save_video_sample(
+        self,
+        video: torch.Tensor,
+        step: int,
+        audio: torch.Tensor,
+        metadata: Dict[str, Any]
+    ):
+        """Save generated video sample with metadata"""
         save_path = self.logger.log_dir / 'samples' / f'sample_step_{step}.mp4'
         save_path.parent.mkdir(exist_ok=True)
         
-        # Convert to numpy and save
-        video_np = video.cpu().numpy()
-        audio_np = audio.cpu().numpy()
-        
         try:
             self.logger.log_video(
-                video=video_np,
-                audio=audio_np,
+                video=video.cpu().numpy(),
+                audio=audio.cpu().numpy(),
                 step=step,
-                save_path=save_path
+                tag=f"generated_{metadata['video_name']}"
             )
+            
+            # Log additional metadata
+            self.logger.log_metrics({
+                'sample_metadata': {
+                    'source_video': metadata['video_path'],
+                    'start_frame': metadata['start_frame'],
+                    'fps': metadata['fps']
+                }
+            }, step)
+            
         except Exception as e:
             self.logger.logger.error(f"Error saving video sample: {str(e)}")
 
@@ -743,281 +804,149 @@ class VASATrainer:
 
 
 
-# import argparse
-# import os
-# import torch
-# import yaml
-# import datetime
-# from pathlib import Path
-# from typing import Optional, Dict, Any
+import argparse
+import os
+import torch
+import yaml
+import datetime
+from pathlib import Path
+from typing import Optional, Dict, Any
 
-# def parse_args():
-#     parser = argparse.ArgumentParser(description='Train VASA model')
+def parse_args():
+    parser = argparse.ArgumentParser(description='Train VASA model')
     
-#     # Basic training arguments
-#     parser.add_argument('--config', type=str, required=True,
-#                        help='Path to config file')
-#     parser.add_argument('--exp-name', type=str, required=True,
-#                        help='Experiment name')
-#     parser.add_argument('--log-dir', type=str, default='logs',
-#                        help='Directory for logs')
+    # Basic training arguments
+    parser.add_argument('--config', type=str, required=True,
+                       help='Path to config file')
+    parser.add_argument('--exp-name', type=str, required=True,
+                       help='Experiment name')
+    parser.add_argument('--log-dir', type=str, default='logs',
+                       help='Directory for logs')
     
-#     # Training settings
-#     parser.add_argument('--distributed', action='store_true',
-#                        help='Enable distributed training')
-#     parser.add_argument('--resume', type=str,
-#                        help='Path to checkpoint to resume from')
-#     parser.add_argument('--eval-only', action='store_true',
-#                        help='Run evaluation only')
+    # Training settings
+    parser.add_argument('--distributed', action='store_true',
+                       help='Enable distributed training')
+    parser.add_argument('--resume', type=str,
+                       help='Path to checkpoint to resume from')
+    parser.add_argument('--eval-only', action='store_true',
+                       help='Run evaluation only')
     
-#     # Data settings
-#     parser.add_argument('--data-dir', type=str,
-#                        help='Override data directory from config')
-#     parser.add_argument('--batch-size', type=int,
-#                        help='Override batch size from config')
+    # Data settings
+    parser.add_argument('--data-dir', type=str,
+                       help='Override data directory from config')
+    parser.add_argument('--batch-size', type=int,
+                       help='Override batch size from config')
     
-#     # Model settings
-#     parser.add_argument('--num-steps', type=int,
-#                        help='Override number of diffusion steps')
-#     parser.add_argument('--cfg-scale', type=float,
-#                        help='Override classifier-free guidance scale')
+    # Model settings
+    parser.add_argument('--num-steps', type=int,
+                       help='Override number of diffusion steps')
+    parser.add_argument('--cfg-scale', type=float,
+                       help='Override classifier-free guidance scale')
     
-#     return parser.parse_args()
+    return parser.parse_args()
 
-# def setup_experiment(args) -> Dict[str, Any]:
-#     """Setup experiment directories and configurations"""
-#     # Create timestamp for experiment
-#     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-#     exp_name = f"{args.exp_name}_{timestamp}"
+def setup_experiment(args) -> Dict[str, Any]:
+    """Setup experiment directories and configurations"""
+    # Create timestamp for experiment
+    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    exp_name = f"{args.exp_name}_{timestamp}"
     
-#     # Setup directories
-#     exp_dir = Path(args.log_dir) / exp_name
-#     exp_dir.mkdir(parents=True, exist_ok=True)
+    # Setup directories
+    exp_dir = Path(args.log_dir) / exp_name
+    exp_dir.mkdir(parents=True, exist_ok=True)
     
-#     checkpoints_dir = exp_dir / 'checkpoints'
-#     checkpoints_dir.mkdir(exist_ok=True)
+    checkpoints_dir = exp_dir / 'checkpoints'
+    checkpoints_dir.mkdir(exist_ok=True)
     
-#     samples_dir = exp_dir / 'samples'
-#     samples_dir.mkdir(exist_ok=True)
+    samples_dir = exp_dir / 'samples'
+    samples_dir.mkdir(exist_ok=True)
     
-#     # Load and update config
-#     with open(args.config) as f:
-#         config = yaml.safe_load(f)
+    # Load and update config
+    with open(args.config) as f:
+        config = yaml.safe_load(f)
     
-#     # Override config with command line arguments
-#     if args.data_dir:
-#         config['data']['data_dir'] = args.data_dir
-#     if args.batch_size:
-#         config['training']['batch_size'] = args.batch_size
-#     if args.num_steps:
-#         config['diffusion']['num_steps'] = args.num_steps
-#     if args.cfg_scale:
-#         config['cfg']['audio_scale'] = args.cfg_scale
+    # Override config with command line arguments
+    if args.data_dir:
+        config['data']['data_dir'] = args.data_dir
+    if args.batch_size:
+        config['training']['batch_size'] = args.batch_size
+    if args.num_steps:
+        config['diffusion']['num_steps'] = args.num_steps
+    if args.cfg_scale:
+        config['cfg']['audio_scale'] = args.cfg_scale
         
-#     # Save updated config
-#     config_path = exp_dir / 'config.yaml'
-#     with open(config_path, 'w') as f:
-#         yaml.dump(config, f)
+    # Save updated config
+    config_path = exp_dir / 'config.yaml'
+    with open(config_path, 'w') as f:
+        yaml.dump(config, f)
     
-#     return {
-#         'exp_dir': exp_dir,
-#         'checkpoints_dir': checkpoints_dir,
-#         'samples_dir': samples_dir,
-#         'config': config
-#     }
+    return {
+        'exp_dir': exp_dir,
+        'checkpoints_dir': checkpoints_dir,
+        'samples_dir': samples_dir,
+        'config': config
+    }
 
-# class CheckpointManager:
-#     """Manage model checkpoints and training state"""
-#     def __init__(self, 
-#                  save_dir: Path,
-#                  max_checkpoints: int = 5):
-#         self.save_dir = save_dir
-#         self.max_checkpoints = max_checkpoints
-#         self.checkpoints = []
-    
-#     def save_checkpoint(self,
-#                        trainer: VASATrainer,
-#                        epoch: int,
-#                        metrics: Dict[str, float],
-#                        is_best: bool = False):
-#         """Save training checkpoint"""
-#         checkpoint = {
-#             'epoch': epoch,
-#             'face_encoder_state': trainer.face_encoder.state_dict(),
-#             'diffusion_model_state': trainer.diffusion_model.state_dict(),
-#             'face_decoder_state': trainer.face_decoder.state_dict(),
-#             'encoder_optimizer': trainer.encoder_optimizer.state_dict(),
-#             'diffusion_optimizer': trainer.diffusion_optimizer.state_dict(),
-#             'decoder_optimizer': trainer.decoder_optimizer.state_dict(),
-#             'encoder_scheduler': trainer.encoder_scheduler.state_dict(),
-#             'diffusion_scheduler': trainer.diffusion_scheduler.state_dict(),
-#             'decoder_scheduler': trainer.decoder_scheduler.state_dict(),
-#             'metrics': metrics
-#         }
-        
-#         # Save checkpoint
-#         checkpoint_path = self.save_dir / f'checkpoint_epoch_{epoch}.pt'
-#         torch.save(checkpoint, checkpoint_path)
-#         self.checkpoints.append(checkpoint_path)
-        
-#         # Save best model separately
-#         if is_best:
-#             best_path = self.save_dir / 'best_model.pt'
-#             torch.save(checkpoint, best_path)
-        
-#         # Remove old checkpoints if exceeding max_checkpoints
-#         if len(self.checkpoints) > self.max_checkpoints:
-#             old_checkpoint = self.checkpoints.pop(0)
-#             old_checkpoint.unlink()
-    
-#     def load_checkpoint(self,
-#                        trainer: VASATrainer,
-#                        checkpoint_path: str) -> int:
-#         """Load training checkpoint"""
-#         checkpoint = torch.load(checkpoint_path, map_location=trainer.device)
-        
-#         # Load model states
-#         trainer.face_encoder.load_state_dict(checkpoint['face_encoder_state'])
-#         trainer.diffusion_model.load_state_dict(checkpoint['diffusion_model_state'])
-#         trainer.face_decoder.load_state_dict(checkpoint['face_decoder_state'])
-        
-#         # Load optimizer states
-#         trainer.encoder_optimizer.load_state_dict(checkpoint['encoder_optimizer'])
-#         trainer.diffusion_optimizer.load_state_dict(checkpoint['diffusion_optimizer'])
-#         trainer.decoder_optimizer.load_state_dict(checkpoint['decoder_optimizer'])
-        
-#         # Load scheduler states
-#         trainer.encoder_scheduler.load_state_dict(checkpoint['encoder_scheduler'])
-#         trainer.diffusion_scheduler.load_state_dict(checkpoint['diffusion_scheduler'])
-#         trainer.decoder_scheduler.load_state_dict(checkpoint['decoder_scheduler'])
-        
-#         return checkpoint['epoch']
 
-# def validate(trainer: VASATrainer, epoch: int) -> Dict[str, float]:
-#     """Run validation and return metrics"""
-#     trainer.face_encoder.eval()
-#     trainer.diffusion_model.eval()
-#     trainer.face_decoder.eval()
-    
-#     metrics_sum = {}
-#     num_samples = 0
-    
-#     with torch.no_grad():
-#         for batch in trainer.val_loader:
-#             # Move batch to device
-#             batch = {k: v.to(trainer.device) for k, v in batch.items()}
-            
-#             # Generate samples
-#             generated_video = trainer.video_generator.generate_video(
-#                 batch['frames'][:1],
-#                 batch['audio_features'][:1],
-#                 {
-#                     'gaze': batch['gaze'][:1],
-#                     'distance': batch['distance'][:1],
-#                     'emotion': batch['emotion'][:1]
-#                 },
-#                 {
-#                     'audio': trainer.config.audio_scale,
-#                     'gaze': trainer.config.gaze_scale
-#                 }
-#             )
-            
-#             # Compute metrics
-#             batch_metrics = trainer.evaluator.compute_metrics(
-#                 generated_video,
-#                 batch['audio_features'][:1],
-#                 batch['frames'][:1]
-#             )
-            
-#             # Accumulate metrics
-#             for k, v in batch_metrics.items():
-#                 metrics_sum[k] = metrics_sum.get(k, 0) + v
-#             num_samples += 1
-            
-#     # Average metrics
-#     metrics = {k: v / num_samples for k, v in metrics_sum.items()}
-    
-#     # Log validation metrics
-#     trainer.logger.log_metrics({'val_' + k: v for k, v in metrics.items()}, epoch)
-    
-#     return metrics
 
-# def main():
-#     # Parse arguments
-#     args = parse_args()
+def main():
+    # Parse arguments
+    args = parse_args()
     
-#     # Setup experiment
-#     exp_setup = setup_experiment(args)
+    # Setup experiment
+    exp_setup = setup_experiment(args)
     
-#     # Create config, logger, and trainer
-#     config = VASAConfig(exp_setup['config'])
-#     logger = TrainingLogger(
-#         args.exp_name,
-#         exp_setup['exp_dir'],
-#         use_wandb=True
-#     )
+    # Create config, logger, and trainer
+    config = VASAConfig(exp_setup['config'])
+    logger = TrainingLogger(
+        args.exp_name,
+        exp_setup['exp_dir'],
+        use_wandb=True
+    )
     
-#     # Initialize trainer
-#     trainer = VASATrainer(config, logger)
+    # Initialize trainer
+    trainer = VASATrainer(config, logger)
     
-#     # Initialize checkpoint manager
-#     checkpoint_manager = CheckpointManager(exp_setup['checkpoints_dir'])
+    start_epoch = 0 
     
-#     # Resume from checkpoint if specified
-#     start_epoch = 0
-#     if args.resume:
-#         start_epoch = checkpoint_manager.load_checkpoint(trainer, args.resume)
-#         logger.logger.info(f"Resumed from epoch {start_epoch}")
     
-#     # Run evaluation only if specified
-#     if args.eval_only:
-#         metrics = validate(trainer, 0)
-#         logger.logger.info(f"Evaluation metrics: {metrics}")
-#         return
+    # Training loop
+    best_metric = float('inf')  # For sync_distance, lower is better
     
-#     # Training loop
-#     best_metric = float('inf')  # For sync_distance, lower is better
-    
-#     for epoch in range(start_epoch, config.num_epochs):
-#         # Train for one epoch
-#         trainer.train_epoch(epoch)
+    for epoch in range(start_epoch, config.num_epochs):
+        # Train for one epoch
+        trainer.train_epoch(epoch)
         
-#         # Run validation
-#         metrics = validate(trainer, epoch)
+        # Run validation
+        # metrics = validate(trainer, epoch)
         
-#         # Save checkpoint
-#         is_best = metrics['sync_distance'] < best_metric
-#         if is_best:
-#             best_metric = metrics['sync_distance']
+        # Save checkpoint
+        # is_best = metrics['sync_distance'] < best_metric
+        # if is_best:
+        #     best_metric = metrics['sync_distance']
         
-#         checkpoint_manager.save_checkpoint(
-#             trainer,
-#             epoch,
-#             metrics,
-#             is_best
-#         )
+       
+        # Update schedulers
+        trainer.encoder_scheduler.step()
+        trainer.diffusion_scheduler.step()
+        trainer.decoder_scheduler.step()
         
-#         # Update schedulers
-#         trainer.encoder_scheduler.step()
-#         trainer.diffusion_scheduler.step()
-#         trainer.decoder_scheduler.step()
+        # # Log epoch summary
+        # logger.logger.info(
+        #     f"Epoch {epoch} | "
+        #     f"Train Loss: {trainer.train_loss:.4f} | "
+        #     f"Val Sync Distance: {metrics['sync_distance']:.4f} | "
+        #     f"Val CAPP Score: {metrics['capp_score']:.4f}"
+        # )
         
-#         # Log epoch summary
-#         logger.logger.info(
-#             f"Epoch {epoch} | "
-#             f"Train Loss: {trainer.train_loss:.4f} | "
-#             f"Val Sync Distance: {metrics['sync_distance']:.4f} | "
-#             f"Val CAPP Score: {metrics['capp_score']:.4f}"
-#         )
-        
-#         # Generate and save samples
-#         if epoch % 5 == 0:
-#             trainer.generate_samples(
-#                 next(iter(trainer.val_loader)),
-#                 epoch
-#             )
+        # Generate and save samples
+        if epoch % 5 == 0:
+            trainer.generate_samples(
+                next(iter(trainer.val_loader)),
+                epoch
+            )
     
-#     logger.logger.info("Training completed!")
+    logger.logger.info("Training completed!")
 
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    main()
