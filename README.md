@@ -21,11 +21,15 @@ I update progress here - https://github.com/johndpope/VASA-1-hack/issues/20
 
 
 ✅ dataset is good
-trainer in progress.
-```
+models seem good
+trainer is in progress.
+
+https://wandb.ai/snoozie/vasa?nw=nwusersnoozie
+
+```shell
 python dataset_testing.py 
  
-python trainer.py --config configs/vasa.yaml --exp-name vasa_experiment
+python trainer.py 
 ```
 
 
