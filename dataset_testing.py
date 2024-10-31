@@ -10,6 +10,13 @@ from typing import Dict, List
 import seaborn as sns
 from tqdm import tqdm
 from dataset import VASADataset 
+from rich.console import Console
+import torch.nn.functional as F
+from rich.traceback import install
+console = Console(width=3000)
+# Install Rich traceback handling
+# install(show_locals=True)
+install()
 
 class VASADatasetTester:
     """Comprehensive testing suite for VASA dataset implementation"""
@@ -64,8 +71,11 @@ class VASADatasetTester:
             # Check file existence
             for path in self.dataset.video_paths[:5]:  # Check first 5
                 assert Path(path).exists(), f"Video file not found: {path}"
-                audio_path = str(Path(path).with_suffix('.wav'))
-                assert Path(audio_path).exists(), f"Audio file not found: {audio_path}"
+                
+                # Get audio path if available
+                audio_path = self.dataset.get_audio_path(path)
+                if audio_path is not None:
+                    assert Path(audio_path).exists(), f"Audio file not found: {audio_path}"
             
             # Check components initialization
             assert self.dataset.face_analyzer is not None, "Face analyzer not initialized"
@@ -77,7 +87,6 @@ class VASADatasetTester:
         except Exception as e:
             self.logger.error(f"Dataset initialization failed: {str(e)}")
             raise
-
     def test_single_sample(self) -> Dict[str, torch.Tensor]:
         """Test single sample extraction"""
         self.logger.info("\nTesting single sample extraction...")
@@ -315,7 +324,7 @@ if __name__ == "__main__":
 
 
     dataset = VASADataset(
-        video_folder="/media/oem/12TB/Downloads/CelebV-HQ/celebvhq/35666/",
+        video_folder="./junk/",
         max_videos=100, 
         frame_size=(512, 512),
         sequence_length=25,
