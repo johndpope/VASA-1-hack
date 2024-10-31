@@ -1,3 +1,27 @@
+# VASA-1-hack
+This cut of code is using sonnet 3.5 to reverse engineer code from white paper 
+(this is for La Raza)
+https://www.youtube.com/watch?v=bZ8AS300WH4
+
+![Image](pipeline_.jpg)
+
+
+**MegaPortrait**  
+https://github.com/johndpope/MegaPortrait-hack
+the models here seem to be ok -  it does train / converge
+https://github.com/johndpope/MegaPortrait-hack/issues/36
+
+
+## Status
+this is fresh code spat out by sonnet 3.5 
+the earlier ai models were maybe light on the training data for diffusion - 
+this latest code seems to nail it.
+
+I update progress here - https://github.com/johndpope/VASA-1-hack/issues/20
+
+
+
+
 # VASA Classes Documentation
 
 ## Core Model Classes
