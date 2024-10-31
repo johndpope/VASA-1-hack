@@ -71,15 +71,25 @@ class DataConfig:
 @dataclass
 class StageConfig:
     """Stage-specific configuration"""
+    # Stage 1: Latent Space Learning
     latent_space_epochs: int = 100
     latent_space_lr: float = 1e-4
+    # Stage 2: Dynamics Generation
     dynamics_epochs: int = 200
     dynamics_lr: float = 1e-4
 
 @dataclass
+class CFGConfig:
+    """Classifier-free guidance configuration"""
+    audio_scale: float = 0.5
+    gaze_scale: float = 1.0
+    condition_dropout: float = 0.1
+
+@dataclass
 class VASAConfig:
-    """Root configuration class for VASA"""
-    # Nested configs
+    experiment_name: str = MISSING
+    output_dir: str = "outputs"
+
     training: TrainingConfig = field(default_factory=TrainingConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
@@ -88,11 +98,7 @@ class VASAConfig:
     loss: LossConfig = field(default_factory=LossConfig)
     data: DataConfig = field(default_factory=DataConfig)
     stage: StageConfig = field(default_factory=StageConfig)
-    
-    # Additional settings
-    experiment_name: str = MISSING
-    output_dir: str = "outputs"
-    seed: int = 42
+
     use_wandb: bool = True
     early_stopping: bool = True
     patience: int = 10

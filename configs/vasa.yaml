@@ -1,4 +1,4 @@
-# Training settings
+# config.yaml
 experiment_name: vasa_experiment
 output_dir: outputs/vasa
 
@@ -47,23 +47,16 @@ loss:
 
 data:
   frame_size: [512, 512]
-  train_data: data/voxceleb2/train
-  val_data: data/voxceleb2/val
+  train_data: ./junk # data/voxceleb2/train
+  val_data: ./junk  #data/voxceleb2/val
   max_videos: null
   cache_audio: true
   preextract_audio: true
 
 stage:
   # Stage 1: Latent Space Learning
-
   latent_space_epochs: 100
   latent_space_lr: 1e-4
+  # Stage 2: Dynamics Generation 
   dynamics_epochs: 200
   dynamics_lr: 1e-4
-  lambda_identity: 0.1,
-  lambda_dpe: 0.1,
-
-  # Stage 2: Dynamics Generation
-  cfg_audio_scale: 0.5,
-  cfg_gaze_scale: 1.0,
-  lambda_cfg: 0.1

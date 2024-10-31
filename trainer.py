@@ -21,6 +21,7 @@ from generator import VideoGenerator,MotionGenerator,VideoPostProcessor
 import wandb
 from dataset import VASADataset
 from omegaconf import OmegaConf
+from utils import get_vasa_exp_name
 
 
 class TrainingLogger:
@@ -1151,33 +1152,10 @@ Stage 2: Dynamics Generation
 
 '''
 
-
-def setup_config(args) -> VASAConfig:
-    """Setup and validate configuration"""
-    # Create experiment directory
-    exp_dir = Path(args.output_dir) / args.experiment_name
-    exp_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Load and merge configurations
-    config = VASAConfig.load(args.config)
-    
-    # Override with command line arguments
-    cli_overrides = OmegaConf.from_dotlist([
-        f"{k}={v}" for k, v in vars(args).items() 
-        if v is not None and k not in ['config', 'output_dir']
-    ])
-    config = OmegaConf.merge(config, cli_overrides)
-    
-    # Save merged config
-    config.save(exp_dir / 'config.yaml')
-    
-    return config
-
 def main():
     # Parse arguments
     parser = argparse.ArgumentParser(description='Train VASA model')
-    parser.add_argument('--config', type=str, required=True,
-                       help='Path to config file')
+
     parser.add_argument('--experiment_name', type=str,
                        help='Override experiment name')
     parser.add_argument('--output_dir', type=str, default='outputs',
@@ -1186,12 +1164,20 @@ def main():
     args = parser.parse_args()
     
     try:
-        # Setup configuration
-        config = setup_config(args)
-        
+
+        # Load config
+        config = OmegaConf.load('./configs/vasa.yaml')
+        # Create structured config
+        schema = OmegaConf.structured(VASAConfig)
+        # Merge configs
+        config = OmegaConf.merge(schema, config)
         # Setup logger
+
+            # Generate example name
+        experiment_name =  get_vasa_exp_name(config)
+        print(f"Generated experiment name: {experiment_name}")
         logger = TrainingLogger(
-            config.experiment_name,
+            experiment_name,
             Path(config.output_dir),
             use_wandb=config.use_wandb
         )
@@ -1199,6 +1185,7 @@ def main():
         # Initialize trainer
         trainer = VASATrainer(config, logger)
         trainer.train_all_stages()
+
     except Exception as e:
         print(f"Error during setup: {str(e)}")
         raise
