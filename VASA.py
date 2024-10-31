@@ -14,7 +14,7 @@ from model import CustomResNet50,Eapp,FEATURE_SIZE,COMPRESS_DIM,WarpGeneratorS2C
 
 from transformers import Wav2Vec2Model, Wav2Vec2Processor
 from insightface.app import FaceAnalysis
-
+from vasa_config import VASAConfig
 
 # TODO - wire this up as off the shelf pretrained model for Head Pose Encoder
 # -  self.rotation_net =  SixDRepNet_Detector()
@@ -403,45 +403,670 @@ class VASADiffusionTransformer(nn.Module):
         
         return output
 
-class VASALoss(nn.Module):
+
+
+
+
+class IdentityLoss(nn.Module):
     """
-    Combined loss function aligned with VASA paper.
-    Includes DPE losses and identity preservation.
+    Identity preservation loss using pretrained face recognition model.
+    Ensures generated faces maintain the identity of the source image.
+    """
+    def __init__(self, pretrained: bool = True):
+        super().__init__()
+        # Initialize with pretrained ResNet50
+        self.backbone = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+        self.backbone.fc = nn.Identity()  # Remove classification layer
+        
+        # Freeze backbone weights
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+            
+        # Add identity projection head
+        self.projection = nn.Sequential(
+            nn.Linear(2048, 512),
+            nn.ReLU(),
+            nn.Linear(512, 256)
+        )
+        
+        self.register_buffer('center', torch.zeros(256))
+        self.register_buffer('std', torch.ones(256))
+
+    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract identity features from face images"""
+        features = self.backbone(x)
+        features = self.projection(features)
+        # Normalize features
+        features = (features - self.center) / self.std
+        return F.normalize(features, p=2, dim=1)
+
+    def forward(self, generated: torch.Tensor, source: torch.Tensor) -> torch.Tensor:
+        """
+        Compute identity loss between generated and source images
+        Args:
+            generated: Generated face images [B, C, H, W]
+            source: Source face images [B, C, H, W]
+        Returns:
+            Identity loss value
+        """
+        gen_features = self.extract_features(generated)
+        src_features = self.extract_features(source)
+        
+        # Cosine similarity loss
+        cos_sim = F.cosine_similarity(gen_features, src_features, dim=1)
+        identity_loss = 1.0 - cos_sim.mean()
+        
+        return identity_loss
+
+class PoseExtractionNet(nn.Module):
+    """
+    Network for extracting head pose parameters from face images.
     """
     def __init__(self):
         super().__init__()
-        self.dpe_loss = DPELoss()
-        self.identity_loss = IdentityLoss()
-        self.recon_loss = nn.L1Loss()
+        self.backbone = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+        # Modify final layer for pose parameters (rotation + translation)
+        self.backbone.fc = nn.Sequential(
+            nn.Linear(2048, 512),
+            nn.ReLU(),
+            nn.Linear(512, 6)  # 3 for rotation, 3 for translation
+        )
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Extract pose parameters
+        Returns:
+            rotation: Rotation parameters [B, 3]
+            translation: Translation parameters [B, 3]
+        """
+        pose_params = self.backbone(x)
+        rotation = pose_params[:, :3]
+        translation = pose_params[:, 3:]
+        return rotation, translation
+
+class ExpressionExtractionNet(nn.Module):
+    """
+    Network for extracting facial expression parameters.
+    """
+    def __init__(self, expression_dim: int = 64):
+        super().__init__()
+        self.backbone = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+        self.backbone.fc = nn.Sequential(
+            nn.Linear(2048, 512),
+            nn.ReLU(),
+            nn.Linear(512, expression_dim)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract expression parameters"""
+        return self.backbone(x)
+
+class DPELoss(nn.Module):
+    """
+    Disentanglement of Pose and Expression (DPE) loss.
+    Ensures effective disentanglement between pose and facial expressions.
+    """
+    def __init__(self, 
+                 expression_dim: int = 64,
+                 lambda_pose: float = 1.0,
+                 lambda_expr: float = 1.0):
+        super().__init__()
+        self.pose_net = PoseExtractionNet()
+        self.expression_net = ExpressionExtractionNet(expression_dim)
         
-    def forward(self, generated: Dict[str, torch.Tensor], target: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        # Loss weights
+        self.lambda_pose = lambda_pose
+        self.lambda_expr = lambda_expr
+        
+        # Feature reconstruction loss
+        self.recon_loss = nn.MSELoss()
+        
+        # Freeze networks
+        for param in self.pose_net.parameters():
+            param.requires_grad = False
+        for param in self.expression_net.parameters():
+            param.requires_grad = False
+
+    def compute_pose_consistency(self, 
+                               I_i: torch.Tensor,
+                               I_j: torch.Tensor,
+                               I_i_pose_j: torch.Tensor) -> torch.Tensor:
+        """Compute pose consistency loss"""
+        # Extract poses
+        rot_i, trans_i = self.pose_net(I_i)
+        rot_j, trans_j = self.pose_net(I_j)
+        rot_transferred, trans_transferred = self.pose_net(I_i_pose_j)
+        
+        # Pose should match target
+        pose_loss = (
+            F.mse_loss(rot_transferred, rot_j) +
+            F.mse_loss(trans_transferred, trans_j)
+        )
+        return pose_loss
+
+    def compute_expression_consistency(self,
+                                    I_i: torch.Tensor,
+                                    I_j: torch.Tensor,
+                                    I_i_pose_j: torch.Tensor) -> torch.Tensor:
+        """Compute expression consistency loss"""
+        # Extract expressions
+        expr_i = self.expression_net(I_i)
+        expr_j = self.expression_net(I_j)
+        expr_transferred = self.expression_net(I_i_pose_j)
+        
+        # Expression should remain the same after pose transfer
+        expr_loss = F.mse_loss(expr_transferred, expr_i)
+        return expr_loss
+
+    def forward(self, 
+                I_i: torch.Tensor,
+                I_j: torch.Tensor,
+                I_i_pose_j: torch.Tensor,
+                I_j_pose_i: torch.Tensor,
+                I_s: torch.Tensor,
+                I_d: torch.Tensor,
+                I_s_pose_d_dyn_d: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Compute DPE loss components
+        Args:
+            I_i, I_j: Source frames from same identity
+            I_i_pose_j: I_i with I_j's pose
+            I_j_pose_i: I_j with I_i's pose
+            I_s: Source identity frame
+            I_d: Different identity frame
+            I_s_pose_d_dyn_d: Source frame with different identity's pose and dynamics
+        """
         losses = {}
         
-        # DPE losses for disentanglement
-        losses['dpe'] = self.dpe_loss(
+        # Pose consistency loss
+        losses['pose_i'] = self.compute_pose_consistency(I_i, I_j, I_i_pose_j)
+        losses['pose_j'] = self.compute_pose_consistency(I_j, I_i, I_j_pose_i)
+        
+        # Expression consistency loss
+        losses['expr_i'] = self.compute_expression_consistency(I_i, I_j, I_i_pose_j)
+        losses['expr_j'] = self.compute_expression_consistency(I_j, I_i, I_j_pose_i)
+        
+        # Cross-identity pose transfer loss
+        losses['cross_pose'] = self.compute_pose_consistency(I_s, I_d, I_s_pose_d_dyn_d)
+        
+        # Cross-identity expression preservation
+        losses['cross_expr'] = self.compute_expression_consistency(I_s, I_d, I_s_pose_d_dyn_d)
+        
+        # Total loss
+        losses['total'] = (
+            self.lambda_pose * (losses['pose_i'] + losses['pose_j'] + losses['cross_pose']) +
+            self.lambda_expr * (losses['expr_i'] + losses['expr_j'] + losses['cross_expr'])
+        )
+        
+        return losses
+
+class CombinedVASALoss(nn.Module):
+    """
+    Combined loss function for VASA training
+    """
+    def __init__(self,
+                 lambda_identity: float = 0.1,
+                 lambda_dpe: float = 0.1):
+        super().__init__()
+        self.identity_loss = IdentityLoss()
+        self.dpe_loss = DPELoss()
+        
+        self.lambda_identity = lambda_identity
+        self.lambda_dpe = lambda_dpe
+
+    def forward(self,
+                generated: Dict[str, torch.Tensor],
+                target: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """
+        Compute all loss components
+        Args:
+            generated: Dict containing generated images and intermediate results
+            target: Dict containing ground truth images and attributes
+        """
+        losses = {}
+        
+        # Identity preservation loss
+        losses['identity'] = self.identity_loss(
+            generated['output'],
+            target['source_image']
+        )
+        
+        # DPE losses
+        dpe_losses = self.dpe_loss(
             generated['source'], generated['target'],
             generated['source_pose_transfer'], generated['target_pose_transfer'],
             generated['source_identity'], generated['target_identity'],
             generated['cross_identity_transfer']
         )
-        
-        # Identity preservation
-        losses['identity'] = self.identity_loss(
-            generated['output'], target['source_image']
-        )
-        
-        # Reconstruction
-        losses['recon'] = self.recon_loss(
-            generated['output'], target['target_image']
-        )
+        losses.update({f'dpe_{k}': v for k, v in dpe_losses.items()})
         
         # Total loss
-        losses['total'] = losses['dpe'] + losses['identity'] + losses['recon']
+        losses['total'] = (
+            losses['identity'] * self.lambda_identity +
+            dpe_losses['total'] * self.lambda_dpe
+        )
         
         return losses
+
+def test_losses():
+    """Test loss computations"""
+    batch_size = 4
+    img_size = 256
     
+    # Create dummy data
+    dummy_data = {
+        'source': torch.randn(batch_size, 3, img_size, img_size),
+        'target': torch.randn(batch_size, 3, img_size, img_size),
+        'source_pose_transfer': torch.randn(batch_size, 3, img_size, img_size),
+        'target_pose_transfer': torch.randn(batch_size, 3, img_size, img_size),
+        'source_identity': torch.randn(batch_size, 3, img_size, img_size),
+        'target_identity': torch.randn(batch_size, 3, img_size, img_size),
+        'cross_identity_transfer': torch.randn(batch_size, 3, img_size, img_size),
+        'output': torch.randn(batch_size, 3, img_size, img_size)
+    }
+    
+    target_data = {
+        'source_image': torch.randn(batch_size, 3, img_size, img_size)
+    }
+    
+    # Test loss computation
+    loss_fn = CombinedVASALoss()
+    losses = loss_fn(dummy_data, target_data)
+    
+    print("Loss components:")
+    for k, v in losses.items():
+        print(f"{k}: {v.item():.4f}")
 
+
+
+class VASALossModule:
+    """Loss module for VASA training"""
+    def __init__(self, config: VASAConfig, device: torch.device):
+        self.config = config
+        self.device = device
+        
+        # Initialize loss components
+        self.identity_loss = IdentityLoss().to(device)
+        self.dpe_loss = DPELoss(
+            expression_dim=config.motion_dim,
+            lambda_pose=config.lambda_pose,
+            lambda_expr=config.lambda_expr
+        ).to(device)
+        self.combined_loss = CombinedVASALoss(
+            lambda_identity=config.lambda_identity,
+            lambda_dpe=config.lambda_dpe
+        ).to(device)
+
+    def compute_losses(
+        self,
+        generated_frames: torch.Tensor,
+        batch: Dict[str, torch.Tensor],
+        face_components: Dict[str, torch.Tensor],
+        diffusion_output: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute all training losses
+        Args:
+            generated_frames: Generated video frames
+            batch: Training batch data
+            face_components: Face encoder outputs
+            diffusion_output: Diffusion model outputs
+        """
+        # Prepare inputs for loss computation
+        loss_inputs = {
+            'source': batch['frames'][:, 0],  # First frame is source
+            'target': batch['frames'][:, 1:],  # Remaining frames are targets
+            'source_pose_transfer': generated_frames[:, 0],
+            'target_pose_transfer': generated_frames[:, 1:],
+            'source_identity': face_components['identity'],
+            'target_identity': face_components['identity'],
+            'cross_identity_transfer': generated_frames,
+            'output': generated_frames
+        }
+        
+        # Ground truth data
+        target_data = {
+            'source_image': batch['frames'][:, 0]
+        }
+        
+        # Compute main losses
+        main_losses = self.combined_loss(loss_inputs, target_data)
+        
+        # Add additional losses
+        losses = {
+            'reconstruction': F.l1_loss(generated_frames, batch['frames']),
+            'identity': main_losses['identity'],
+            'dpe_total': main_losses['dpe_total']
+        }
+        
+        # Add individual DPE losses for monitoring
+        losses.update({
+            f'dpe_{k}': v for k, v in main_losses.items() 
+            if k.startswith('dpe_') and k != 'dpe_total'
+        })
+        
+        # Add CFG losses
+        if 'uncond' in diffusion_output:
+            losses.update(self._compute_cfg_losses(diffusion_output))
+        
+        # Compute weighted total loss
+        losses['total'] = (
+            self.config.lambda_recon * losses['reconstruction'] +
+            self.config.lambda_identity * losses['identity'] +
+            self.config.lambda_dpe * losses['dpe_total'] +
+            sum(self.config.lambda_cfg * losses[f'cfg_{k}'] 
+                for k in ['audio', 'gaze'] 
+                if f'cfg_{k}' in losses)
+        )
+        
+        return losses
+
+    def _compute_cfg_losses(
+        self,
+        diffusion_output: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        """Compute classifier-free guidance losses"""
+        cfg_losses = {}
+        
+        # Base unconditional output
+        uncond_output = diffusion_output['uncond']
+        
+        # Audio CFG loss
+        if 'masked_audio' in diffusion_output:
+            cfg_losses['cfg_audio'] = F.mse_loss(
+                diffusion_output['masked_audio'],
+                uncond_output
+            )
+        
+        # Gaze CFG loss
+        if 'masked_gaze' in diffusion_output:
+            cfg_losses['cfg_gaze'] = F.mse_loss(
+                diffusion_output['masked_gaze'],
+                uncond_output
+            )
+            
+        return cfg_losses
+        
 
 
 
     
+class DiffusionSampler:
+    """
+    Implements sampling strategies for the diffusion model
+    """
+    def __init__(self, 
+                 num_steps: int = 50,
+                 min_beta: float = 1e-4,
+                 max_beta: float = 0.02):
+        self.num_steps = num_steps
+        
+        # Set up diffusion parameters
+        self.beta = torch.linspace(min_beta, max_beta, num_steps)
+        self.alpha = 1.0 - self.beta
+        self.alpha_bar = torch.cumprod(self.alpha, dim=0)
+        
+        # Pre-compute sampling parameters
+        self.sqrt_alpha = torch.sqrt(self.alpha)
+        self.sqrt_one_minus_alpha = torch.sqrt(1.0 - self.alpha)
+        self.log_one_minus_alpha = torch.log(1.0 - self.alpha)
+        self.sqrt_recip_alpha = torch.sqrt(1.0 / self.alpha)
+        self.sqrt_recip_alpha_bar = torch.sqrt(1.0 / self.alpha_bar)
+        self.posterior_variance = self.beta * (1.0 - self.alpha_bar.previous_frame) / (1.0 - self.alpha_bar)
+        
+    def sample_timesteps(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        """Sample timesteps uniformly"""
+        return torch.randint(0, self.num_steps, (batch_size,), device=device)
+
+    @torch.no_grad()
+    def ddim_sample(self,
+                    model: nn.Module,
+                    shape: Tuple[int, ...],
+                    conditions: Dict[str, torch.Tensor],
+                    cfg_scales: Dict[str, float],
+                    eta: float = 0.0,
+                    device: torch.device = None) -> torch.Tensor:
+        """
+        Sample using DDIM for faster inference
+        Args:
+            model: Diffusion model
+            shape: Output tensor shape
+            conditions: Conditioning signals
+            cfg_scales: Classifier-free guidance scales
+            eta: DDIM stochastic sampling parameter (0 = deterministic)
+        """
+        device = device or next(model.parameters()).device
+        batch_size = shape[0]
+        
+        # Start from pure noise
+        x = torch.randn(shape, device=device)
+        
+        # Setup progress bar
+        pbar = tqdm(reversed(range(self.num_steps)), desc='DDIM Sampling')
+        
+        for t in pbar:
+            # Get diffusion parameters for current timestep
+            at = self.alpha_bar[t]
+            at_next = self.alpha_bar[t-1] if t > 0 else torch.tensor(1.0)
+            
+            # Time embedding
+            t_embed = torch.ones(batch_size, device=device) * t
+            
+            # Model prediction with classifier-free guidance
+            with torch.no_grad():
+                # Get unconditional prediction
+                uncond_conditions = {k: torch.zeros_like(v) for k, v in conditions.items()}
+                eps_uncond = model(x, t_embed, uncond_conditions)
+                
+                # Get conditional prediction
+                eps_cond = model(x, t_embed, conditions)
+                
+                # Apply CFG scaling
+                eps = eps_uncond
+                for cond_type, scale in cfg_scales.items():
+                    eps = eps + scale * (eps_cond - eps_uncond)
+            
+            # DDIM update step
+            x0_pred = (x - torch.sqrt(1 - at) * eps) / torch.sqrt(at)
+            
+            # Optional stochastic component
+            sigma = eta * torch.sqrt((1 - at_next) / (1 - at)) * torch.sqrt(1 - at / at_next)
+            noise = torch.randn_like(x) if eta > 0 else 0
+            
+            # Compute x_(t-1)
+            x_prev = torch.sqrt(at_next) * x0_pred + \
+                    torch.sqrt(1 - at_next - sigma**2) * eps + \
+                    sigma * noise
+            
+            x = x_prev
+            
+        return x
+
+class MotionGenerator:
+    """
+    Generates motion sequences using the diffusion model
+    """
+    def __init__(self,
+                 model: nn.Module,
+                 sampler: DiffusionSampler,
+                 window_size: int = 25,
+                 stride: int = 20):
+        self.model = model
+        self.sampler = sampler
+        self.window_size = window_size
+        self.stride = stride  # Stride between windows
+        
+    def generate_motion_sequence(self,
+                               audio_features: torch.Tensor,
+                               conditions: Dict[str, torch.Tensor],
+                               cfg_scales: Dict[str, float],
+                               device: torch.device) -> torch.Tensor:
+        """
+        Generate motion sequence using sliding windows
+        Args:
+            audio_features: Audio features [1, T, C]
+            conditions: Dictionary of conditioning signals
+            cfg_scales: Dictionary of CFG scales
+        Returns:
+            Generated motion sequence [1, T, motion_dim]
+        """
+        seq_length = audio_features.shape[1]
+        motion_dim = self.model.motion_dim
+        generated_motions = []
+        
+        # Initialize overlap buffer
+        prev_window = None
+        overlap_size = self.window_size - self.stride
+        
+        # Generate motions window by window
+        for start_idx in range(0, seq_length, self.stride):
+            end_idx = min(start_idx + self.window_size, seq_length)
+            current_window_size = end_idx - start_idx
+            
+            # Get current window conditions
+            window_conditions = {
+                k: v[:, start_idx:end_idx] if len(v.shape) > 2 else v
+                for k, v in conditions.items()
+            }
+            
+            # Add previous window context if available
+            if prev_window is not None:
+                window_conditions['prev_motion'] = prev_window[:, -overlap_size:]
+            
+            # Generate motion for current window
+            window_shape = (1, current_window_size, motion_dim)
+            current_motion = self.sampler.ddim_sample(
+                self.model,
+                window_shape,
+                window_conditions,
+                cfg_scales,
+                device=device
+            )
+            
+            # Smooth transition in overlap region
+            if prev_window is not None and overlap_size > 0:
+                weights = torch.linspace(0, 1, overlap_size, device=device)
+                weights = weights.view(1, -1, 1)
+                
+                overlap_region = weights * current_motion[:, :overlap_size] + \
+                               (1 - weights) * prev_window[:, -overlap_size:]
+                
+                current_motion = torch.cat([
+                    overlap_region,
+                    current_motion[:, overlap_size:]
+                ], dim=1)
+            
+            generated_motions.append(current_motion)
+            prev_window = current_motion
+        
+        # Concatenate all windows
+        full_sequence = torch.cat(generated_motions, dim=1)
+        
+        # Trim to exact sequence length if needed
+        if full_sequence.shape[1] > seq_length:
+            full_sequence = full_sequence[:, :seq_length]
+            
+        return full_sequence
+
+class VideoGenerator:
+    """
+    Complete video generation pipeline
+    """
+    def __init__(self,
+                 face_encoder: nn.Module,
+                 motion_generator: MotionGenerator,
+                 face_decoder: nn.Module,
+                 device: torch.device):
+        self.face_encoder = face_encoder
+        self.motion_generator = motion_generator
+        self.face_decoder = face_decoder
+        self.device = device
+        
+    @torch.no_grad()
+    def generate_video(self,
+                      source_image: torch.Tensor,
+                      audio_features: torch.Tensor,
+                      conditions: Dict[str, torch.Tensor],
+                      cfg_scales: Dict[str, float],
+                      output_size: Tuple[int, int] = (512, 512)) -> torch.Tensor:
+        """
+        Generate complete talking face video
+        Args:
+            source_image: Source face image [1, C, H, W]
+            audio_features: Audio features [1, T, C]
+            conditions: Dictionary of conditioning signals
+            cfg_scales: Dictionary of CFG scales
+            output_size: Size of output video frames
+        Returns:
+            Generated video frames [1, T, C, H, W]
+        """
+        # Extract source image components
+        source_components = self.face_encoder(source_image)
+        
+        # Generate motion sequence
+        motion_sequence = self.motion_generator.generate_motion_sequence(
+            audio_features,
+            conditions,
+            cfg_scales,
+            self.device
+        )
+        
+        # Generate frames
+        num_frames = motion_sequence.shape[1]
+        frames = []
+        
+        for t in tqdm(range(num_frames), desc='Generating frames'):
+            # Get current motion and conditions
+            current_motion = motion_sequence[:, t]
+            current_conditions = {
+                k: v[:, t] if len(v.shape) > 2 else v
+                for k, v in conditions.items()
+            }
+            
+            # Generate frame
+            frame = self.face_decoder(
+                source_components['appearance_volume'],
+                source_components['identity'],
+                current_motion,
+                current_conditions
+            )
+            
+            # Resize if needed
+            if frame.shape[-2:] != output_size:
+                frame = F.interpolate(
+                    frame,
+                    size=output_size,
+                    mode='bilinear',
+                    align_corners=False
+                )
+            
+            frames.append(frame)
+        
+        # Stack frames into video
+        video = torch.stack(frames, dim=1)  # [1, T, C, H, W]
+        
+        return video
+
+class VideoPostProcessor:
+    """
+    Post-processing for generated videos
+    """
+    def __init__(self):
+        pass
+    
+    @torch.no_grad()
+    def apply_temporal_smoothing(self,
+                               video: torch.Tensor,
+                               window_size: int = 5) -> torch.Tensor:
+        """Apply temporal smoothing to reduce jitter"""
+        kernel = torch.ones(1, 1, window_size, 1, 1, device=video.device) / window_size
+        smoothed = F.conv3d(
+            video,
+            kernel,
+            padding=(window_size // 2, 0, 0)
+        )
+        return smoothed
+    
+    def enhance_frames(self, video: torch.Tensor) -> torch.Tensor:
+        """Enhance individual frames (if needed)"""
+        return video  # Implement frame enhancement if needed

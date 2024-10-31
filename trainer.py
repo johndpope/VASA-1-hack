@@ -557,7 +557,7 @@ class VASATrainer:
         """Initialize loss functions"""
         self.identity_loss = IdentityLoss().to(self.device)
         self.dpe_loss = DPELoss().to(self.device)
-        self.vasa_loss = VASALoss().to(self.device)
+        # self.vasa_loss = VASALoss().to(self.device)
 
     def setup_evaluator(self):
         """Initialize evaluation metrics"""
