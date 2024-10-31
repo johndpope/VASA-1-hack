@@ -1,0 +1,896 @@
+DPE: Disentanglement of Pose and Expression for General Video Portrait Editing
+Youxin Pang1,22   Yong Zhang31   Weize Quan1,2   Yanbo Fan3   Xiaodong Cun3   
+Ying Shan3   Dong-ming Yan1,21   
+1NLPR, Institute of Automation, Chinese Academy of Sciences
+2School of Artificial Intelligence, University of Chinese Academy of Sciences
+3Tencent AI Lab, ShenZhen, P.R.China
+Abstract
+One-shot video-driven talking face generation aims at producing a synthetic talking video by transferring the facial motion from a video to an arbitrary portrait image. Head pose and facial expression are always entangled in facial motion and transferred simultaneously. However, the entanglement sets up a barrier for these methods to be used in video portrait editing directly, where it may require to modify the expression only while maintaining the pose unchanged. One challenge of decoupling pose and expression is the lack of paired data, such as the same pose but different expressions. Only a few methods attempt to tackle this challenge with the feat of 3D Morphable Models (3DMMs) for explicit disentanglement. But 3DMMs are not accurate enough to capture facial details due to the limited number of Blenshapes, which has side effects on motion transfer. In this paper, we introduce a novel self-supervised disentanglement framework to decouple pose and expression without 3DMMs and paired data, which consists of a motion editing module, a pose generator, and an expression generator. The editing module projects faces into a latent space where pose motion and expression motion can be disentangled, and the pose or expression transfer can be performed in the latent space conveniently via addition. The two generators render the modified latent codes to images, respectively. Moreover, to guarantee the disentanglement, we propose a bidirectional cyclic training strategy with well-designed constraints. Evaluations demonstrate our method can control pose or expression independently and be used for general video editing.
+
+[Uncaptioned image]
+Figure 1: Visual examples produced by our method. Top: disentanglement of pose and expression. Bottom: general video editing. Our method can edit the pose or expression of the source image independently according to the driving image through decoupling pose and expression in motion transfer. Benefiting from the disentanglement, our one-shot talking face method can be applied to video portrait editing. Since our method can edit expression only, the edited cropped face can be pasted back to the full image simply. As our method is subject-agnostic, it can be used to edit any unseen video as well, which is different from subject-dependent video editing methods such as DVP [18].
+1Introduction
+Talking face generation has seen tremendous progress in visual quality and accuracy over recent years. Literature can be categorized into two groups, i.e., audio-driven [22] and video-driven [14]. The former focuses on animating an unseen portrait image or video with a given audio. The latter aims at animating with a given video. Talking face generation has a variety of meaningful applications, such as digital human animation, film dubbing, etc. In this work, we target video-driven talking face generation.
+
+Recently, most methods [14, 35, 33, 25] endeavor to drive a still portrait image with a video from different perspectives, i.e., one-shot talking face generation. But only a few [18, 29, 20] make effort to reenact the portrait in a video with another talking video, i.e., video portrait editing. This is a more challenging task because edited faces are required to paste back to the original video and temporal dynamics need to be maintained. Several methods [18, 27] provide personalized solutions to this challenge by training a model on the videos of a specific person only. However, the learned model cannot generalize to other identities as the personalized training heavily overfits the facial motion of the specific person and the background. For general video portrait editing, therefore, resorting to the generalization property of one-shot talking face generation might be a feasible solution.
+
+One-shot methods can transfer facial motion from a driving face to a source one, resulting in that the edited face mimics the head pose and facial expression*
+*
+Note that facial expression here differs from emotion.
+ of the driving one. The facial motion consists of entangled pose motion and expression motion, which are always transferred simultaneously in previous methods. However, the entanglement makes those methods unable to transfer pose or expression independently. Since the input to the processing network is always the cropped face rather than the full original image, if the pose is modified along with the expression, the paste-back operation can cause noticeable artifacts around the crop boundary, e.g., twisted neck and inconsistent background. Consequently, most one-shot methods face this obstacle preventing their application to general video portrait editing.
+
+One challenge to disentangle pose and expression is the lack of paired data, such as the same pose but different expressions, or vice versa. In the literature, there are only a few exceptions that can get rid of this limitation, e.g., PIRenderer [24] and StyleHEAT [37], which are based on 3D Morphable Models (3DMMs) [2], a predefined parametric representation that decomposes expression, pose, and identity. However, the 3DMM-based methods heavily depend on the decoupling accuracy of the 3DMM parameters, which is far from satisfactory to reconstruct facial details due to the limited number of Blendshapes. Besides, optimization-based 3DMM parameter estimation is not efficient while learning-based estimation will introduce more errors.
+
+In this work, we propose a novel self-supervised disentanglement framework to decouple pose and expression, breaking through the limitation of paired data without using 3DMMs. Our framework has a motion editing module, a pose generator, and an expression generator. The editing module projects faces into a latent space where coupled pose and expression motion in a latent code can be disentangled by a network. Then, pose or expression transfer can be performed by directly adding the latent code of a source face with the disentangled pose or expression motion code of a driving face. Finally, the two generators render modified latent codes to images. More importantly, to accomplish the disentanglement without paired data, we introduce a bidirectional cyclic training method with well-designed constraints. Specifically, given a source face 
+𝑆
+ and a driving one 
+𝐷
+, we transfer the expression and pose from 
+𝐷
+ to 
+𝑆
+ sequentially, resulting in two synthetic faces, 
+𝑆
+′
+ and 
+𝑆
+′′
+. Since there is no paired data, no supervision is provided for 
+𝑆
+′
+. To tackle the missing supervision, we exchange the role of 
+𝑆
+ and 
+𝐷
+ to transfer the pose and expression motion from 
+𝑆
+ to 
+𝐷
+, resulting in 
+𝐷
+′
+ and 
+𝐷
+′′
+. The distance between 
+𝐷
+′
+ and 
+𝑆
+′
+ is one constraint for learning. However, it is still not enough for disentangling pose and expression. Then, we discover another core constraint, i.e., face reconstruction. When 
+𝑆
+ and 
+𝐷
+ are the same, 
+𝑆
+′
+ and 
+𝐷
+′
+ are exactly the same as 
+𝑆
+ and 
+𝐷
+, respectively. More analyses will be presented in Sec. 3.
+
+Our main contributions are three-fold:
+
+• We propose a self-supervised disentanglement framework to decouple pose and expression for independent motion transfer, without using 3DMMs and paired data.
+• We propose a bidirectional cyclic training strategy with well-designed constraints to achieve the disentanglement of pose and expression.
+• Extensive experiments demonstrate that our method can control pose or expression independently, and can be used for general video editing.
+2Related Work
+2.1Talking-face Generation
+2D-based methods. The early works[1, 34, 31] are dominated by subject-dependent methods that can only work on a specific person because their models are trained on the video of the specific person. Then, several methods[30, 39] attempt to fine-tune a pre-trained model on the data of a target person for individual use. Recently, more works focus on learning a one-shot subject-agnostic model[26, 3, 4, 25, 23, 12, 13, 38, 39, 42, 5], i.e., the trained model can be generally applied to an unseen person. FOMM[25] is a representative method that combines motion field estimation and first-order local affine transformations with the help of sparse keypoints. After that, Face-vid2vid[32] makes an improvement to FOMM and learns unsupervised 3D keypoints. Similarly, DaGAN[14] incorporates depth on the basis of sparse keypoints to ensure geometric consistency. LIA[33] has the similar formulation of relative motion as FOMM but learns the semantically meaningful directions in latent space instead of using keypoints. However, these methods can only edit a still portrait since pose and expression are coupled in the facial motion. As the pose is modified along with the expression, the edited cropped face cannot be pasted back to the original image.
+
+3D model-based methods. Early works[28, 29] usually build a 3D model for a specific person. Then, a range of approaches focus on using 3D morphable models [2] that explicitly decompose expression, pose, and identity. DVP[18] extracts 3DMM parameters of the source and target faces, and the face manipulation is achieved by exchanging their 3DMM parameters. Based on DVP, NS-PVD[17] preserves the target talking style using a recurrent GAN. However, these learned models are subject-dependent and cannot generalize. Recently, more methods[6, 24, 10, 11] target subject-agnostic talking face generation. For instance, HeadGAN[6] uses the rendered image from 3D mesh as the input of the network. It presents independent pose and expression editing with manually adjusted parameters but does not show the transfer from another face.
+
+2.2Decoupling
+Several works[32, 25, 36, 33, 7] focus on the detachment of identity-specific and motion-related information to achieve cross-ID driving, but they do not distinguish pose motion from expression motion. Only a few works target the disentanglement of pose and expression for talking face generation. Almost all of them [6, 24, 37] are based on 3DMMs that explicitly decouple pose and expression. PIRenderer[24] extracts the 3DMM parameters for a driving face through a pre-trained model and then predict the flow given a source face and the 3DMM parameters. During inference, it can transfer only the expression from the driving face by replacing the expression parameters of the source face with those of the driving one. StyleHEAT[37] follows the similar way based on a pre-trained StyleGAN. However, the performance of these methods heavily depend on the accuracy of 3DMMs. 3DMMs are known to be not particularly accurate for face reconstruction due to the limited number of Blendshapes. They have difficulty delineating facial details of face shape, eye, and mouth, which may eventually have side effects on the synthetic results. In this work, instead of using 3DMMs, we decompose pose and expression by the proposed self-supervised disentanglement framework with a bidirectional cyclic training strategy.
+
+3The Proposed Method
+Refer to caption
+Figure 2:Illustration of our proposed model. The framework consists of three learnable components, i.e., the motion editing module, the expression generator, and the pose generator. The editing module projects the source and driving images into a latent space where pose motion and expression motion can be disentangled, and then modifies the latent code of the source image according to a given indicator that points out either expression or pose to edit. It outputs an edited latent code and the feature maps of the source image. The pose and expression generators are applied to render the outputs of the editing module to a face image. These two generators share the same architecture but different parameters for interpreting the pose and expression code respectively.
+To apply one-shot talking face generation for general video editing, the disentanglement of pose and expression is indispensable to handle the paste-back operation, i.e., pasting the edited cropped face to the full image. In this work, we propose a self-supervised disentanglement framework without paired data and the predefined 3DMMs. The whole pipeline is illustrated in Fig. 2. Our model contains three learnable components, i.e., the motion editing module, the expression generator, and the pose generator. To accomplish the disentanglement, we propose a bidirectional cyclic training strategy to compensate for the missing paired data in which pose or expression are edited individually. We first introduce the three components in Sec. 3.1. We then present the training strategy in Sec. 3.2, followed by the learning objective functions in Sec. 3.3.
+
+3.1Architecture
+Motion Editing Module. As shown in Fig. 2, given a source image, a driving one, and an editing indicator, the motion editing module yields out an edited latent code and the multi-scale feature maps of the source image. The indicator tells either pose or expression of the source image to be edited. Inside the module, an encoder is used to project an input image to a latent space that is supposed to be decomposable into two orthogonal subspaces. Let 
+𝑆
+, 
+𝐷
+, and 
+𝑂
+ denote the source image, the driving one, and the indicator, respectively. Let 
+𝐸
+ denote the encoder. Then, we have:
+
+𝐜
+=
+𝐸
+​
+(
+𝑋
+)
+,
+(1)
+where 
+𝑋
+ is the input of the encoder and 
+𝐜
+ represents the output latent code. 
+𝐜
+𝑠
+=
+𝐸
+​
+(
+𝑆
+)
+ and 
+𝐜
+𝑑
+=
+𝐸
+​
+(
+𝐷
+)
+ are the latent codes of 
+𝑆
+ and 
+𝐷
+.
+
+As the driving image provides the facial motion reference, a motion encoder is required to project an image to the same latent space of the encoder. Instead of using an separate encoder, we construct the motion space based on the latent space of the encoder. Specifically, we use several multiple perceptron (MLP) layers to disentangle the latent space of the encoder to two orthogonal subspaces, i.e., the pose motion space and the expression motion space. The architecture of the disentanglement module is that the first few MLP layers act as the shared backbone, followed by two heads that are also composed of MLP layers. The disentanglement process can be formulated as:
+
+𝐞
+,
+𝐩
+=
+MLP
+​
+(
+𝐜
+)
+,
+(2)
+where 
+𝐞
+ and 
+𝐩
+ represent the expression and pose motion code, respectively. They share the same dimension as 
+𝐜
+.
+
+For motion editing, we apply an indicator to specify either pose or expression to edit, which is a binary variable. When 
+𝑂
+=
+pose
+, only the pose motion is transferred to the source image. When 
+𝑂
+=
+exp
+, the expression is transferred. One benefit of disentangling motion in the latent space of the encoder is that motion transfer can be performed by a simple addition, e.g.,, the expression editing can be defined as:
+
+𝐜
+¯
+𝑒
+=
+𝐜
++
+𝐞
+,
+(3)
+where 
+𝐜
+¯
+𝑒
+ represents the edited code with expression transfer. Similar, we have the pose editing, i.e., 
+𝐜
+¯
+𝑝
+=
+𝐜
++
+𝐩
+.
+
+Let 
+𝑀
+ denote the motion editing module. The whole process can be defined as:
+
+𝐜
+¯
+,
+ℱ
+=
+𝑀
+​
+(
+𝑆
+,
+𝐷
+,
+𝑂
+)
+,
+(4)
+where 
+ℱ
+=
+{
+𝐅
+𝑘
+}
+𝐾
+ represents the feature maps of the source image, extracted from the encoder. 
+𝐾
+ is the number of blocks in the encoder. Both the latent code and the feature maps are from the encoder. The former represents high-level information while the latter represents mid-level information.
+
+Pose and Expression Generators. The pose or expression of the source image is edited in the latent space by adding the pose or expression motion from the driving one. Since pose motion captures the global head movement while expression motion captures the local movements of facial components, we use two individual generators for better interpretation of the edited latent code, i.e., the expression generator 
+𝐺
+𝑒
+ and the pose generator 
+𝐺
+𝑝
+ . The two generators share the same architecture but different parameters.
+
+Inspired by the flow-based methods [25, 24], we use flow fields to manipulate the feature maps. Fig. 2 gives an illustration of the generators. Similar to the pipeline of StyleGAN2[16], we exploit the latent code to generate multi-scale flow fields that are used to warp the feature maps from the encoder in the motion editing module. The warped feature maps are aggregated to render an image. The expression generator can be defined as:
+
+𝑌
+𝑒
+=
+𝐺
+𝑒
+​
+(
+𝐜
+,
+ℱ
+)
+,
+(5)
+where 
+𝑌
+𝑒
+ is the output image of the expression generator. Similar, the pose generator is 
+𝑌
+𝑝
+=
+𝐺
+𝑝
+​
+(
+𝐜
+,
+ℱ
+)
+.
+
+3.2Bidirectional Cyclic Training Strategy
+Refer to caption
+Figure 3:An illustration of the training strategy.
+As shown in Fig. 3, the pipeline is designed for editing expression and pose independently and sequentially. By extracting two frames from a video as input, we can provide supervision at the end of the pipeline. However, only such supervision is not enough to disentangle pose and expression. Without supervision for the intermediate result (i.e., the output of the expression generator), all the subnetworks will be treated as one network as a whole to complete the reconstruction task with no effort to distinguish the responsibilities of the two generators.
+
+Refer to caption
+Figure 4:An illustration of the parameter space.
+We give a simple illustration in Fig. 4(a). The task is to scale a large square to a small one in two steps within the range of the gray square. Without any constraint, the intermediate result of the first step can be any rectangle in the range (see the top of Fig. 4(a)). Given the constraint that the height should be the same as the width, the solution space can be greatly narrowed and the intermediate result becomes to be with the property (see the bottom of Fig. 4(a)). Therefore, in our case, given no paired data, we should design a certain constraint to guarantee the disentanglement property of the framework. Otherwise, the intermediate face of the expression generator can be in any shape as long as the pose generator can interpret it. We further give an illustration from the perspective of the parameter space in Fig. 4(b). Let 
+𝜃
+𝑚
+, 
+𝜃
+𝑒
+, and 
+𝜃
+𝑝
+ denote the parameters of the motion editing module, the expression generator, and the pose generator, respectively. For the simplicity of explanation, we assume the motion editing module is optimal, i.e., 
+𝜃
+𝑚
+∗
+. Without paired data, the solution can be any combination of 
+𝜃
+𝑒
+ and 
+𝜃
+𝑝
+ if they are able to reconstruct the driving image during training. If effective constraints are discovered, the solution space can be narrowed and the meaningful solution can be obtained to own the property emphasized by the constraints.
+
+To ensure the disentanglement, we propose a bidirectional cyclic training strategy without paired data, which is illustrated in Fig. 3. Let 
+𝑒
+​
+(
+𝑆
+,
+𝐷
+)
+ denote expression transfer from 
+𝐷
+ to 
+𝑆
+, i.e.,
+
+𝑆
+′
+=
+𝑒
+​
+(
+𝑆
+,
+𝐷
+)
+=
+𝐺
+𝑒
+​
+(
+𝑀
+​
+(
+𝑆
+,
+𝐷
+,
+𝑂
+=
+exp
+)
+)
+,
+(6)
+where 
+𝑆
+′
+ is the expression transfer result. Let 
+𝑝
+​
+(
+𝑆
+′
+,
+𝐷
+)
+ denote pose transfer from 
+𝐷
+ to 
+𝑆
+′
+, i.e.,
+
+𝑆
+′′
+=
+𝑝
+​
+(
+𝑆
+′
+,
+𝐷
+)
+=
+𝐺
+𝑝
+​
+(
+𝑀
+​
+(
+𝑆
+′
+,
+𝐷
+,
+𝑂
+=
+pose
+)
+)
+,
+(7)
+where 
+𝑆
+′′
+ is the pose transfer result. Similarly, we exchange roles of the source and driving images to transfer the pose and expression of the source image to the driving one sequentially. Then, we have 
+𝐷
+′
+=
+𝑝
+​
+(
+𝐷
+,
+𝑆
+)
+ with pose transferred from 
+𝑆
+, and 
+𝐷
+′′
+=
+𝑒
+​
+(
+𝐷
+′
+,
+𝑆
+)
+ with expression from 
+𝑆
+.
+
+Given tuples 
+<
+𝑆
+,
+𝑆
+′
+,
+𝑆
+′′
+>
+ and 
+<
+𝐷
+,
+𝐷
+′
+,
+𝐷
+′′
+>
+, we can design a set of constraints for the disentanglement. As shown in Fig. 3, the three dash lines indicate that three pairs of images can be used to compute reconstruction losses, i.e., 
+<
+𝑆
+′′
+,
+𝐷
+>
+, 
+<
+𝐷
+′′
+,
+𝑆
+>
+, and 
+<
+𝑆
+′
+,
+𝐷
+′
+>
+. Please note that though the pair 
+<
+𝑆
+′
+,
+𝐷
+′
+>
+ can constrain the intermediate result and narrows the solution space, but it still cannot ensure the disentanglement of pose and expression and the intermediate result is even not face.
+
+Fortunately, we discover that the self-reconstruction of the two generators is core for the disentanglement, i.e., the pair 
+<
+𝑆
+,
+𝑒
+(
+𝑆
+,
+𝑆
+)
+>
+ and 
+<
+𝑆
+,
+𝑝
+(
+𝑆
+,
+𝑆
+)
+>
+. Such pairs encourage the generators to output meaningful face and encourage the editing module to extract the accurate pose and expression motion. Otherwise, the generators’ outputs will never be the same as the input and there will be always a distance between the two images of a pair. Theoretically, there is an extreme case where all constraints can be satisfied but the disentanglement fails, i.e., one generator is an identity mapping network while the other generator takes the responsibility of both expression and pose transfer. However, we have never met this case in practise. One reason is that the generators are randomly initialized and the probability of their convergence to an identity mapping is very low.
+
+3.3Loss Functions
+Reconstruction loss 
+ℒ
+𝐶
+. The Mean Absolute Error (MAE) is used to compute the errors between two images in the three pairs:
+
+ℒ
+𝑟
+​
+𝑒
+​
+𝑐
+=
+ℒ
+𝐶
+​
+(
+𝑆
+′′
+,
+𝐷
+)
++
+ℒ
+𝐶
+​
+(
+𝐷
+′′
+,
+𝑆
+)
++
+ℒ
+𝐶
+​
+(
+𝑆
+′
+,
+𝐷
+′
+)
+.
+(8)
+Perceptual loss 
+ℒ
+𝑃
+. To make the synthetic results look more realistic, we also apply the perceptual loss [15] to the three pairs as well as the two self-reconstruction pairs:
+
+ℒ
+𝑝
+​
+𝑒
+​
+𝑟
+=
+ℒ
+𝑃
+​
+(
+𝑆
+′′
+,
+𝐷
+)
++
+ℒ
+𝑃
+​
+(
+𝐷
+′′
+,
+𝑆
+)
++
+ℒ
+𝑃
+​
+(
+𝑆
+′
+,
+𝐷
+′
+)
+(9)
++
+ℒ
+𝑃
+​
+(
+𝑒
+​
+(
+𝑆
+,
+𝑆
+)
+,
+𝑆
+)
++
+ℒ
+𝑃
+​
+(
+𝑝
+​
+(
+𝑆
+,
+𝑆
+)
+,
+𝑆
+)
+.
+Expression loss 
+ℒ
+𝐸
+. To help with the disentanglement of pose and expression, inspired by spectre[9], an expression recognition network[8] is utilized to obtain the feature vectors. Then we minimize the distance between the feature vectors of the ground-truth and intermediate synthetic images:
+
+ℒ
+𝑒
+​
+𝑥
+​
+𝑝
+=
+ℒ
+𝐸
+​
+(
+𝑆
+′
+,
+𝐷
+)
++
+ℒ
+𝐸
+​
+(
+𝐷
+′
+,
+𝐷
+)
+.
+(10)
+GAN loss 
+ℒ
+𝐺
+. We adopt the non-saturating adversarial loss as our adversarial loss. We also use a discriminator to distinguish reconstructed images from the original ones:
+
+ℒ
+𝑎
+​
+𝑑
+​
+𝑣
+=
+ℒ
+𝐺
+​
+(
+𝑆
+′′
+)
++
+ℒ
+𝐺
+​
+(
+𝐷
+′′
+)
+.
+(11)
+Overall, the full objective function is defined as:
+
+ℒ
+=
+ℒ
+𝑟
+​
+𝑒
+​
+𝑐
++
+𝜆
+𝑝
+​
+ℒ
+𝑝
+​
+𝑒
+​
+𝑟
++
+𝜆
+𝑒
+​
+ℒ
+𝑒
+​
+𝑥
+​
+𝑝
++
+ℒ
+𝑎
+​
+𝑑
+​
+𝑣
+,
+(12)
+where 
+𝜆
+𝑝
+ and 
+𝜆
+𝑒
+ are the trade-off hyper-parameters.
+
+4Experiments
+Refer to caption
+Figure 5:Visual comparisons of independent editing of pose and expression.
+4.1Settings
+Datasets. We train our model on the VoxCeleb dataset[21] that includes over 100K videos of 1,251 subjects. Following [25], we crop faces from the videos and resize them to 
+256
+×
+256
+. Faces move freely within a fixed bounding box and no need to align. For evaluation, the test set contains videos from the VoxCeleb dataset and the HDTF dataset [41], which are unseen during training. We collect 15 image-video pairs of different identities from the test set. For same-identity reenactment, we use the first frame as the source image and the last 400 frames as the driving images. For cross-identity reenactment, we use the first 400 video frames to drive the image in each image-video pair. Hence, we can obtain 6K synthetic images for each method for evaluation.
+
+Metrics. We utilize a range of metrics to evaluate image quality and motion transfer quality. For same-identity evaluation, peak signal-to-noise ratio (PSNR), structural similarity index (SSIM), and learned perceptual image patch similarity (LPIPS) [40] are used to measure the reconstruction quality. And the cosine similarity (CSIM) of identity embedding is used to measure identity preservation. For cross-identity and video portrait editing evaluation, AED and APD from PIRender [24] are used to calculate the average 3DMM expression and pose distance between the generated images and targets respectively.
+
+Implementation details. We train the model in two stages. In the first stage, the three components are jointly optimized for 100K iterations. As the expression motion captures local details of facial components, the expression generator is more difficult to learn than the pose generator. Hence, in the second stage, we learn the expression generator for 50K iterations with fixing the parameters except those of MLPs in the motion editing module and the parameters of the pose generator. We set 
+𝜆
+𝑝
+=
+20
+ and 
+𝜆
+𝑒
+=
+20
+. The batch size is 32. Adam [19] is selected as the optimizer with the learning rate of 
+0.002
+ for the first stage and 
+0.0008
+ for the second one. During inference, the two generators can be used independently or jointly with the motion editing module. Please refer to the supplementary for more details.
+
+Method	Same-Identity Reenactment	Cross-Identity Reenactment
+CSIM 
+↑
+ 	AED 
+↓
+APD 
+↓
+CSIM 
+↑
+AED 
+↓
+APD 
+↓
+PIRenderer[24] 	0.9075	0.1205	0.01254	0.9133	0.2674	0.01182
+StyleHEAT[37] 	0.8320	0.1511	0.01551	0.8489	0.2701	0.01695
+Ours	0.9091	0.1133	0.01720	0.9204	0.2660	0.02464
+Table 1: Quantitative comparisons on expression editing.
+Method	Same-Identity Reenactment	Cross-Identity Reenactment
+CSIM 
+↑
+ 	AED 
+↓
+APD 
+↓
+CSIM 
+↑
+AED 
+↓
+APD 
+↓
+PIRenderer[24] 	0.9055	0.0972	0.01718	0.8406	0.1397	0.02533
+StyleHEAT[37] 	0.8358	0.1285	0.02975	0.8058	0.1577	0.03025
+Ours	0.9192	0.0807	0.02459	0.8798	0.1250	0.03630
+Table 2: Quantitative comparisons on pose editing.
+4.2Disentanglement for Video Portrait Editing
+Only a few one-shot talking head methods can edit expression or pose independently and be applicable to general video portrait editing. Their disentanglement are almost based on the pre-defined 3DMMs while our method is a self-supervised disentanglement without using 3DMMs. We compare with two state-of-the-art methods that are open-sourced, i.e., PIRender [24] and StyleHEAT [37]. Since they use the 3DMM parameters as an input to generate warping flow, they perform independent editing by replacing the pose or expression parameters of the source with those of the driving one. Differently, our independent editing is performed in the latent space by simply adding the motion code extracted from the driving image to the latent code of the source one.
+
+Qualitative Evaluation. The visual comparisons are shown in Fig. 5. The analyses are summarized as follows. First, our method achieves better accuracy in expression transfer than the other two methods, especially the eyes and the mouth shape (see Fig. 5(a)). For instance, as shown in the third row, the eyes of the face synthesized by PIRender are ‘open up’ while those of the driving image are ‘closed’. Our method preserves the eye status better. In the first and second row, our method captures better mouth movement. The reason is that the extracted 3DMM parameters by a pre-trained network cannot accurately reflect the status of eyes and mouth due to the limited number of Blendshapes. This is the common weakness of 3DMM-based methods. Differently, our method projects images into a latent space with no dependence on 3DMMs, which can depict more accurate facial motions.
+
+Second, our method preserves the identity better than other two methods in pose transfer (see Fig. 5(b)). It can be observed that PIRender and StyleHEAT tend to change the face shape of the source image if the face shape of the driving image differs from the source. The shape of the synthetic face becomes similar to the driving one. For instance, the synthetic image of PIRender in the second row has a wider face than the source while the cheek of the synthetic image in the first row becomes sharper. This might be caused by the incomplete disentanglement of shape, expression, and identity in the 3DMM parameters. Unlike them, our method is based on the disentanglement of pose and expression in the latent space, and the pose and expression are decoupled better with the self-supervised learning framework. Besides, the teeth generated by our method have better quality than other methods. Though StyleHEAT can generate high-resolution images, the teeth always have artifacts due to the imperfect ruling of StyleGAN. While PIRender produces blurry teeth because no parameters in 3DMMs are used to depict the teeth. Moreover, it can be observed that StyleHEAT has the identity loss because of the GAN inversion process.
+
+Refer to caption
+Figure 6:Qualitative comparisons for video expression editing.
+Quantitative Evaluation. The quantitative comparisons of expression and pose editing are shown in Tab. 1 and Tab. 2, respectively. It can be observed that our method achieves better performance in identity and expression preservation in all testing scenarios. These results are consistent with the observations in the visual results. However, our performance in pose preservation is slightly worse than PIRender. Pose transfer reflects the global head movement while expression transfer reflects the local movement of facial components. The 3DMM parameters are enough to depict the global head motion but unable to captures the local subtle motions due to the detail level of the Blenshapes.
+
+Video Portrait Editing. The obstacle of applying one-shot talking face generation method to video expression editing is the paste-back operation, i.e., pasting the edited cropped image to the full image. If the pose is changed, the edited image cannot be pasted back anymore. Benefiting from the disentanglement of pose and expression, only methods that can edit expression independently can be used for video editing. Fig. 6 illustrates the comparisons between our method and other methods. Our method achieves the better visual quality. For these methods, the edited face is blended into the full image with a simple Gaussian blur on the boundaries. More videos are provided in the supplementary.
+
+4.3One-shot Talking Face Generation
+Our pose and expression generator can be used jointly to transfer both pose and expression from a driving image to a source one. Hence, we also compare with several state-of-the-art methods that can only edit pose and expression simultaneously. The competing methods are FOMM [25], PIRenderer [24], LIA[33], and DaGAN[14]. We use their released pre-trained models.
+
+Refer to caption
+Figure 7:Comparisons with the state-of-the-art methods.
+The qualitative comparisons are shown in Fig. 7. The results of FOMM are reported in the supplementary. For same-identity reenactment, our method achieves comparable performance to DaGAN and LIA, and outperforms PIRender. PIRender cannot preserve face shape and capture the mouth movement well. For cross-identity reenactment, the performance of our method is comparable to LIA and even better in keeping the eye gaze and synthesizing sharp mouth. Both LIA and our method are much better than PIRender and DaGAN. PIRender produces twisted faces especially when the head pose difference is large between the source and driving faces, while DaGAN changes the face shape a lot and introduces apparent artifacts around the hair.
+
+The quantitative comparisons are shown in Tab. 3. For same-identity reenactment, our method achieves the best performance in CSIM, PSNR, SSIM, and APD while our other metrics are comparable to other methods. For cross-identity reenactment, our method achieves the best performance in CSIM and APD while AED is comparable to other methods.
+
+Method	Same-Identity Reenactment	Cross-Identity Reenactment
+CSIM 
+↑
+ 	LPIPS 
+↓
+PSNR 
+↑
+SSIM 
+↑
+APD 
+↓
+AED 
+↓
+CSIM 
+↑
+AED 
+↓
+APD 
+↓
+FOMM[25] 	0.8960	0.1536	31.1134	0.6251	0.1000	0.01100	0.8101	0.2570	0.02592
+PIRender[24] 	0.8829	0.1713	30.7609	0.5541	0.1110	0.01698	0.8215	0.2458	0.02677
+LIA[33] 	0.8906	0.1458	31.3371	0.6397	0.0998	0.01160	0.8094	0.2659	0.02601
+DaGAN[14] 	0.8910	0.1599	30.3022	0.5904	0.1036	0.01202	0.8032	0.2584	0.02639
+Ours	0.8965	0.1587	31.3631	0.6422	0.1000	0.01087	0.8303	0.2612	0.02565
+Table 3: Quantitative comparisons with state-of-the-art methods on one-shot talking face generation.
+4.4Ablation Studies
+Refer to caption
+Figure 8:Qualitative ablation studies. The refinement stage helps produce the more realistic images.
+Refer to caption
+Figure 9:Qualitative ablation studies. The self-reconstruction constraint helps produce the reasonable faces.
+Refinement Stage. Since pose motion captures the global head movement and expression motion captures the local subtle movement of facial components, we find that expression motion is more difficult to learn than pose motion. We fine-tune the expression generator after the joint training of all modules. We present the visual improvement of the refinement in Fig. 8.
+
+Self-reconstruction Constraint. We reveal that the self-reconstruction constraint for the generators is the core of the disentanglement in the end of Sec. 3.2. We present the intermediate and final results of the forward pass of the framework with or without using the constraint in Fig. 9. The whole framework is hard to train without the constraint and cannot generate meaningful faces.
+
+5Conclusion
+We propose a novel self-supervised disentanglement framework to decouple pose and expression without 3DMMs and paired data. With the powerful editable latent space where pose motion and expression motion can be disentangled, our method can perform pose or expression transfer in this space conveniently via addition. It enables independent control over pose and expression, and is better than 3DMM in terms of facial expression details with the help of our model. Benefiting from the disentanglement, our method can be used for general video portrait editing, i.e, one model for any unseen person. We execute the experiment of video portrait editing, the results demonstrate the advantages of our framework over recent state-of-the-art methods and the application to general video editing. We also perform the experiment of one-shot talking face generation, the results show that our method is comparable to other methods.
+
+References
+[1]Aayush Bansal, Shugao Ma, Deva Ramanan, and Yaser Sheikh.Recycle-gan: Unsupervised video retargeting.In ECCV, pages 119–135, 2018.
+[2]Volker Blanz and Thomas Vetter.A morphable model for the synthesis of 3d faces.In SIGGRAPH, page 187–194, 1999.
+[3]Egor Burkov, Igor Pasechnik, Artur Grigorev, and Victor Lempitsky.Neural head reenactment with latent pose descriptors.In CVPR, pages 13786–13795, 2020.
+[4]Lele Chen, Ross K Maddox, Zhiyao Duan, and Chenliang Xu.Hierarchical cross-modal talking face generation with dynamic pixel-wise loss.In CVPR, pages 7832–7841, 2019.
+[5]Kun Cheng, Xiaodong Cun, Yong Zhang, Menghan Xia, Fei Yin, Mingrui Zhu, Xuan Wang, Jue Wang, and Nannan Wang.Videoretalking: Audio-based lip synchronization for talking head video editing in the wild.In SIGGRAPH Asia 2022 Conference Papers, pages 1–9, 2022.
+[6]Michail Christos Doukas, Stefanos Zafeiriou, and Viktoriia Sharmanska.Headgan: One-shot neural head synthesis and editing.In ICCV, pages 14398–14407, 2021.
+[7]Nikita Drobyshev, Jenya Chelishev, Taras Khakhulin, Aleksei Ivakhnenko, Victor Lempitsky, and Egor Zakharov.Megaportraits: One-shot megapixel neural head avatars.2022.
+[8]Yao Feng, Haiwen Feng, Michael J. Black, and Timo Bolkart.Learning an animatable detailed 3D face model from in-the-wild images.ACM TOG, 40(8), 2021.
+[9]Panagiotis P. Filntisis, George Retsinas, Foivos Paraperas-Papantoniou, Athanasios Katsamanis, Anastasios Roussos, and Petros Maragos.Visual speech-aware perceptual 3d facial expression reconstruction from videos, 2022.
+[10]Ohad Fried, Ayush Tewari, Michael Zollhöfer, Adam Finkelstein, Eli Shechtman, Dan B Goldman, Kyle Genova, Zeyu Jin, Christian Theobalt, and Maneesh Agrawala.Text-based editing of talking-head video.ACM TOG, 38(4):1–14, 2019.
+[11]Jiahao Geng, Tianjia Shao, Youyi Zheng, Yanlin Weng, and Kun Zhou.Warp-guided gans for single-photo facial animation.ACM TOG, 37(6):1–12, 2018.
+[12]Kuangxiao Gu, Yuqian Zhou, and Thomas Huang.Flnet: Landmark driven fetching and learning network for faithful talking facial animation synthesis.In AAAI, volume 34, pages 10861–10868, 2020.
+[13]Sungjoo Ha, Martin Kersner, Beomsu Kim, Seokjun Seo, and Dongyoung Kim.Marionette: Few-shot face reenactment preserving identity of unseen targets.In AAAI, volume 34, pages 10893–10900, 2020.
+[14]Fa-Ting Hong, Longhao Zhang, Li Shen, and Dan Xu.Depth-aware generative adversarial network for talking head video generation.2022.
+[15]Justin Johnson, Alexandre Alahi, and Li Fei-Fei.Perceptual losses for real-time style transfer and super-resolution.In ECCV, pages 694–711. Springer, 2016.
+[16]Tero Karras, Samuli Laine, Miika Aittala, Janne Hellsten, Jaakko Lehtinen, and Timo Aila.Analyzing and improving the image quality of StyleGAN.In CVPR, 2020.
+[17]Hyeongwoo Kim, Mohamed Elgharib, Michael Zollhöfer, Hans-Peter Seidel, Thabo Beeler, Christian Richardt, and Christian Theobalt.Neural style-preserving visual dubbing.ACM TOG, 38(6):1–13, 2019.
+[18]Hyeongwoo Kim, Pablo Garrido, Ayush Tewari, Weipeng Xu, Justus Thies, Matthias Niessner, Patrick Pérez, Christian Richardt, Michael Zollhöfer, and Christian Theobalt.Deep video portraits.ACM TOG, 37(4):1–14, 2018.
+[19]Diederik P Kingma and Jimmy Ba.Adam: A method for stochastic optimization.In ICLR, 2015.
+[20]Luming Ma and Zhigang Deng.Real-time facial expression transformation for monocular rgb video.In Comput. Graph. Forum, volume 38, pages 470–481. Wiley Online Library, 2019.
+[21]Arsha Nagrani, Joon Son Chung, and Andrew Zisserman.Voxceleb: a large-scale speaker identification dataset.arXiv preprint arXiv:1706.08612, 2017.
+[22]K R Prajwal, Rudrabha Mukhopadhyay, Vinay P. Namboodiri, and C.V. Jawahar.A lip sync expert is all you need for speech to lip generation in the wild.In ACM MM, MM ’20, page 484–492, New York, NY, USA, 2020. Association for Computing Machinery.
+[23]Albert Pumarola, Antonio Agudo, Aleix M Martinez, Alberto Sanfeliu, and Francesc Moreno-Noguer.Ganimation: Anatomically-aware facial animation from a single image.In ECCV, pages 818–833, 2018.
+[24]Yurui Ren, Ge Li, Yuanqi Chen, Thomas H Li, and Shan Liu.Pirenderer: Controllable portrait image generation via semantic neural rendering.In ICCV, pages 13759–13768, 2021.
+[25]Aliaksandr Siarohin, Stéphane Lathuilière, Sergey Tulyakov, Elisa Ricci, and Nicu Sebe.First order motion model for image animation.In NeurIPS, December 2019.
+[26]Yang Song, Jingwen Zhu, Dawei Li, Xiaolong Wang, and Hairong Qi.Talking face generation by conditional recurrent adversarial network.arXiv preprint arXiv:1804.04786, 2018.
+[27]Zhiyao Sun, Yu-Hui Wen, Tian Lv, Yanan Sun, Ziyang Zhang, Yaoyuan Wang, and Yong-Jin Liu.Continuously controllable facial expression editing in talking face videos.arXiv preprint arXiv:2209.08289, 2022.
+[28]Justus Thies, Michael Zollhöfer, Matthias Nießner, Levi Valgaerts, Marc Stamminger, and Christian Theobalt.Real-time expression transfer for facial reenactment.ACM TOG, 34(6):183–1, 2015.
+[29]Justus Thies, Michael Zollhofer, Marc Stamminger, Christian Theobalt, and Matthias Nießner.Face2face: Real-time face capture and reenactment of rgb videos.In CVPR, pages 2387–2395, 2016.
+[30]Ting-Chun Wang, Ming-Yu Liu, Andrew Tao, Guilin Liu, Jan Kautz, and Bryan Catanzaro.Few-shot video-to-video synthesis.arXiv preprint arXiv:1910.12713, 2019.
+[31]Ting-Chun Wang, Ming-Yu Liu, Jun-Yan Zhu, Guilin Liu, Andrew Tao, Jan Kautz, and Bryan Catanzaro.Video-to-video synthesis.arXiv preprint arXiv:1808.06601, 2018.
+[32]Ting-Chun Wang, Arun Mallya, and Ming-Yu Liu.One-shot free-view neural talking-head synthesis for video conferencing.In CVPR, pages 10039–10049, 2021.
+[33]Yaohui Wang, Di Yang, Francois Bremond, and Antitza Dantcheva.Latent image animator: Learning to animate images via latent space navigation.In ICLR, 2022.
+[34]Wayne Wu, Yunxuan Zhang, Cheng Li, Chen Qian, and Chen Change Loy.Reenactgan: Learning to reenact faces via boundary transfer.In ECCV, pages 603–619, 2018.
+[35]Guangming Yao, Yi Yuan, Tianjia Shao, Shuang Li, Shanqi Liu, Yong Liu, Mengmeng Wang, and Kun Zhou.One-shot face reenactment using appearance adaptive normalization.arXiv preprint arXiv:2102.03984, 2021.
+[36]Guangming Yao, Yi Yuan, Tianjia Shao, and Kun Zhou.Mesh guided one-shot face reenactment using graph convolutional networks.In ACM MM, pages 1773–1781, 2020.
+[37]Fei Yin, Yong Zhang, Xiaodong Cun, Mingdeng Cao, Yanbo Fan, Xuan Wang, Qingyan Bai, Baoyuan Wu, Jue Wang, and Yujiu Yang.Styleheat: One-shot high-resolution editable talking face generation via pre-trained stylegan.arxiv:2203.04036, 2022.
+[38]Egor Zakharov, Aleksei Ivakhnenko, Aliaksandra Shysheya, and Victor Lempitsky.Fast bi-layer neural synthesis of one-shot realistic head avatars.In ECCV, pages 524–540. Springer, 2020.
+[39]Egor Zakharov, Aliaksandra Shysheya, Egor Burkov, and Victor Lempitsky.Few-shot adversarial learning of realistic neural talking head models.In ICCV, pages 9459–9468, 2019.
+[40]Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang.The unreasonable effectiveness of deep features as a perceptual metric.In CVPR, pages 586–595, 2018.
+[41]Zhimeng Zhang, Lincheng Li, Yu Ding, and Changjie Fan.Flow-guided one-shot talking face generation with a high-resolution audio-visual dataset.In CVPR, pages 3661–3670, 2021.
+[42]Jian Zhao and Hui Zhang.Thin-plate spline motion model for image animation.In CVPR, pages 3657–3666, 2022.
+◄ ar5iv homepage Feeling
+lucky? Conversion
+report Report
+an issue View original
+on arXiv►
+Copyright Privacy Policy Generated on Mon Feb 26 22:12:25 2024 by LaTeXMLMascot Sammy
