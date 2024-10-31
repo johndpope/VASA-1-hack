@@ -277,54 +277,15 @@ class VASADiffusion:
 
 
 
-class VASAFaceEncoder(nn.Module):
-    """
-    Enhanced face encoder aligned with VASA paper's disentangled representation.
-    Building on MegaPortraits architecture with improved disentanglement.
-    """
-    def __init__(self, feature_size=64):
-        super().__init__()
-        # Base encoders from MegaPortraits
-        self.appearanceEncoder = Eapp()
-        self.identityEncoder = CustomResNet50()
-        
-        # Enhanced head pose estimator with better disentanglement
-        self.headPoseEncoder = nn.Sequential(
-            *list(resnet18(pretrained=True).children())[:-1],
-            nn.Linear(512, 6)  # 3 for rotation, 3 for translation
-        )
-        
-        # Enhanced facial dynamics encoder with holistic representation
-        self.facialDynamicsEncoder = nn.Sequential(
-            *list(resnet18(pretrained=False).children())[:-2],
-            nn.AdaptiveAvgPool2d(feature_size),
-            nn.Conv2d(512, 256, 1),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(256 * feature_size * feature_size, COMPRESS_DIM)
-        )
+    
+import logging
+from model import Emtn,Gbase
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:
-        """
-        Args:
-            x: Input face image [batch_size, 3, H, W]
-        Returns:
-            Tuple of (appearance_volume, identity_code, head_pose, facial_dynamics)
-        """
-        # Extract 3D appearance volume (V_app)
-        appearance_volume = self.appearanceEncoder(x)[0]
-        
-        # Extract identity code (z_id)
-        identity_code = self.identityEncoder(x)
-        
-        # Extract head pose (z_pos)
-        head_pose = self.headPoseEncoder(x)
-        rotation, translation = head_pose.split([3, 3], dim=1)
-        
-        # Extract holistic facial dynamics (z_exp)
-        facial_dynamics = self.facialDynamicsEncoder(x)
-        
-        return appearance_volume, identity_code, (rotation, translation), facial_dynamics
+class VASAFaceEncoder(Gbase):    
+    def __init__(self):
+        super(VASAFaceEncoder, self).__init__()
+
+
 
 class VASAFaceDecoder(nn.Module):
     """

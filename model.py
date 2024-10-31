@@ -7,20 +7,21 @@ import math
 import colored_traceback.auto
 from torchsummary import summary
 from resnet50 import ResNet50
-
+from memory_profiler import profile
 import logging
-
-import numpy as np
-
-
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from resnet import ResNet,Bottleneck, resnet18
+import torchvision.models as models
 import math
 import colored_traceback.auto
 from torchsummary import summary
 from resnet50 import ResNet50
-
-
+from memory_profiler import profile
+import logging
 import cv2
-
+import torchvision.models as models
 from facenet_pytorch import InceptionResnetV1
 import torchvision.transforms as transforms
 from torchvision.transforms.functional import to_pil_image, to_tensor
@@ -28,6 +29,7 @@ from PIL import Image
 from skimage.transform import PiecewiseAffineTransform, warp
 import face_recognition
 from lpips import LPIPS
+
 
 from mysixdrepnet import SixDRepNet_Detector
 # Set this flag to True for DEBUG mode, False for INFO mode
@@ -170,6 +172,8 @@ class CustomResNet50(nn.Module):
         
         return x
 
+
+
 '''
 Eapp Class:
 
@@ -198,7 +202,6 @@ The Eapp network returns both vs and es as output.
 
 In summary, the Eapp class in the code aligns well with the appearance encoder (Eapp) shown in the diagram. The network architecture follows the same structure, with the corresponding layers and blocks mapped accurately. The conv, resblock_128, resblock_256, resblock_512, conv_1, resblock3D_96, and resblock3D_96_2 layers in the code correspond to the respective blocks in the diagram for producing volumetric features. The resnet50 layer in the code corresponds to the ResNet50 block in the diagram for producing the global descriptor.
 '''
-
 
 class Eapp(nn.Module):
     def __init__(self):
@@ -292,8 +295,7 @@ class Eapp(nn.Module):
         ### TODO 2
         # print(f"🍌 es:{es_resnet.shape}") # [1, 512, 2, 2]
         es_flatten = torch.flatten(es_resnet, start_dim=1)
-        es = self.fc(es_flatten) # torch.Size([bs, 2048]) -> torch.Size([bs, COMPRESS_DIM])        
-       
+        es = self.fc(es_flatten) # torch.Size([bs, 2048]) -> torch.Size([bs, 2])        
         return vs, es
 
 
@@ -636,6 +638,57 @@ class ResBlock2D(nn.Module):
         out = nn.ReLU(inplace=True)(out)
         
         return out
+    
+'''
+This class, AntiAliasInterpolation2d, is a PyTorch module designed for band-limited downsampling of images, which helps preserve the input signal quality by applying a Gaussian filter before resizing. Here's an intuition breakdown of the code:
+This approach ensures that the downsampled image retains more of the original signal's details by reducing high-frequency components that could cause aliasing.
+'''
+class AntiAliasInterpolation2d(nn.Module):
+    """
+    Band-limited downsampling, for better preservation of the input signal.
+    """
+    def __init__(self, channels, scale):
+        super(AntiAliasInterpolation2d, self).__init__()
+        sigma = (1 / scale - 1) / 2
+        kernel_size = 2 * round(sigma * 4) + 1
+        self.ka = kernel_size // 2
+        self.kb = self.ka - 1 if kernel_size % 2 == 0 else self.ka
+
+
+        kernel_size = [kernel_size, kernel_size]
+        sigma = [sigma, sigma]
+        # The gaussian kernel is the product of the
+        # gaussian function of each dimension.
+        kernel = 1
+        meshgrids = torch.meshgrid(
+            [
+                torch.arange(size, dtype=torch.float32)
+                for size in kernel_size
+                ]
+        )
+        for size, std, mgrid in zip(kernel_size, sigma, meshgrids):
+            mean = (size - 1) / 2
+            kernel *= torch.exp(-(mgrid - mean) ** 2 / (2 * std ** 2))
+
+        # Make sure sum of values in gaussian kernel equals 1.
+        kernel = kernel / torch.sum(kernel)
+        # Reshape to depthwise convolutional weight
+        kernel = kernel.view(1, 1, *kernel.size())
+        kernel = kernel.repeat(channels, *[1] * (kernel.dim() - 1))
+
+        self.register_buffer('weight', kernel)
+        self.groups = channels
+        self.scale = scale
+
+    def forward(self, input):
+        if self.scale == 1.0:
+            return input
+
+        out = F.pad(input, (self.ka, self.kb, self.ka, self.kb))
+        out = F.conv2d(out, weight=self.weight, groups=self.groups)
+        out = F.interpolate(out, scale_factor=(self.scale, self.scale))
+
+        return out
 '''
 The G2d class consists of the following components:
 
@@ -708,6 +761,7 @@ class G2d(nn.Module):
         x = self.upsample3(x)
         x = self.final_conv(x)
         return x
+
 
 
 '''
@@ -1013,6 +1067,27 @@ def apply_warping_field(v, warp_field):
 
 
 
+class ImagePyramide(torch.nn.Module):
+    """
+    Create image pyramide for computing pyramide perceptual loss. See Sec 3.3 - oneshotview
+    """
+    def __init__(self, scales, num_channels):
+        super(ImagePyramide, self).__init__()
+        downs = {}
+        for scale in scales:
+            downs[str(scale).replace('.', '-')] = AntiAliasInterpolation2d(num_channels, scale)
+        self.downs = nn.ModuleDict(downs)
+
+    def forward(self, x):
+        out_dict = {}
+        for scale, down_module in self.downs.items():
+            out_dict['prediction_' + str(scale).replace('-', '.')] = down_module(x)
+        return out_dict
+
+
+
+
+
 '''
 The main changes made to align the code with the training stages are:
 
@@ -1059,6 +1134,8 @@ class Gbase(nn.Module):
         self.G3d = G3d(in_channels=96)
         self.G2d = G2d(in_channels=96)
 
+        self.image_pyramid = ImagePyramide(scales=[0.5, 0.25], num_channels=3)
+
 #    @profile
     def forward(self, xs, xd):
         vs, es = self.appearanceEncoder(xs)
@@ -1094,10 +1171,13 @@ class Gbase(nn.Module):
         vc2d_projected = torch.sum(vc2d_warped, dim=2)
 
         # Pass projected features through G2d to obtain the final output image (xhat)
-        xhat = self.G2d(vc2d_projected)
+        xhat_base = self.G2d(vc2d_projected)
 
         #self.visualize_warp_fields(xs, xd, w_s2c, w_c2d, Rs, ts, Rd, td)
-        return xhat
+       
+        pyramids = self.image_pyramid(xhat_base)
+
+        return xhat_base, pyramids
 
     def visualize_warp_fields(self, xs, xd, w_s2c, w_c2d, Rs, ts, Rd, td):
         """
@@ -1943,6 +2023,7 @@ class PerceptualLoss(nn.Module):
 
 
 
+
 '''
 As for driving image, before sending it to Emtn we do a center crop around the face of
 a person. Next, we augment it using a random warping based on
@@ -2101,32 +2182,81 @@ def get_foreground_mask(image):
 
     return foreground_mask.to(device)
 
-class SubSampledHingeEmbeddingLoss(nn.Module):
-    def __init__(self, sub_sample_size=(128, 128), reduction='mean'):
-        super(SubSampledHingeEmbeddingLoss, self).__init__()
-        self.sub_sample_size = sub_sample_size
-        self.hinge_loss = nn.HingeEmbeddingLoss(reduction=reduction)
 
-    def forward(self, input, target):
-        # Sub-sample the input and target tensors
-        input = self.sub_sample_tensor(input, self.sub_sample_size)
-        target = self.sub_sample_tensor(target, self.sub_sample_size)
+class PairwiseTransferLoss(nn.Module):
+    def __init__(self):
+        super(PairwiseTransferLoss, self).__init__()
 
-        # Compute the hinge embedding loss
-        loss = self.hinge_loss(input, target)
+    def forward(self, Gbase, I1, I2):
+        # Extract appearance features and motion parameters
+        vs1, es1 = Gbase.appearanceEncoder(I1)
+        vs2, es2 = Gbase.appearanceEncoder(I2)
+        
+        Rs1, ts1, zs1 = Gbase.motionEncoder(I1)
+        Rs2, ts2, zs2 = Gbase.motionEncoder(I2)
 
+        # Transfer pose (keep appearance and expression from I1, take pose from I2)
+        w_s2c_pose = Gbase.warp_generator_s2c(Rs2, ts2, zs1, es1)
+        vc_pose = apply_warping_field(vs1, w_s2c_pose)
+        vc2d_pose = Gbase.G3d(vc_pose)
+        w_c2d_pose = Gbase.warp_generator_c2d(Rs2, ts2, zs1, es1)
+        vc2d_warped_pose = apply_warping_field(vc2d_pose, w_c2d_pose)
+        vc2d_projected_pose = torch.sum(vc2d_warped_pose, dim=2)
+        I_pose = Gbase.G2d(vc2d_projected_pose)
+
+        # Transfer expression (keep appearance and pose from I1, take expression from I2)
+        w_s2c_exp = Gbase.warp_generator_s2c(Rs1, ts1, zs2, es1)
+        vc_exp = apply_warping_field(vs1, w_s2c_exp)
+        vc2d_exp = Gbase.G3d(vc_exp)
+        w_c2d_exp = Gbase.warp_generator_c2d(Rs1, ts1, zs2, es1)
+        vc2d_warped_exp = apply_warping_field(vc2d_exp, w_c2d_exp)
+        vc2d_projected_exp = torch.sum(vc2d_warped_exp, dim=2)
+        I_exp = Gbase.G2d(vc2d_projected_exp)
+
+        # Compute discrepancy loss
+        loss = F.l1_loss(I_pose, I_exp)
+        
         return loss
+    
+class IdentitySimilarityLoss(nn.Module):
+    def __init__(self):
+        super(IdentitySimilarityLoss, self).__init__()
+        self.face_recognition_model = InceptionResnetV1(pretrained='vggface2').eval()
 
-    def sub_sample_tensor(self, tensor, sub_sample_size):
-        print("tensor:",tensor.shape)
-        assert tensor.ndim == 4, "Input tensor should have 4 dimensions (batch_size, channels, height, width)"
-        assert tensor.shape[-2] >= sub_sample_size[0] and tensor.shape[-1] >= sub_sample_size[1], "Sub-sample size should not exceed the tensor dimensions"
+    def forward(self, Gbase, I3, I4):
+        # Generate output with both pose and expression transferred
+        full_transfer_output = Gbase(I3, I4)
+        
+        # Assume the first element of the tuple is the main output
+        full_transfer = full_transfer_output[0] if isinstance(full_transfer_output, tuple) else full_transfer_output
 
-        batch_size, channels, height, width = tensor.shape
+        # Ensure inputs are in the correct format (B, C, H, W)
+        def prepare_input(x):
+            if not isinstance(x, torch.Tensor):
+                raise ValueError(f"Expected a tensor, got {type(x)}")
+            if x.dim() == 3:
+                x = x.unsqueeze(0)  # Add batch dimension if missing
+            if x.shape[1] != 3:
+                x = x.permute(0, 3, 1, 2)  # Change from (B, H, W, C) to (B, C, H, W)
+            return x.float()  # Ensure float type
 
-        random_offset_x = np.random.randint(0, height - sub_sample_size[0])
-        random_offset_y = np.random.randint(0, width - sub_sample_size[1])
+        I3 = prepare_input(I3)
+        full_transfer = prepare_input(full_transfer)
 
-        sub_sampled_tensor = tensor[..., random_offset_x:random_offset_x+sub_sample_size[0], random_offset_y:random_offset_y+sub_sample_size[1]]
+        # Extract identity features
+        with torch.no_grad():
+            try:
+                id_features_source = self.face_recognition_model(I3)
+                id_features_transfer = self.face_recognition_model(full_transfer)
+            except RuntimeError as e:
+                print(f"Error in face recognition model: {e}")
+                print(f"I3 shape: {I3.shape}, full_transfer shape: {full_transfer.shape}")
+                raise
 
-        return sub_sampled_tensor
+        # Compute cosine similarity
+        similarity = F.cosine_similarity(id_features_source, id_features_transfer)
+        
+        # We want to maximize similarity, so we minimize negative similarity
+        loss = -similarity.mean()
+        
+        return loss

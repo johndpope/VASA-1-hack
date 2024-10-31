@@ -18,7 +18,7 @@ class TrainingConfig:
 @dataclass
 class ModelConfig:
     """Model architecture configuration"""
-    d_model: int = 512
+    d_model: int = 64
     nhead: int = 8
     num_layers: int = 8
     motion_dim: int = 256

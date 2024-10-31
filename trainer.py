@@ -132,10 +132,8 @@ class VASATrainer:
         self.logger.info("Starting Stage 1: Face Latent Space Learning")
         self.current_stage = 'latent_space'
         
-        # Initialize models for stage 1
-        face_encoder = VASAFaceEncoder(
-            feature_dim=self.config.d_model
-        ).to(self.device)
+        # Initialize models for stage 1 # gbase from megaportraits - https://github.com/johndpope/MegaPortrait-hack
+        face_encoder = VASAFaceEncoder().to(self.device)
         
         # Initialize loss components
         identity_loss = IdentityLoss().to(self.device)
@@ -213,7 +211,7 @@ class VASATrainer:
         
         # Initialize diffusion model
         diffusion_model = VASADiffusionTransformer(
-            d_model=self.config.d_model,
+            d_model=self.config.model.d_model,
             nhead=self.config.nhead,
             num_layers=self.config.num_layers
         ).to(self.device)
@@ -338,11 +336,11 @@ class VASATrainer:
         
         if stage == 'latent_space':
             model = VASAFaceEncoder(
-                feature_dim=self.config.d_model
+                feature_dim=self.config.model.d_model
             ).to(self.device)
         elif stage == 'dynamics':
             model = VASADiffusionTransformer(
-                d_model=self.config.d_model,
+                d_model=self.config.model.d_model,
                 nhead=self.config.nhead,
                 num_layers=self.config.num_layers
             ).to(self.device)
@@ -403,11 +401,11 @@ class VASATrainer:
         """Initialize all model components"""
         # Create models
         self.face_encoder = VASAFaceEncoder(
-            feature_dim=self.config.d_model
+            feature_size=self.config.model.d_model
         ).to(self.device)
         
         self.diffusion_model = VASADiffusionTransformer(
-            d_model=self.config.d_model,
+            d_model=self.config.model.d_model,
             nhead=self.config.nhead,
             num_layers=self.config.num_layers,
             seq_length=self.config.sequence_length,
@@ -1055,89 +1053,6 @@ class VASATrainer:
 
 
 
-import argparse
-import os
-import torch
-import yaml
-import datetime
-from pathlib import Path
-from typing import Optional, Dict, Any
-
-def parse_args():
-    parser = argparse.ArgumentParser(description='Train VASA model')
-    
-    # Basic training arguments
-    parser.add_argument('--config', type=str, required=True,
-                       help='Path to config file')
-    parser.add_argument('--exp-name', type=str, required=True,
-                       help='Experiment name')
-    parser.add_argument('--log-dir', type=str, default='logs',
-                       help='Directory for logs')
-    
-    # Training settings
-    parser.add_argument('--distributed', action='store_true',
-                       help='Enable distributed training')
-    parser.add_argument('--resume', type=str,
-                       help='Path to checkpoint to resume from')
-    parser.add_argument('--eval-only', action='store_true',
-                       help='Run evaluation only')
-    
-    # Data settings
-    parser.add_argument('--data-dir', type=str,
-                       help='Override data directory from config')
-    parser.add_argument('--batch-size', type=int,
-                       help='Override batch size from config')
-    
-    # Model settings
-    parser.add_argument('--num-steps', type=int,
-                       help='Override number of diffusion steps')
-    parser.add_argument('--cfg-scale', type=float,
-                       help='Override classifier-free guidance scale')
-    
-    return parser.parse_args()
-
-def setup_experiment(args) -> Dict[str, Any]:
-    """Setup experiment directories and configurations"""
-    # Create timestamp for experiment
-    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    exp_name = f"{args.exp_name}_{timestamp}"
-    
-    # Setup directories
-    exp_dir = Path(args.log_dir) / exp_name
-    exp_dir.mkdir(parents=True, exist_ok=True)
-    
-    checkpoints_dir = exp_dir / 'checkpoints'
-    checkpoints_dir.mkdir(exist_ok=True)
-    
-    samples_dir = exp_dir / 'samples'
-    samples_dir.mkdir(exist_ok=True)
-    
-    # Load and update config
-    with open(args.config) as f:
-        config = yaml.safe_load(f)
-    
-    # Override config with command line arguments
-    if args.data_dir:
-        config['data']['data_dir'] = args.data_dir
-    if args.batch_size:
-        config['training']['batch_size'] = args.batch_size
-    if args.num_steps:
-        config['diffusion']['num_steps'] = args.num_steps
-    if args.cfg_scale:
-        config['cfg']['audio_scale'] = args.cfg_scale
-        
-    # Save updated config
-    config_path = exp_dir / 'config.yaml'
-    with open(config_path, 'w') as f:
-        yaml.dump(config, f)
-    
-    return {
-        'exp_dir': exp_dir,
-        'checkpoints_dir': checkpoints_dir,
-        'samples_dir': samples_dir,
-        'config': config
-    }
-
 
 '''
 Stage 1: Latent Space Learning
@@ -1154,15 +1069,7 @@ Stage 2: Dynamics Generation
 
 def main():
     # Parse arguments
-    parser = argparse.ArgumentParser(description='Train VASA model')
-
-    parser.add_argument('--experiment_name', type=str,
-                       help='Override experiment name')
-    parser.add_argument('--output_dir', type=str, default='outputs',
-                       help='Output directory')
-    # Add other CLI arguments as needed
-    args = parser.parse_args()
-    
+   
     try:
 
         # Load config
