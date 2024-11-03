@@ -10,35 +10,90 @@ from VASA import VASAFaceEncoder, VASADiffusionTransformer
 # from trainers import VASAStage2Trainer
 import torch
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 from einops import rearrange
+
+import torch
+from torch.utils.data import DataLoader
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from accelerate import Accelerator
+from omegaconf import OmegaConf
+import wandb
+from pathlib import Path
+from collections import defaultdict
+from tqdm import tqdm
+import torch.nn.functional as F
+from typing import Dict, Any, Optional
+from accelerate.logging import get_logger
+
+
+logger = get_logger(__name__)
+
 
 class VASAStage2Trainer:
     """
-    Implements Stage 2 of VASA training - the Diffusion Transformer for motion generation
+    Complete implementation of Stage 2 VASA training - Diffusion Transformer for motion generation
+    with distributed training, logging, and checkpoint management
     """
     def __init__(
         self, 
         face_encoder,
         diffusion_model,
         config,
-        device='cuda'
     ):
+        self.config = config
         self.face_encoder = face_encoder
         self.diffusion_model = diffusion_model
-        self.config = config
-        self.device = device
+        
+        # Initialize accelerator
+        self.accelerator = Accelerator(
+            gradient_accumulation_steps=config.training.gradient_accumulation_steps,
+            log_with="wandb",
+            mixed_precision="fp16",
+        )
 
-        # Freeze the face encoder weights
+        # Initialize trackers
+        self.accelerator.init_trackers(
+            project_name=config.project_name,
+            config=OmegaConf.to_container(config, resolve=True),
+            init_kwargs={"wandb": {
+                "name": config.experiment_name,
+                "dir": config.training.log_dir
+            }}
+        )
+
+        # Freeze face encoder
         for param in self.face_encoder.parameters():
             param.requires_grad = False
+            
+        # Setup optimizer and scheduler
+        self.optimizer = AdamW(
+            self.diffusion_model.parameters(),
+            lr=config.training.lr,
+            betas=(config.training.beta1, config.training.beta2),
+            weight_decay=config.training.weight_decay
+        )
+        
+        self.scheduler = CosineAnnealingLR(
+            self.optimizer,
+            T_max=config.training.num_epochs,
+            eta_min=config.training.min_lr
+        )
 
-    def train_step(self, batch):
-        """Single training step for the diffusion model"""
-        # Unpack batch
-        images = batch['frames'].to(self.device)
-        audio_features = batch['audio_features'].to(self.device)
-        gaze = batch['gaze'].to(self.device)
-        emotion = batch['emotion'].to(self.device)
+        # Training state
+        self.current_epoch = 0
+        self.global_step = 0
+        self.best_metric = float('inf')
+        self.metric_history = []
+        
+    def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
+        """Single training step"""
+        # Extract data
+        images = batch['frames']
+        audio_features = batch['audio_features']
+        gaze = batch['gaze']
+        emotion = batch['emotion']
 
         # Extract facial representations using frozen encoder
         with torch.no_grad():
@@ -48,14 +103,15 @@ class VASAStage2Trainer:
                 emotion=emotion[:, 0]
             )
 
-        # Get facial dynamics sequence for training
+        # Get facial dynamics sequence
         facial_dynamics = facial_reps['facial_dynamics']
         
         # Sample timestep
         batch_size = facial_dynamics.shape[0]
-        t = torch.randint(0, self.config.num_steps, (batch_size,), device=self.device)
+        t = torch.randint(0, self.config.num_steps, (batch_size,), 
+                         device=self.accelerator.device)
 
-        # Add noise to dynamics
+        # Add noise
         noise = torch.randn_like(facial_dynamics)
         noisy_dynamics = self.diffusion_model.add_noise(facial_dynamics, t, noise)
 
@@ -66,57 +122,207 @@ class VASAStage2Trainer:
             'emotion': emotion
         }
 
-        # Forward pass with classifier-free guidance
-        model_output = self.diffusion_model(
-            noisy_dynamics,
-            t,
-            conditions=conditions,
-            use_cfg=self.training
-        )
+        # Forward pass with CFG
+        with self.accelerator.autocast():
+            model_output = self.diffusion_model(
+                noisy_dynamics,
+                t,
+                conditions=conditions,
+                use_cfg=self.training
+            )
 
-        # Compute loss
-        loss = F.mse_loss(model_output['predicted_noise'], noise)
+            # Compute losses
+            losses = {}
+            
+            # Base diffusion loss
+            losses['diffusion'] = F.mse_loss(
+                model_output['predicted_noise'], 
+                noise
+            )
 
-        # Add CFG losses if training
-        if self.training and self.config.cfg_scales is not None:
-            for cond_type, scale in self.config.cfg_scales.items():
-                if scale > 0 and f'masked_{cond_type}' in model_output:
-                    cfg_loss = F.mse_loss(
-                        model_output[f'masked_{cond_type}'],
-                        model_output['uncond']
-                    )
-                    loss = loss + self.config.lambda_cfg * cfg_loss
+            # CFG losses
+            if self.training and self.config.cfg_scales is not None:
+                for cond_type, scale in self.config.cfg_scales.items():
+                    if scale > 0 and f'masked_{cond_type}' in model_output:
+                        losses[f'cfg_{cond_type}'] = F.mse_loss(
+                            model_output[f'masked_{cond_type}'],
+                            model_output['uncond']
+                        )
 
-        return loss
+            # Total loss
+            total_loss = losses['diffusion'] + sum(
+                self.config.lambda_cfg * losses[f'cfg_{k}']
+                for k in ['audio', 'gaze']
+                if f'cfg_{k}' in losses
+            )
 
-    def train_epoch(self, train_loader, optimizer):
+        # Backward pass
+        self.accelerator.backward(total_loss)
+        
+        if self.accelerator.sync_gradients:
+            self.accelerator.clip_grad_norm_(
+                self.diffusion_model.parameters(),
+                self.config.max_grad_norm
+            )
+
+        return {
+            'total_loss': total_loss.item(),
+            **{k: v.item() for k, v in losses.items()}
+        }
+
+    def train_epoch(self, train_loader: DataLoader, epoch: int) -> Dict[str, float]:
         """Train for one epoch"""
         self.diffusion_model.train()
-        total_loss = 0
+        metrics = defaultdict(float)
         
-        for batch in train_loader:
-            optimizer.zero_grad()
-            loss = self.train_step(batch)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
+        progress_bar = tqdm(
+            total=len(train_loader),
+            desc=f"Epoch {epoch+1}",
+            disable=not self.accelerator.is_local_main_process
+        )
+
+        for batch_idx, batch in enumerate(train_loader):
+            with self.accelerator.accumulate(self.diffusion_model):
+                step_metrics = self.train_step(batch)
+                
+                # Update metrics
+                for k, v in step_metrics.items():
+                    metrics[k] += v
+                
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+
+            # Log samples periodically
+            if batch_idx % self.config.sample_interval == 0:
+                self.log_samples(batch, self.global_step)
+                
+            progress_bar.update(1)
+            self.global_step += 1
+
+        # Average metrics
+        metrics = {k: v / len(train_loader) for k, v in metrics.items()}
+        
+        progress_bar.close()
+        return metrics
+
+    @torch.no_grad()
+    def validate(self, val_loader: DataLoader) -> Dict[str, float]:
+        """Run validation"""
+        self.diffusion_model.eval()
+        metrics = defaultdict(float)
+        
+        for batch in tqdm(val_loader, desc="Validation"):
+            step_metrics = self.train_step(batch)
+            for k, v in step_metrics.items():
+                metrics[k] += v
+                
+        metrics = {k: v / len(val_loader) for k, v in metrics.items()}
+        return metrics
+
+    def train(self, train_loader: DataLoader, val_loader: DataLoader):
+        """Complete training loop"""
+        # Prepare for training
+        (
+            self.face_encoder,
+            self.diffusion_model,
+            self.optimizer,
+            self.scheduler,
+            train_loader,
+            val_loader
+        ) = self.accelerator.prepare(
+            self.face_encoder,
+            self.diffusion_model,
+            self.optimizer,
+            self.scheduler,
+            train_loader,
+            val_loader
+        )
+
+        try:
+            for epoch in range(self.current_epoch, self.config.training.num_epochs):
+                # Training
+                train_metrics = self.train_epoch(train_loader, epoch)
+                
+                # Validation
+                val_metrics = self.validate(val_loader)
+                
+                # Update scheduler
+                self.scheduler.step()
+                
+                # Log metrics
+                metrics = {
+                    "train/" + k: v for k, v in train_metrics.items()
+                }
+                metrics.update({
+                    "val/" + k: v for k, v in val_metrics.items()
+                })
+                metrics["learning_rate"] = self.scheduler.get_last_lr()[0]
+                
+                self.accelerator.log(metrics, step=self.global_step)
+                
+                # Save checkpoint
+                if (epoch + 1) % self.config.save_interval == 0:
+                    self.save_checkpoint(
+                        epoch=epoch,
+                        metrics=metrics,
+                        is_best=val_metrics['total_loss'] < self.best_metric
+                    )
+                    
+                # Update best metric
+                if val_metrics['total_loss'] < self.best_metric:
+                    self.best_metric = val_metrics['total_loss']
+                
+                # Early stopping
+                if not self.check_improvement(val_metrics['total_loss']):
+                    print("Early stopping triggered!")
+                    break
+                    
+                self.current_epoch = epoch + 1
+                
+        except Exception as e:
+            print(f"Training error: {str(e)}")
+            raise
             
-        return total_loss / len(train_loader)
+        finally:
+            self.cleanup()
+
+    def log_samples(self, batch: Dict[str, torch.Tensor], step: int):
+        """Log sample generations"""
+        if self.accelerator.is_local_main_process:
+            with torch.no_grad():
+                # Generate motion sequence
+                generated_motion = self.generate_motion(
+                    batch['audio_features'][:1],
+                    {
+                        'gaze': batch['gaze'][:1],
+                        'emotion': batch['emotion'][:1]
+                    }
+                )
+                
+                # Log samples
+                self.accelerator.log({
+                    "samples/motion": wandb.Histogram(
+                        generated_motion.cpu().numpy()
+                    ),
+                    "samples/audio": wandb.Histogram(
+                        batch['audio_features'][:1].cpu().numpy()
+                    )
+                }, step=step)
 
     @torch.no_grad()
     def generate_motion(self, audio_features, conditions, cfg_scales=None):
-        """Generate motion sequence using trained diffusion model"""
+        """Generate motion sequence"""
         self.diffusion_model.eval()
         
         # Initialize from noise
         motion = torch.randn(
             (1, self.config.sequence_length, self.config.motion_dim),
-            device=self.device
+            device=self.accelerator.device
         )
         
         # Iterative denoising
         for t in reversed(range(self.config.num_steps)):
-            timesteps = torch.full((1,), t, device=self.device)
+            timesteps = torch.full((1,), t, device=self.accelerator.device)
             model_output = self.diffusion_model(
                 motion,
                 timesteps,
@@ -131,190 +337,425 @@ class VASAStage2Trainer:
             
         return motion
 
-
-def train_vasa_stage2(config_path: str):
-    """
-    Main training function for VASA Stage 2
-    Args:
-        config_path: Path to YAML configuration file
-    """
-    # Load configuration
-    config = OmegaConf.load(config_path)
-    
-    # Setup device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Initialize wandb
-    if config.use_wandb:
-        wandb.init(
-            project="vasa",
-            name=f"stage2_{config.experiment_name}",
-            config=OmegaConf.to_container(config, resolve=True)
-        )
-    
-    # Initialize datasets
-    train_dataset = VASADataset(
-        video_folder=config.data.train_path,
-        frame_size=tuple(config.data.frame_size),
-        sequence_length=config.model.sequence_length,
-        hop_length=config.data.hop_length,
-        max_videos=config.data.max_videos,
-        cache_audio=True,
-        preextract_audio=True
-    )
-    
-    val_dataset = VASADataset(
-        video_folder=config.data.val_path,
-        frame_size=tuple(config.data.frame_size),
-        sequence_length=config.model.sequence_length,
-        hop_length=config.data.hop_length,
-        max_videos=config.data.max_val_videos,
-        cache_audio=True,
-        preextract_audio=True
-    )
-    
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.training.batch_size,
-        shuffle=True,
-        num_workers=config.training.num_workers,
-        pin_memory=True
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config.training.batch_size,
-        shuffle=False,
-        num_workers=config.training.num_workers,
-        pin_memory=True
-    )
-    
-    # Load pretrained face encoder
-    face_encoder = VASAFaceEncoder(
-        feature_dim=config.model.feature_dim
-    ).to(device)
-    
-    # Load encoder checkpoint
-    encoder_ckpt = torch.load(config.model.encoder_checkpoint)
-    face_encoder.load_state_dict(encoder_ckpt['model_state_dict'])
-    face_encoder.eval()  # Set to eval mode since we're freezing it
-    
-    # Initialize diffusion model
-    diffusion_model = VASADiffusionTransformer(
-        seq_length=config.model.sequence_length,
-        d_model=config.model.d_model,
-        nhead=config.model.nhead,
-        num_layers=config.model.num_layers,
-        dropout=config.model.dropout,
-        motion_dim=config.model.motion_dim,
-        audio_dim=config.model.audio_dim
-    ).to(device)
-    
-    # Initialize trainer
-    trainer = VASAStage2Trainer(
-        face_encoder=face_encoder,
-        diffusion_model=diffusion_model,
-        config=config,
-        device=device
-    )
-    
-    # Setup optimizer
-    optimizer = optim.AdamW(
-        diffusion_model.parameters(),
-        lr=config.training.learning_rate,
-        betas=(config.training.beta1, config.training.beta2),
-        weight_decay=config.training.weight_decay
-    )
-    
-    # Setup learning rate scheduler
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=config.training.num_epochs,
-        eta_min=config.training.min_lr
-    )
-    
-    # Training loop
-    best_val_loss = float('inf')
-    for epoch in range(config.training.num_epochs):
-        # Train epoch
-        train_loss = trainer.train_epoch(train_loader, optimizer)
+    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False):
+        """Save training checkpoint"""
+        unwrapped_model = self.accelerator.unwrap_model(self.diffusion_model)
         
-        # Validation
-        val_loss = validate(trainer, val_loader)
-        
-        # Update scheduler
-        scheduler.step()
-        
-        # Log metrics
-        metrics = {
+        checkpoint = {
             'epoch': epoch,
-            'train_loss': train_loss,
-            'val_loss': val_loss,
-            'learning_rate': optimizer.param_groups[0]['lr']
+            'global_step': self.global_step,
+            'model_state_dict': unwrapped_model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'metrics': metrics,
+            'best_metric': self.best_metric,
+            'metric_history': self.metric_history,
+            'config': self.config
         }
         
-        if config.use_wandb:
-            wandb.log(metrics)
-            
-        print(f"Epoch {epoch}: Train Loss = {train_loss:.4f}, Val Loss = {val_loss:.4f}")
+        save_dir = Path(self.config.training.checkpoint_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
         
-        # Save checkpoint if best validation loss
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            save_checkpoint(
-                trainer,
-                optimizer,
-                scheduler,
-                epoch,
-                metrics,
-                config.training.checkpoint_dir,
-                is_best=True
+        if is_best:
+            path = save_dir / 'best_model.pt'
+        else:
+            path = save_dir / f'checkpoint_epoch_{epoch}.pt'
+            
+        self.accelerator.save(checkpoint, path)
+
+    def load_checkpoint(self, path: str):
+        """Load training checkpoint"""
+        checkpoint = torch.load(path, map_location=self.accelerator.device)
+        
+        self.diffusion_model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        self.current_epoch = checkpoint['epoch'] + 1
+        self.global_step = checkpoint['global_step']
+        self.best_metric = checkpoint['best_metric']
+        self.metric_history = checkpoint['metric_history']
+
+    def check_improvement(self, current_metric: float) -> bool:
+        """Check for improvement (for early stopping)"""
+        self.metric_history.append(current_metric)
+        if len(self.metric_history) > self.config.patience:
+            best_recent = min(self.metric_history[-self.config.patience:])
+            if best_recent >= min(self.metric_history[:-self.config.patience]):
+                return False
+        return True
+
+    def cleanup(self):
+        """Cleanup resources"""
+        self.accelerator.end_training()
+
+import torch
+from torch.utils.data import DataLoader
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from accelerate import Accelerator
+from omegaconf import OmegaConf
+import wandb
+from pathlib import Path
+from collections import defaultdict
+from tqdm import tqdm
+import torch.nn.functional as F
+from typing import Dict, Any, Optional
+
+class VASAStage2Trainer:
+    """
+    Complete implementation of Stage 2 VASA training - Diffusion Transformer for motion generation
+    with distributed training, logging, and checkpoint management
+    """
+    def __init__(
+        self, 
+        face_encoder,
+        diffusion_model,
+        config,
+    ):
+        self.config = config
+        self.face_encoder = face_encoder
+        self.diffusion_model = diffusion_model
+        
+        # Initialize accelerator
+        self.accelerator = Accelerator(
+            gradient_accumulation_steps=config.training.gradient_accumulation_steps,
+            log_with="wandb",
+            mixed_precision="fp16",
+        )
+
+        # Initialize trackers
+        self.accelerator.init_trackers(
+            project_name=config.project_name,
+            config=OmegaConf.to_container(config, resolve=True),
+            init_kwargs={"wandb": {
+                "name": config.experiment_name,
+                "dir": config.training.log_dir
+            }}
+        )
+
+        # Freeze face encoder
+        for param in self.face_encoder.parameters():
+            param.requires_grad = False
+            
+        # Setup optimizer and scheduler
+        self.optimizer = AdamW(
+            self.diffusion_model.parameters(),
+            lr=config.training.lr,
+            betas=(config.training.beta1, config.training.beta2),
+            weight_decay=config.training.weight_decay
+        )
+        
+        self.scheduler = CosineAnnealingLR(
+            self.optimizer,
+            T_max=config.training.num_epochs,
+            eta_min=config.training.min_lr
+        )
+
+        # Training state
+        self.current_epoch = 0
+        self.global_step = 0
+        self.best_metric = float('inf')
+        self.metric_history = []
+        
+    def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
+        """Single training step"""
+        # Extract data
+        images = batch['frames']
+        audio_features = batch['audio_features']
+        gaze = batch['gaze']
+        emotion = batch['emotion']
+
+        # Extract facial representations using frozen encoder
+        with torch.no_grad():
+            facial_reps = self.face_encoder.encode_holistic(
+                images[:, 0],  # Source frame
+                gaze=gaze[:, 0],
+                emotion=emotion[:, 0]
+            )
+
+        # Get facial dynamics sequence
+        facial_dynamics = facial_reps['facial_dynamics']
+        
+        # Sample timestep
+        batch_size = facial_dynamics.shape[0]
+        t = torch.randint(0, self.config.num_steps, (batch_size,), 
+                         device=self.accelerator.device)
+
+        # Add noise
+        noise = torch.randn_like(facial_dynamics)
+        noisy_dynamics = self.diffusion_model.add_noise(facial_dynamics, t, noise)
+
+        # Prepare conditions
+        conditions = {
+            'audio': audio_features,
+            'gaze': gaze,
+            'emotion': emotion
+        }
+
+        # Forward pass with CFG
+        with self.accelerator.autocast():
+            model_output = self.diffusion_model(
+                noisy_dynamics,
+                t,
+                conditions=conditions,
+                use_cfg=self.training
+            )
+
+            # Compute losses
+            losses = {}
+            
+            # Base diffusion loss
+            losses['diffusion'] = F.mse_loss(
+                model_output['predicted_noise'], 
+                noise
+            )
+
+            # CFG losses
+            if self.training and self.config.cfg_scales is not None:
+                for cond_type, scale in self.config.cfg_scales.items():
+                    if scale > 0 and f'masked_{cond_type}' in model_output:
+                        losses[f'cfg_{cond_type}'] = F.mse_loss(
+                            model_output[f'masked_{cond_type}'],
+                            model_output['uncond']
+                        )
+
+            # Total loss
+            total_loss = losses['diffusion'] + sum(
+                self.config.lambda_cfg * losses[f'cfg_{k}']
+                for k in ['audio', 'gaze']
+                if f'cfg_{k}' in losses
+            )
+
+        # Backward pass
+        self.accelerator.backward(total_loss)
+        
+        if self.accelerator.sync_gradients:
+            self.accelerator.clip_grad_norm_(
+                self.diffusion_model.parameters(),
+                self.config.max_grad_norm
+            )
+
+        return {
+            'total_loss': total_loss.item(),
+            **{k: v.item() for k, v in losses.items()}
+        }
+
+    def train_epoch(self, train_loader: DataLoader, epoch: int) -> Dict[str, float]:
+        """Train for one epoch"""
+        self.diffusion_model.train()
+        metrics = defaultdict(float)
+        
+        progress_bar = tqdm(
+            total=len(train_loader),
+            desc=f"Epoch {epoch+1}",
+            disable=not self.accelerator.is_local_main_process
+        )
+
+        for batch_idx, batch in enumerate(train_loader):
+            with self.accelerator.accumulate(self.diffusion_model):
+                step_metrics = self.train_step(batch)
+                
+                # Update metrics
+                for k, v in step_metrics.items():
+                    metrics[k] += v
+                
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+
+            # Log samples periodically
+            if batch_idx % self.config.sample_interval == 0:
+                self.log_samples(batch, self.global_step)
+                
+            progress_bar.update(1)
+            self.global_step += 1
+
+        # Average metrics
+        metrics = {k: v / len(train_loader) for k, v in metrics.items()}
+        
+        progress_bar.close()
+        return metrics
+
+    @torch.no_grad()
+    def validate(self, val_loader: DataLoader) -> Dict[str, float]:
+        """Run validation"""
+        self.diffusion_model.eval()
+        metrics = defaultdict(float)
+        
+        for batch in tqdm(val_loader, desc="Validation"):
+            step_metrics = self.train_step(batch)
+            for k, v in step_metrics.items():
+                metrics[k] += v
+                
+        metrics = {k: v / len(val_loader) for k, v in metrics.items()}
+        return metrics
+
+    def train(self, train_loader: DataLoader, val_loader: DataLoader):
+        """Complete training loop"""
+        # Prepare for training
+        (
+            self.face_encoder,
+            self.diffusion_model,
+            self.optimizer,
+            self.scheduler,
+            train_loader,
+            val_loader
+        ) = self.accelerator.prepare(
+            self.face_encoder,
+            self.diffusion_model,
+            self.optimizer,
+            self.scheduler,
+            train_loader,
+            val_loader
+        )
+
+        try:
+            for epoch in range(self.current_epoch, self.config.training.num_epochs):
+                # Training
+                train_metrics = self.train_epoch(train_loader, epoch)
+                
+                # Validation
+                val_metrics = self.validate(val_loader)
+                
+                # Update scheduler
+                self.scheduler.step()
+                
+                # Log metrics
+                metrics = {
+                    "train/" + k: v for k, v in train_metrics.items()
+                }
+                metrics.update({
+                    "val/" + k: v for k, v in val_metrics.items()
+                })
+                metrics["learning_rate"] = self.scheduler.get_last_lr()[0]
+                
+                self.accelerator.log(metrics, step=self.global_step)
+                
+                # Save checkpoint
+                if (epoch + 1) % self.config.save_interval == 0:
+                    self.save_checkpoint(
+                        epoch=epoch,
+                        metrics=metrics,
+                        is_best=val_metrics['total_loss'] < self.best_metric
+                    )
+                    
+                # Update best metric
+                if val_metrics['total_loss'] < self.best_metric:
+                    self.best_metric = val_metrics['total_loss']
+                
+                # Early stopping
+                if not self.check_improvement(val_metrics['total_loss']):
+                    print("Early stopping triggered!")
+                    break
+                    
+                self.current_epoch = epoch + 1
+                
+        except Exception as e:
+            print(f"Training error: {str(e)}")
+            raise
+            
+        finally:
+            self.cleanup()
+
+    def log_samples(self, batch: Dict[str, torch.Tensor], step: int):
+        """Log sample generations"""
+        if self.accelerator.is_local_main_process:
+            with torch.no_grad():
+                # Generate motion sequence
+                generated_motion = self.generate_motion(
+                    batch['audio_features'][:1],
+                    {
+                        'gaze': batch['gaze'][:1],
+                        'emotion': batch['emotion'][:1]
+                    }
+                )
+                
+                # Log samples
+                self.accelerator.log({
+                    "samples/motion": wandb.Histogram(
+                        generated_motion.cpu().numpy()
+                    ),
+                    "samples/audio": wandb.Histogram(
+                        batch['audio_features'][:1].cpu().numpy()
+                    )
+                }, step=step)
+
+    @torch.no_grad()
+    def generate_motion(self, audio_features, conditions, cfg_scales=None):
+        """Generate motion sequence"""
+        self.diffusion_model.eval()
+        
+        # Initialize from noise
+        motion = torch.randn(
+            (1, self.config.sequence_length, self.config.motion_dim),
+            device=self.accelerator.device
+        )
+        
+        # Iterative denoising
+        for t in reversed(range(self.config.num_steps)):
+            timesteps = torch.full((1,), t, device=self.accelerator.device)
+            model_output = self.diffusion_model(
+                motion,
+                timesteps,
+                conditions=conditions,
+                cfg_scales=cfg_scales
+            )
+            motion = self.diffusion_model.update_sample(
+                motion,
+                model_output['predicted_noise'],
+                timesteps
             )
             
-        # Regular checkpoint saving
-        if epoch % config.training.save_frequency == 0:
-            save_checkpoint(
-                trainer,
-                optimizer,
-                scheduler,
-                epoch,
-                metrics,
-                config.training.checkpoint_dir
-            )
+        return motion
 
-def validate(trainer, val_loader):
-    """Run validation"""
-    trainer.diffusion_model.eval()
-    total_loss = 0
-    
-    with torch.no_grad():
-        for batch in val_loader:
-            loss = trainer.train_step(batch)
-            total_loss += loss.item()
-    
-    return total_loss / len(val_loader)
-
-def save_checkpoint(trainer, optimizer, scheduler, epoch, metrics, checkpoint_dir, is_best=False):
-    """Save training checkpoint"""
-    checkpoint_dir = Path(checkpoint_dir)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    
-    checkpoint = {
-        'epoch': epoch,
-        'model_state_dict': trainer.diffusion_model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
-        'metrics': metrics
-    }
-    
-    if is_best:
-        path = checkpoint_dir / 'best_model.pt'
-    else:
-        path = checkpoint_dir / f'checkpoint_epoch_{epoch}.pt'
+    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False):
+        """Save training checkpoint"""
+        unwrapped_model = self.accelerator.unwrap_model(self.diffusion_model)
         
-    torch.save(checkpoint, path)
+        checkpoint = {
+            'epoch': epoch,
+            'global_step': self.global_step,
+            'model_state_dict': unwrapped_model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'metrics': metrics,
+            'best_metric': self.best_metric,
+            'metric_history': self.metric_history,
+            'config': self.config
+        }
+        
+        save_dir = Path(self.config.training.checkpoint_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        
+        if is_best:
+            path = save_dir / 'best_model.pt'
+        else:
+            path = save_dir / f'checkpoint_epoch_{epoch}.pt'
+            
+        self.accelerator.save(checkpoint, path)
 
-if __name__ == "__main__":
-    config = OmegaConf.load("./configs/training/stage2.yaml")
-    train_vasa_stage2(config)
+    def load_checkpoint(self, path: str):
+        """Load training checkpoint"""
+        checkpoint = torch.load(path, map_location=self.accelerator.device)
+        
+        self.diffusion_model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        self.current_epoch = checkpoint['epoch'] + 1
+        self.global_step = checkpoint['global_step']
+        self.best_metric = checkpoint['best_metric']
+        self.metric_history = checkpoint['metric_history']
+
+    def check_improvement(self, current_metric: float) -> bool:
+        """Check for improvement (for early stopping)"""
+        self.metric_history.append(current_metric)
+        if len(self.metric_history) > self.config.patience:
+            best_recent = min(self.metric_history[-self.config.patience:])
+            if best_recent >= min(self.metric_history[:-self.config.patience]):
+                return False
+        return True
+
+    def cleanup(self):
+        """Cleanup resources"""
+        self.accelerator.end_training()

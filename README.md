@@ -21,15 +21,128 @@ I update progress here - https://github.com/johndpope/VASA-1-hack/issues/20
 
 
 ✅ dataset is good
+
 models seem good
+
 trainer is in progress.
 
 https://wandb.ai/snoozie/vasa?nw=nwusersnoozie
 
+
+
 ```shell
 python dataset_testing.py 
- 
-python trainer.py 
+
+
+
+#!/bin/bash
+
+# 1. STAGE 1 - Basic single GPU training
+accelerate launch --mixed_precision fp16 train_stage1.py \
+    --config configs/training/stage1-base.yaml
+
+# 2. Multi-GPU training on a single machine
+accelerate launch \
+    --multi_gpu \
+    --mixed_precision fp16 \
+    --gradient_accumulation_steps 4 \
+    train_stage1.py \
+    --config configs/training/stage1-base.yaml
+
+# 3. Distributed training across multiple machines
+accelerate launch \
+    --multi_gpu \
+    --num_processes 8 \
+    --num_machines 2 \
+    --machine_rank 0 \
+    --main_process_ip "master_node_ip" \
+    --main_process_port 29500 \
+    --mixed_precision fp16 \
+    --gradient_accumulation_steps 4 \
+    train_stage1.py \
+    --config configs/training/stage1-base.yaml
+
+# 4. Debug mode with smaller batch size and fewer iterations
+accelerate launch \
+    --mixed_precision fp16 \
+    train_stage1.py \
+    --config configs/training/stage1-base.yaml \
+    training.batch_size=4 \
+    training.base_epochs=2 \
+    training.sample_interval=10
+
+# 5. Resume training from checkpoint
+accelerate launch \
+    --mixed_precision fp16 \
+    train_stage1.py \
+    --config configs/training/stage1-base.yaml \
+    training.resume_path=checkpoints/stage1/checkpoint_epoch_10.pt
+
+# 6. Override specific config values
+accelerate launch \
+    --mixed_precision fp16 \
+    train_stage1.py \
+    --config configs/training/stage1-base.yaml \
+    training.batch_size=16 \
+    training.lr=2e-4 \
+    training.weight_decay=1e-2 \
+    model.feature_dim=512
+
+# 7. Training with different loss weights
+accelerate launch \
+    --mixed_precision fp16 \
+    train_stage1.py \
+    --config configs/training/stage1-base.yaml \
+    loss.perceptual_weight=1.0 \
+    loss.gan_weight=0.5 \
+    loss.identity_weight=1.0 \
+    loss.motion_weight=0.5
+
+# 8. Training with specific GPU devices
+CUDA_VISIBLE_DEVICES=0,1 accelerate launch \
+    --multi_gpu \
+    --mixed_precision fp16 \
+    train_stage1.py \
+    --config configs/training/stage1-base.yaml
+
+# 9. Training with CPU offload (for limited GPU memory)
+accelerate launch \
+    --mixed_precision fp16 \
+    --cpu_offload \
+    train_stage1.py \
+    --config configs/training/stage1-base.yaml
+
+# 10. Training with gradient checkpointing (for memory efficiency)
+accelerate launch \
+    --mixed_precision fp16 \
+    --gradient_accumulation_steps 8 \
+    train_stage1.py \
+    --config configs/training/stage1-base.yaml \
+    model.use_gradient_checkpointing=true
+
+
+
+# STAGE 2 - Single GPU training
+python train_stage2.py
+
+# Multi-GPU training with Accelerate
+accelerate launch \
+    --multi_gpu \
+    --mixed_precision fp16 \
+    --gradient_accumulation_steps 4 \
+    train_stage2.py
+
+# Distributed training with specific GPU configuration
+accelerate launch \
+    --multi_gpu \
+    --mixed_precision fp16 \
+    --gradient_accumulation_steps 4 \
+    --num_processes 4 \
+    --num_machines 1 \
+    --machine_rank 0 \
+    --main_process_port 29500 \
+    train_stage2.py
+
 ```
 
 
