@@ -1,0 +1,52 @@
+# VASA Stage 2 Training Configuration
+experiment_name: "vasa_stage2_run1"
+use_wandb: true
+
+# Data Configuration
+data:
+  train_path: "path/to/train/videos"
+  val_path: "path/to/val/videos"
+  frame_size: [512, 512]
+  hop_length: 10
+  max_videos: null  # Set to null to use all videos
+  max_val_videos: 100
+
+# Model Configuration
+model:
+  feature_dim: 512
+  sequence_length: 25
+  d_model: 512
+  nhead: 8
+  num_layers: 8
+  dropout: 0.1
+  motion_dim: 256
+  audio_dim: 768
+  encoder_checkpoint: "path/to/stage1/checkpoint.pt"
+
+# Training Configuration
+training:
+  num_epochs: 100
+  batch_size: 8
+  learning_rate: 2.0e-4
+  min_lr: 1.0e-6
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 0.01
+  num_workers: 4
+  save_frequency: 5
+  checkpoint_dir: "checkpoints/stage2"
+
+# Diffusion Configuration
+diffusion:
+  num_steps: 50
+  beta_start: 1.0e-4
+  beta_end: 0.02
+
+# Classifier-Free Guidance
+cfg_scales:
+  audio: 0.5
+  gaze: 1.0
+  emotion: 0.3
+
+# Loss weights
+lambda_cfg: 1.0

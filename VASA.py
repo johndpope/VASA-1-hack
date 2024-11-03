@@ -112,12 +112,100 @@ class VASADiffusion:
 
     
 import logging
-from model import Emtn,Gbase
 
-class VASAFaceEncoder(Gbase):    
-    def __init__(self):
-        super(VASAFaceEncoder, self).__init__()
 
+from model import Gbase, Emtn, WarpGeneratorS2C, WarpGeneratorC2D
+
+class VASAFaceEncoder(Gbase):
+    """
+    VASA Face Encoder that extends MegaPortraits' Gbase with specific VASA functionality.
+    Implements the face encoding stage described in VASA paper section 3.1.
+    """
+    def __init__(self, feature_dim=512):
+        super().__init__()
+        # Initialize components from Gbase (MegaPortraits)
+        # Called via super().__init__() above
+
+        # Add VASA-specific encoding stages
+        self.feature_dim = feature_dim
+        self.gaze_encoder = self._create_gaze_encoder()
+        self.emotion_encoder = self._create_emotion_encoder()
+
+    def _create_gaze_encoder(self):
+        """Creates the gaze direction encoder network"""
+        return nn.Sequential(
+            nn.Linear(2, 128),  # Takes (θ,φ) angles
+            nn.ReLU(),
+            nn.Linear(128, self.feature_dim),
+            nn.LayerNorm(self.feature_dim)
+        )
+
+    def _create_emotion_encoder(self):
+        """Creates the emotion encoding network"""
+        return nn.Sequential(
+            nn.Linear(8, 128),  # 8 emotion categories
+            nn.ReLU(),
+            nn.Linear(128, self.feature_dim),
+            nn.LayerNorm(self.feature_dim)
+        )
+
+    def encode_holistic(self, x, gaze=None, emotion=None):
+        """
+        Encode complete facial representation including appearance, motion, and control signals
+        Args:
+            x: Input image tensor
+            gaze: Optional gaze direction tensor (θ,φ)
+            emotion: Optional emotion tensor (8 categories)
+        Returns:
+            Dictionary containing:
+            - appearance_volume: 3D appearance features
+            - identity: Identity embedding
+            - head_pose: Head pose parameters
+            - facial_dynamics: Facial dynamics embedding
+            - gaze_features: Optional gaze features
+            - emotion_features: Optional emotion features
+        """
+        # Get base features from MegaPortraits Gbase
+        vs, es = self.appearanceEncoder(x)
+        Rs, ts, zs = self.motionEncoder(x)
+
+        # Combine into facial dynamics representation
+        facial_dynamics = self.combine_dynamics(zs, gaze, emotion)
+
+        # Generate warping fields
+        w_s2c = self.warp_generator_s2c(Rs, ts, zs, es)
+
+        # Create canonical volume
+        vc = self.apply_warping_field(vs, w_s2c)
+
+        return {
+            'appearance_volume': vc,
+            'identity': es,
+            'head_pose': (Rs, ts),
+            'facial_dynamics': facial_dynamics,
+            'gaze_features': self.gaze_encoder(gaze) if gaze is not None else None,
+            'emotion_features': self.emotion_encoder(emotion) if emotion is not None else None
+        }
+
+    def combine_dynamics(self, base_dynamics, gaze=None, emotion=None):
+        """Combines base dynamics with optional control signals"""
+        features = [base_dynamics]
+        
+        if gaze is not None:
+            gaze_features = self.gaze_encoder(gaze)
+            features.append(gaze_features)
+            
+        if emotion is not None:
+            emotion_features = self.emotion_encoder(emotion)
+            features.append(emotion_features)
+            
+        # Combine all features
+        combined = torch.cat(features, dim=-1)
+        return combined
+
+    def apply_warping_field(self, volume, warp_field):
+        """Apply 3D warping field to volume features"""
+        return super().apply_warping_field(volume, warp_field)
 
 
 class VASAFaceDecoder(nn.Module):
