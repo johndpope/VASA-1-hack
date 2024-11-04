@@ -22,6 +22,9 @@ import gc
 from memory_profiler import profile
 import math
 
+
+# doesn't work great - using a paired dataset instead - https://github.com/neeek2303/EMOPortraits/tree/main/datasets
+
 class EMODataset(Dataset):
     def __init__(self, use_gpu: False, sample_rate: int, n_sample_frames: int, width: int, height: int, 
                  img_scale: Tuple[float, float], img_ratio: Tuple[float, float] = (0.9, 1.0), 
@@ -106,6 +109,7 @@ class EMODataset(Dataset):
         
         tensor_file_path = output_dir / f"{video_id}_tensors.npz"
         
+        # First check if we have cached tensors
         if tensor_file_path.exists():
             print(f"Loading processed tensors from file: {tensor_file_path}")
             with np.load(tensor_file_path) as data:
@@ -118,15 +122,22 @@ class EMODataset(Dataset):
                 del data
                 gc.collect()
                 return tensor_frames
-        
+
         processed_frames = []
         tensor_frames = []
         
         try:
+            # Initialize video reader
             video_reader = VideoReader(video_path, ctx=self.ctx)
             total_frames = len(video_reader)
             
-            for frame_idx in tqdm(range(total_frames), desc="Processing Video Frames"):
+            # Determine how many frames to process
+            frames_to_process = total_frames
+            if self.max_frames is not None:
+                frames_to_process = min(total_frames, self.max_frames)
+                
+            # Process only up to frames_to_process
+            for frame_idx in tqdm(range(frames_to_process), desc="Processing Video Frames"):
                 frame = Image.fromarray(video_reader[frame_idx].numpy())
                 state = torch.get_rng_state()
                 tensor_frame, image_frame = self.augmentation(frame, self.pixel_transform, state)
@@ -146,24 +157,24 @@ class EMODataset(Dataset):
             del video_reader
             gc.collect()
             
-            # Save all processed frames to cache
+            # Save processed frames to cache
             np.savez_compressed(tensor_file_path, *[tensor_frame.numpy() for tensor_frame in tensor_frames])
             print(f"Processed tensors saved to file: {tensor_file_path}")
             
-            # Apply max_frames and duplication if needed
-            if self.max_frames is not None:
-                if len(tensor_frames) < self.max_frames and self.duplicate_short:
-                    tensor_frames = self.duplicate_frames_to_length(tensor_frames, self.max_frames)
-                else:
-                    tensor_frames = tensor_frames[:self.max_frames]
+            # Handle short videos if needed
+            if self.max_frames is not None and len(tensor_frames) < self.max_frames and self.duplicate_short:
+                tensor_frames = self.duplicate_frames_to_length(tensor_frames, self.max_frames)
             
             return tensor_frames
+            
+        except Exception as e:
+            print(f"Error processing video {video_path}: {e}")
+            raise
             
         finally:
             del processed_frames
             gc.collect()
             torch.cuda.empty_cache()
-
     def apply_warp_transform(self, image_tensor, warp_strength=0.01):
         # Convert tensor to numpy array for warping
         if image_tensor.ndim == 4:

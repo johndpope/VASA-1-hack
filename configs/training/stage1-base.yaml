@@ -34,6 +34,8 @@ training:
   use_gpu_video_tensor: True
   prev_frames: 2  # Add this line to specify the number of previous frames to consider
   video_dir:  '/media/oem/12TB/Downloads/CelebV-HQ/celebvhq/35666' # point to your junk folder or 40gb - https://academictorrents.com/details/843b5adb0358124d388c4e9836654c246b988ff4
+  cache_video_dir: '/media/oem/12TB/Downloads/CelebV-HQ/celebvhq/35666/cache' 
+
   # video_dir: './junk'
   sample_rate: 25  
   n_sample_frames: 100

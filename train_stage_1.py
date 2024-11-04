@@ -25,7 +25,7 @@ from torch.autograd import Variable
 from scipy.linalg import sqrtm
 from sklearn.metrics.pairwise import cosine_similarity
 from lpips import LPIPS
-from EmoDataset import EMODataset
+from VideoDataset import VideoDataset
 
 import wandb
 from accelerate import Accelerator
@@ -462,20 +462,22 @@ def main(cfg: OmegaConf) -> None:
         # transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    dataset = EMODataset(
-        use_gpu=use_cuda,
-        remove_background=True,
-        width=cfg.data.train_width,
-        height=cfg.data.train_height,
-        n_sample_frames=cfg.training.n_sample_frames,
-        sample_rate=cfg.training.sample_rate,
-        img_scale=(1.0, 1.0),
+
+    dataset = VideoDataset(
         video_dir=cfg.training.video_dir,
-        json_file=cfg.training.json_file,
+        width=256,
+        height=256,
+        n_pairs=10000,
+        cache_dir=cfg.training.cache_video_dir,
         transform=transform,
-        max_frames=100,  # Desired number of frames
-        apply_warping=True  
+        remove_background=True,
+        use_greenscreen=False,
+        apply_warping=True,
+        max_frames=100,
+        duplicate_short=True,
+        warp_strength=0.01
     )
+
 
 
     dataloader = DataLoader(
