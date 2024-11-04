@@ -15,13 +15,14 @@ import io
 from skimage.transform import PiecewiseAffineTransform, warp
 from torchvision.transforms.functional import to_pil_image, to_tensor
 import random
-
 class VideoDataset(Dataset):
     def __init__(self, 
                 video_dir: str,
                 width: int,
                 height: int,
-                n_pairs: int = 10000,
+                initial_pairs: int = 1000,  # Start with fewer pairs
+                max_pairs: int = 10000,     # Maximum pairs to reach
+                growth_rate: float = 1.5,   # How fast to grow
                 cache_dir: str = None,
                 transform: transforms.Compose = None,
                 remove_background: bool = False,
@@ -30,27 +31,16 @@ class VideoDataset(Dataset):
                 max_frames: int = 100,
                 duplicate_short: bool = True,
                 warp_strength: float = 0.01):
-        """
-        Enhanced dataset with background removal and warping support.
         
-        Args:
-            video_dir: Directory containing .mp4 files
-            width: Target frame width 
-            height: Target frame height
-            n_pairs: Number of pairs to sample per epoch
-            cache_dir: Directory for LMDB cache
-            transform: Torchvision transforms to apply
-            remove_background: Whether to remove background from frames
-            use_greenscreen: Add green background after removal
-            apply_warping: Apply warping augmentation
-            max_frames: Maximum frames to keep per video
-            duplicate_short: Whether to duplicate frames for short videos
-            warp_strength: Strength of warping transform
-        """
         self.video_dir = Path(video_dir)
         self.width = width
         self.height = height
-        self.n_pairs = n_pairs
+        self.initial_pairs = initial_pairs
+        self.max_pairs = max_pairs
+        self.growth_rate = growth_rate
+        self.current_pairs = initial_pairs
+        self.epoch = 0
+        
         self.transform = transform
         self.remove_background = remove_background
         self.use_greenscreen = use_greenscreen
@@ -59,39 +49,158 @@ class VideoDataset(Dataset):
         self.duplicate_short = duplicate_short
         self.warp_strength = warp_strength
         
+        # Setup cache directory
+        self.cache_dir = Path(cache_dir) if cache_dir else Path("frame_cache")
+        self.cache_dir.mkdir(exist_ok=True)
+        
         # Get list of video files
         self.video_files = list(self.video_dir.glob("*.mp4"))
         print(f"Found {len(self.video_files)} video files")
         
-        # Setup LMDB cache
-        if cache_dir:
-            self.cache_env = self._init_cache(cache_dir)
-        else:
-            self.cache_env = None
-            
-        # Create random pairs for this epoch
+        # Process videos in batches as needed
+        self.processed_videos = set()
+        self._process_initial_videos()
+        
+        # Create initial pairs
         self.pairs = self._create_epoch_pairs()
-        
-    def _init_cache(self, cache_dir):
-        """Initialize LMDB cache"""
-        os.makedirs(cache_dir, exist_ok=True)
-        return lmdb.open(
-            cache_dir,
-            map_size=1024*1024*1024*1024,  # 1TB max size
-            create=True,
-            readonly=False,
-            meminit=False,
-            map_async=True
-        )
-        
+
+    def _process_initial_videos(self):
+        """Process an initial batch of videos"""
+        initial_videos = self._get_next_video_batch(self.initial_pairs * 2)  # 2x for pairs
+        for video_path in tqdm(initial_videos, desc="Processing initial videos"):
+            self._process_video(video_path)
+            self.processed_videos.add(video_path)
+
+    def _get_next_video_batch(self, n_videos):
+        """Get next batch of unprocessed videos"""
+        remaining = set(self.video_files) - self.processed_videos
+        return random.sample(list(remaining), min(n_videos, len(remaining)))
+
+    def _process_video(self, video_path):
+        """Process single video and cache frames"""
+        cache_path = self.cache_dir / video_path.stem
+        if cache_path.exists():
+            return
+
+        try:
+            cache_path.mkdir(exist_ok=True)
+            vr = VideoReader(str(video_path), ctx=cpu())
+            n_frames = len(vr)
+            
+            indices = range(min(n_frames, self.max_frames))
+            if n_frames > self.max_frames:
+                indices = sorted(random.sample(range(n_frames), self.max_frames))
+            
+            for idx in indices:
+                out_path = cache_path / f"{idx:06d}.png"
+                if not out_path.exists():
+                    frame = vr[idx]
+                    if hasattr(frame, 'asnumpy'):
+                        frame = frame.asnumpy()
+                    frame = Image.fromarray(np.uint8(frame))
+                    frame = frame.resize((self.width, self.height))
+                    
+                    if self.remove_background:
+                        frame = self.remove_bg(frame)
+                    
+                    frame.save(out_path)
+
+        except Exception as e:
+            print(f"Error processing {video_path}: {e}")
+            if cache_path.exists():
+                import shutil
+                shutil.rmtree(cache_path)
+            return None
+
     def _create_epoch_pairs(self):
-        """Create random pairs for this epoch"""
+        """Create pairs based on current dataset size"""
+        valid_videos = [v for v in self.processed_videos 
+                       if (self.cache_dir / v.stem).exists()]
+        
         pairs = []
-        for _ in range(self.n_pairs):
-            # Sample two different videos
-            vid1, vid2 = random.sample(self.video_files, 2)
+        for _ in range(self.current_pairs):
+            if len(valid_videos) < 2:  # Need at least 2 videos
+                break
+            vid1, vid2 = random.sample(valid_videos, 2)
             pairs.append((vid1, vid2))
         return pairs
+
+    def grow_dataset(self):
+        """Increase dataset size for next epoch"""
+        self.epoch += 1
+        
+        # Calculate new size
+        self.current_pairs = min(
+            int(self.current_pairs * self.growth_rate),
+            self.max_pairs
+        )
+        
+        # Process more videos if needed
+        videos_needed = self.current_pairs * 2  # 2x for pairs
+        if len(self.processed_videos) < videos_needed:
+            new_videos = self._get_next_video_batch(
+                videos_needed - len(self.processed_videos)
+            )
+            for video_path in tqdm(new_videos, desc=f"Processing videos for epoch {self.epoch}"):
+                self._process_video(video_path)
+                self.processed_videos.add(video_path)
+        
+        # Create new pairs
+        self.pairs = self._create_epoch_pairs()
+        print(f"Epoch {self.epoch}: Dataset size = {len(self.pairs)} pairs")
+
+    def __getitem__(self, index):
+        """Get a pair of frames"""
+        max_retries = 5
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                vid1_path, vid2_path = self.pairs[index]
+                
+                # Load frames
+                source_frame = self._load_random_frame(vid1_path)
+                driving_frame = self._load_random_frame(vid2_path)
+                
+                return {
+                    "source_frame": source_frame,
+                    "driving_frame": driving_frame,
+                    "source_vid": vid1_path.stem,
+                    "driving_vid": vid2_path.stem
+                }
+                
+            except Exception as e:
+                retry_count += 1
+                if retry_count >= max_retries:
+                    print(f"Failed after {max_retries} retries for index {index}: {e}")
+                    index = random.randrange(len(self))
+                continue
+    
+    def _load_random_frame(self, video_path):
+        """Load a random frame from a video"""
+        frame_dir = self.cache_dir / video_path.stem
+        frame_files = list(frame_dir.glob("*.png"))
+        if not frame_files:
+            raise ValueError(f"No frames found for {video_path}")
+            
+        frame_path = random.choice(frame_files)
+        frame = Image.open(frame_path).convert('RGB')
+        
+        if self.transform:
+            frame = self.transform(frame)
+            if self.apply_warping:
+                frame = self.apply_warp_transform(frame)
+        else:
+            frame = to_tensor(frame)
+            
+        return frame
+    
+    def __len__(self):
+        return len(self.pairs)
+
+    def reset_pairs(self):
+        """Grow dataset and create new pairs for next epoch"""
+        self.grow_dataset()
 
     def remove_bg(self, image):
         """Remove background from image"""
@@ -145,148 +254,3 @@ class VideoDataset(Dataset):
             result.extend(frames)
         return result[:target_length]
     
-    def _get_cached_frames(self, video_path):
-        """Try to get frames from cache"""
-        if not self.cache_env:
-            return None
-            
-        try:
-            with self.cache_env.begin(write=False) as txn:
-                cached = txn.get(str(video_path).encode())
-                if cached:
-                    return pickle.loads(cached)
-        except:
-            return None
-            
-    def _cache_frames(self, video_path, frames):
-        """Cache frames to LMDB"""
-        if not self.cache_env:
-            return
-            
-        try:
-            with self.cache_env.begin(write=True) as txn:
-                txn.put(
-                    str(video_path).encode(),
-                    pickle.dumps(frames)
-                )
-        except Exception as e:
-            print(f"Cache error for {video_path}: {e}")
-        
-    def _load_video_frames(self, video_path: Path):
-        """Load frames with caching and proper numpy handling"""
-        # Try cache first
-        frames = self._get_cached_frames(video_path)
-        if frames is not None:
-            return frames
-            
-        try:
-            vr = VideoReader(str(video_path), ctx=cpu())
-            n_frames = len(vr)
-            
-            # Sample frames
-            if n_frames > self.max_frames:
-                indices = sorted(random.sample(range(n_frames), self.max_frames))
-            else:
-                indices = range(n_frames)
-                
-            frames = []
-            for idx in indices:
-                # Handle numpy conversion properly
-                frame = vr[idx]
-                if hasattr(frame, 'asnumpy'):  # Handle decord NDArray
-                    frame = frame.asnumpy()
-                elif isinstance(frame, torch.Tensor):
-                    frame = frame.cpu().numpy()
-                    
-                # Convert to PIL
-                frame = Image.fromarray(np.uint8(frame))
-                frame = frame.resize((self.width, self.height))
-                
-                # Remove background if needed
-                if self.remove_background:
-                    frame = self.remove_bg(frame)
-                
-                # Apply transform
-                if self.transform:
-                    frame_tensor = self.transform(frame)
-                    
-                    # Apply warping if enabled
-                    if self.apply_warping:
-                        frame_tensor = self.apply_warp_transform(frame_tensor)
-                        
-                    frames.append(frame_tensor)
-                else:
-                    frames.append(to_tensor(frame))
-                    
-                # Clean up
-                del frame
-                if len(frames) % 10 == 0:
-                    torch.cuda.empty_cache()
-                    gc.collect()
-            
-            # Handle short videos
-            if self.duplicate_short and len(frames) < self.max_frames:
-                frames = self.duplicate_frames(frames, self.max_frames)
-                
-            # Cache processed frames
-            self._cache_frames(video_path, frames)
-            
-            return frames
-            
-        except Exception as e:
-            print(f"Error loading {video_path}: {e}")
-            return None
-        
-        finally:
-            gc.collect()
-            torch.cuda.empty_cache()
-
-    def __getitem__(self, index):
-        """Get a pair of videos with proper error handling"""
-        max_retries = 5
-        retry_count = 0
-        
-        while retry_count < max_retries:
-            try:
-                vid1_path, vid2_path = self.pairs[index]
-                
-                # Load frames with retries
-                frames1 = self._load_video_frames(vid1_path)
-                if frames1 is None:
-                    raise ValueError(f"Failed to load {vid1_path}")
-                    
-                frames2 = self._load_video_frames(vid2_path)
-                if frames2 is None:
-                    raise ValueError(f"Failed to load {vid2_path}")
-                    
-                if len(frames1) == 0 or len(frames2) == 0:
-                    raise ValueError("Empty frames list")
-                    
-                # Sample frames
-                source_idx = random.randrange(len(frames1))
-                driving_idx = random.randrange(len(frames2))
-                
-                return {
-                    "source_frame": frames1[source_idx],
-                    "driving_frame": frames2[driving_idx],
-                    "source_vid": vid1_path.stem,
-                    "driving_vid": vid2_path.stem
-                }
-                
-            except Exception as e:
-                retry_count += 1
-                if retry_count >= max_retries:
-                    print(f"Failed after {max_retries} retries for index {index}: {e}")
-                    # Get a new random pair
-                    index = random.randrange(len(self))
-                continue
-            
-            finally:
-                gc.collect()
-                torch.cuda.empty_cache()
-    def __len__(self):
-        return self.n_pairs
-        
-    def reset_pairs(self):
-        """Reset pairs for new epoch"""
-        self.pairs = self._create_epoch_pairs()

@@ -155,71 +155,34 @@ class RunningAverage:
 
 def custom_collate_fn(batch):
     """
-    Custom collate function for batching video frames of different sizes.
+    Custom collate function for batching paired frames
     
     Args:
-        batch: List of dictionaries containing video data
+        batch: List of dictionaries containing paired frames
         
     Returns:
-        Dictionary with batched and padded tensors
+        Dictionary with batched tensors
     """
-    # Initialize empty lists for each key in the batch
+    # Initialize batch dictionary
     batch_dict = {
-        "video_id": [],
-        "source_frames": [],
-        "driving_frames": [],
-        "video_id_star": [],
-        "source_frames_star": [],
-        "driving_frames_star": []
+        "source_frame": [],
+        "driving_frame": [],
+        "source_vid": [],
+        "driving_vid": []
     }
     
-    # Collect all frame tensors to determine max dimensions
-    all_frames = []
     for item in batch:
-        all_frames.extend(item['source_frames'])
-        all_frames.extend(item['driving_frames'])
-        all_frames.extend(item['source_frames_star'])
-        all_frames.extend(item['driving_frames_star'])
-    
-    # Find maximum dimensions
-    max_height = max(frame.shape[1] for frame in all_frames)
-    max_width = max(frame.shape[2] for frame in all_frames)
-    
-    def pad_and_stack_frames(frames):
-        """Helper function to pad and stack frames to maximum dimensions"""
-        padded_frames = []
-        for frame in frames:
-            # Calculate padding sizes
-            pad_h = max_height - frame.shape[1]
-            pad_w = max_width - frame.shape[2]
-            
-            # Pad frame to match maximum dimensions
-            padded_frame = torch.nn.functional.pad(
-                frame,
-                (0, pad_w, 0, pad_h),  # padding left, right, top, bottom
-                mode='constant',
-                value=0
-            )
-            padded_frames.append(padded_frame)
+        # Add frames
+        batch_dict["source_frame"].append(item["source_frame"])
+        batch_dict["driving_frame"].append(item["driving_frame"])
         
-        return torch.stack(padded_frames) if padded_frames else torch.tensor([])
+        # Add video IDs
+        batch_dict["source_vid"].append(item["source_vid"])
+        batch_dict["driving_vid"].append(item["driving_vid"])
     
-    # Process each item in the batch
-    for item in batch:
-        batch_dict['video_id'].append(item['video_id'])
-        batch_dict['video_id_star'].append(item['video_id_star'])
-        
-        # Pad and stack frames
-        batch_dict['source_frames'].append(pad_and_stack_frames(item['source_frames']))
-        batch_dict['driving_frames'].append(pad_and_stack_frames(item['driving_frames']))
-        batch_dict['source_frames_star'].append(pad_and_stack_frames(item['source_frames_star']))
-        batch_dict['driving_frames_star'].append(pad_and_stack_frames(item['driving_frames_star']))
-    
-    # Stack all frame tensors along batch dimension
-    batch_dict['source_frames'] = torch.stack(batch_dict['source_frames'])
-    batch_dict['driving_frames'] = torch.stack(batch_dict['driving_frames'])
-    batch_dict['source_frames_star'] = torch.stack(batch_dict['source_frames_star'])
-    batch_dict['driving_frames_star'] = torch.stack(batch_dict['driving_frames_star'])
+    # Stack tensors
+    batch_dict["source_frame"] = torch.stack(batch_dict["source_frame"])
+    batch_dict["driving_frame"] = torch.stack(batch_dict["driving_frame"])
     
     return batch_dict
 
@@ -313,7 +276,96 @@ class VASAStage1Trainer:
             torch.cuda.synchronize()
 
 
-    # @profile
+    def train(self, train_loader, start_epoch=0):
+        """Training loop for paired data"""
+        for epoch in range(start_epoch, self.cfg.training.base_epochs):
+            print(f"Epoch: {epoch}")
+            
+            running_metrics = defaultdict(lambda: RunningAverage())
+            progress_bar = tqdm(self.dataloader, desc=f'Epoch {epoch}')
+            
+            for batch_idx, batch in enumerate(progress_bar):
+                try:
+                    # Each batch contains single pairs
+                    source_frame = batch['source_frame']
+                    driving_frame = batch['driving_frame']
+                    
+                    # Get next batch for star/reference pairs
+                    # If using accelerator, need to stay in sync
+                    source_star = batch['source_frame']
+                    driving_star = batch['driving_frame']
+                    
+                    # Training step
+                    metrics = self.train_step(
+                        source_frame,
+                        driving_frame,
+                        source_star,
+                        driving_star
+                    )
+                    
+                    # Update metrics
+                    for k, v in metrics.items():
+                        if isinstance(v, (int, float, torch.Tensor)):
+                            running_metrics[k].update(v.item() if torch.is_tensor(v) else v)
+                    
+                    # Use accelerator for backwards pass
+                    self.accelerator.backward(metrics['loss_G'])
+                    self.optimizer_G.step()
+                    self.optimizer_G.zero_grad()
+                    
+                    self.accelerator.backward(metrics['loss_D'])
+                    self.optimizer_D.step()
+                    self.optimizer_D.zero_grad()
+                    
+                    # Log images periodically
+                    if batch_idx % self.cfg.training.log_interval == 0:
+                        with torch.no_grad():
+                            wandb.log({
+                                "source_frame": wandb.Image(source_frame[0].cpu()),
+                                "driving_frame": wandb.Image(driving_frame[0].cpu()),
+                                "predicted_frame": wandb.Image(metrics['pred_frame'][0].cpu()),
+                                "source_star": wandb.Image(source_star[0].cpu()),
+                                "driving_star": wandb.Image(driving_star[0].cpu())
+                            })
+                    
+                    # Log memory usage periodically
+                    if batch_idx % 100 == 0:
+                        current_memory = torch.cuda.memory_allocated()
+                        peak_memory = torch.cuda.max_memory_allocated()
+                        print(f"Memory usage: {current_memory/1e9:.2f}GB (Peak: {peak_memory/1e9:.2f}GB)")
+                    
+                    # Update progress bar
+                    progress_bar.set_postfix({k: f"{v.avg:.4f}" for k, v in running_metrics.items()})
+                    
+                    # Cleanup
+                    del metrics
+                    torch.cuda.empty_cache()
+                    
+                except Exception as e:
+                    print(f"Error processing batch {batch_idx}: {e}")
+                    continue
+            
+            # Log epoch metrics
+            wandb.log({
+                'epoch': epoch,
+                **{k: v.avg for k, v in running_metrics.items()},
+                'learning_rate_G': self.scheduler_G.get_last_lr()[0],
+                'learning_rate_D': self.scheduler_D.get_last_lr()[0]
+            })
+            
+            
+            # Step schedulers
+            self.scheduler_G.step()
+            self.scheduler_D.step()
+            
+            dataset.reset_pairs()  # This now calls grow_dataset()
+
+            # Save checkpoint
+            if (epoch + 1) % self.cfg.training.save_interval == 0:
+                self.save_checkpoint(f"checkpoint_epoch_{epoch+1}.pt", running_metrics)
+        
+        wandb.finish()
+
     def train_step(self, source_frame, driving_frame, source_frame_star, driving_frame_star):
         """Training step with accelerator-prepared models"""
         with self.accelerator.accumulate(self.Gbase):
@@ -336,7 +388,7 @@ class VASAStage1Trainer:
             # Feature matching loss
             loss_fm = F.mse_loss(pred_frame, driving_frame)
             
-            # Cross-reenactment and cycle consistency
+            # Cross-reenactment
             cross_reenacted_image = self.Gbase(source_frame_star, driving_frame)
             
             # Calculate motion encodings with reduced memory usage
@@ -351,7 +403,7 @@ class VASAStage1Trainer:
             N = [(z_pred, zd_star), (z_star_pred, zd_star)]
             loss_cycle = cosine_loss(P, N)
             
-            # Total generator loss
+            # Total generator loss 
             loss_G = (self.cfg.training.w_per * loss_perceptual +
                     self.cfg.training.w_adv * loss_G_adv +
                     self.cfg.training.w_fm * loss_fm +
@@ -366,72 +418,6 @@ class VASAStage1Trainer:
                 'loss_cycle': loss_cycle,
                 'pred_frame': pred_frame
             }
-
-
-    def train(self, train_loader, start_epoch=0):
-            """Training loop using accelerator-prepared components"""
-            for epoch in range(start_epoch, self.cfg.training.base_epochs):
-                print(f"Epoch: {epoch}")
-                
-                running_metrics = defaultdict(lambda: RunningAverage())
-                progress_bar = tqdm(self.dataloader, desc=f'Epoch {epoch}')  # Use prepared dataloader
-                
-                for batch_idx, batch in enumerate(progress_bar):
-                    # No need to move batch to device - accelerator handles this
-                    for idx in range(len(batch['driving_frames'])):
-                        source_frame = batch['source_frames'][idx % len(batch['source_frames'])]
-                        driving_frame = batch['driving_frames'][idx % len(batch['driving_frames'])]
-                        source_frame_star = batch['source_frames_star'][idx % len(batch['source_frames_star'])]
-                        driving_frame_star = batch['driving_frames_star'][idx % len(batch['driving_frames_star'])]
-                        
-                        # Training step
-                        metrics = self.train_step(
-                            source_frame, driving_frame,
-                            source_frame_star, driving_frame_star
-                        )
-                        
-                        # Use accelerator for backwards pass
-                        self.accelerator.backward(metrics['loss_G'])
-                        self.optimizer_G.step()
-                        self.optimizer_G.zero_grad()
-                        
-                        self.accelerator.backward(metrics['loss_D'])
-                        self.optimizer_D.step()
-                        self.optimizer_D.zero_grad()
-
-                        
-                        # Log images periodically
-                        if idx == 0 and batch_idx % self.cfg.training.log_interval == 0:
-                            wandb.log({
-                                "source_frame": wandb.Image(source_frame),
-                                "driving_frame": wandb.Image(driving_frame),
-                                "predicted_frame": wandb.Image(metrics['pred_frame'])
-                            })
-                        
-                        # Clean up memory
-                        del metrics
-                        torch.cuda.empty_cache()
-                    
-                    # Update progress bar
-                    progress_bar.set_postfix({k: f"{v.avg:.4f}" for k, v in running_metrics.items()})
-                
-                # Log epoch metrics
-                wandb.log({
-                    'epoch': epoch,
-                    **{k: v.avg for k, v in running_metrics.items()},
-                    'learning_rate_G': self.scheduler_G.get_last_lr()[0],
-                    'learning_rate_D': self.scheduler_D.get_last_lr()[0]
-                })
-                
-                # Step schedulers
-                self.scheduler_G.step()
-                self.scheduler_D.step()
-                
-                # Save checkpoint
-                if (epoch + 1) % self.cfg.training.save_interval == 0:
-                    self.save_checkpoint(f"checkpoint_epoch_{epoch+1}.pt", running_metrics)
-            
-            wandb.finish()
 
 
     def save_checkpoint(self, filename, metrics):
@@ -465,9 +451,9 @@ def main(cfg: OmegaConf) -> None:
 
     dataset = VideoDataset(
         video_dir=cfg.training.video_dir,
-        width=256,
-        height=256,
-        n_pairs=10000,
+        width=512,
+        height=512,
+        initial_pairs=10,
         cache_dir=cfg.training.cache_video_dir,
         transform=transform,
         remove_background=True,

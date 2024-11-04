@@ -25,7 +25,7 @@ training:
   lambda_gaze: 1.0
   lambda_supervised: 1.0
   lambda_unsupervised: 1.0
-  batch_size: 4
+  batch_size: 16
   num_workers: 0
   lr: 1.0e-5
   base_epochs: 100
