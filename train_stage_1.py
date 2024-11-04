@@ -101,21 +101,16 @@ def discriminator_loss(real_pred, fake_pred, loss_type='lsgan'):
     
     return ((real_loss + fake_loss) * 0.5).requires_grad_()
 
-
 def cosine_loss(positive_pairs, negative_pairs, margin=0.5, scale=5):
     """
     Calculates the cosine loss for the positive and negative pairs.
-
-    Args:
-        positive_pairs (list): List of tuples containing positive pairs (z_i, z_j).
-        negative_pairs (list): List of tuples containing negative pairs (z_i, z_j).
-        margin (float): Margin value for the cosine distance (default: 0.5).
-        scale (float): Scaling factor for the cosine distance (default: 5).
-
-    Returns:
-        torch.Tensor: Cosine loss value.
+    Returns a scalar loss value.
     """
     def cosine_distance(z_i, z_j):
+        # Ensure inputs are 2D tensors
+        z_i = z_i.view(z_i.size(0), -1)
+        z_j = z_j.view(z_j.size(0), -1)
+        
         # Normalize the feature vectors
         z_i = F.normalize(z_i, dim=-1)
         z_j = F.normalize(z_j, dim=-1)
@@ -129,17 +124,18 @@ def cosine_loss(positive_pairs, negative_pairs, margin=0.5, scale=5):
         return cos_dist
 
     # Calculate the cosine distance for positive pairs
-    pos_cos_dist = [cosine_distance(z_i, z_j) for z_i, z_j in positive_pairs]
-    pos_cos_dist = torch.stack(pos_cos_dist)
-
-    # Calculate the cosine distance for negative pairs
-    neg_cos_dist = [cosine_distance(z_i, z_j) for z_i, z_j in negative_pairs]
-    neg_cos_dist = torch.stack(neg_cos_dist)
-
-    # Calculate the cosine loss
-    loss = -torch.log(torch.exp(pos_cos_dist) / (torch.exp(pos_cos_dist) + torch.sum(torch.exp(neg_cos_dist))))
+    pos_cos_dist = torch.stack([cosine_distance(z_i, z_j) for z_i, z_j in positive_pairs])
     
-    return loss.mean().requires_grad_()
+    # Calculate the cosine distance for negative pairs
+    neg_cos_dist = torch.stack([cosine_distance(z_i, z_j) for z_i, z_j in negative_pairs])
+    
+    # Calculate the cosine loss and ensure it's a scalar
+    numerator = torch.exp(pos_cos_dist)
+    denominator = numerator + torch.sum(torch.exp(neg_cos_dist), dim=0)
+    loss = -torch.log(numerator / denominator)
+    
+    # Return mean over batch
+    return loss.mean()
 
 class RunningAverage:
     """Efficient running average computation"""
@@ -263,6 +259,7 @@ class VASAStage1Trainer:
         )
         
         self.dataloader = dataloader  # Save prepared dataloader
+        self.dataset = dataloader.dataset
 
 
  
@@ -275,12 +272,12 @@ class VASAStage1Trainer:
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
-
     def train(self, train_loader, start_epoch=0):
         """Training loop for paired data"""
         for epoch in range(start_epoch, self.cfg.training.base_epochs):
             print(f"Epoch: {epoch}")
             
+            # Initialize metrics for loss values only
             running_metrics = defaultdict(lambda: RunningAverage())
             progress_bar = tqdm(self.dataloader, desc=f'Epoch {epoch}')
             
@@ -291,7 +288,6 @@ class VASAStage1Trainer:
                     driving_frame = batch['driving_frame']
                     
                     # Get next batch for star/reference pairs
-                    # If using accelerator, need to stay in sync
                     source_star = batch['source_frame']
                     driving_star = batch['driving_frame']
                     
@@ -303,10 +299,21 @@ class VASAStage1Trainer:
                         driving_star
                     )
                     
-                    # Update metrics
-                    for k, v in metrics.items():
-                        if isinstance(v, (int, float, torch.Tensor)):
-                            running_metrics[k].update(v.item() if torch.is_tensor(v) else v)
+                    # Update metrics - only for loss values
+                    loss_metrics = {
+                        k: v for k, v in metrics.items() 
+                        if k.startswith('loss_') and isinstance(v, (int, float, torch.Tensor))
+                    }
+                    
+                    for k, v in loss_metrics.items():
+                        if torch.is_tensor(v):
+                            # Ensure the tensor is a scalar before converting to item
+                            if v.numel() == 1:
+                                running_metrics[k].update(v.item())
+                            else:
+                                print(f"Warning: Loss '{k}' has shape {v.shape}, expected scalar")
+                        else:
+                            running_metrics[k].update(v)
                     
                     # Use accelerator for backwards pass
                     self.accelerator.backward(metrics['loss_G'])
@@ -328,14 +335,10 @@ class VASAStage1Trainer:
                                 "driving_star": wandb.Image(driving_star[0].cpu())
                             })
                     
-                    # Log memory usage periodically
-                    if batch_idx % 100 == 0:
-                        current_memory = torch.cuda.memory_allocated()
-                        peak_memory = torch.cuda.max_memory_allocated()
-                        print(f"Memory usage: {current_memory/1e9:.2f}GB (Peak: {peak_memory/1e9:.2f}GB)")
-                    
-                    # Update progress bar
-                    progress_bar.set_postfix({k: f"{v.avg:.4f}" for k, v in running_metrics.items()})
+                    # Update progress bar with loss metrics only
+                    progress_bar.set_postfix({
+                        k: f"{v.avg:.4f}" for k, v in running_metrics.items()
+                    })
                     
                     # Cleanup
                     del metrics
@@ -343,6 +346,8 @@ class VASAStage1Trainer:
                     
                 except Exception as e:
                     print(f"Error processing batch {batch_idx}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     continue
             
             # Log epoch metrics
@@ -353,13 +358,13 @@ class VASAStage1Trainer:
                 'learning_rate_D': self.scheduler_D.get_last_lr()[0]
             })
             
-            
             # Step schedulers
             self.scheduler_G.step()
             self.scheduler_D.step()
             
-            dataset.reset_pairs()  # This now calls grow_dataset()
-
+            # Reset pairs
+            self.dataset.reset_pairs()
+            
             # Save checkpoint
             if (epoch + 1) % self.cfg.training.save_interval == 0:
                 self.save_checkpoint(f"checkpoint_epoch_{epoch+1}.pt", running_metrics)
@@ -372,12 +377,12 @@ class VASAStage1Trainer:
             # Generator forward pass
             pred_frame = self.Gbase(source_frame, driving_frame)
             
-            # Calculate losses
-            loss_perceptual = self.perceptual_loss(pred_frame, source_frame)
+            # Calculate losses - ensure all are scalars
+            loss_perceptual = self.perceptual_loss(pred_frame, driving_frame).mean()
             
             # Discriminator losses
             real_pred = self.Dbase(driving_frame, source_frame)
-            with torch.no_grad():  # Reduce memory usage during backprop
+            with torch.no_grad():
                 fake_pred = self.Dbase(pred_frame.detach(), source_frame)
             loss_D = discriminator_loss(real_pred, fake_pred, loss_type='lsgan')
             
@@ -386,28 +391,42 @@ class VASAStage1Trainer:
             loss_G_adv = -torch.mean(fake_pred)
             
             # Feature matching loss
-            loss_fm = F.mse_loss(pred_frame, driving_frame)
+            loss_fm = F.mse_loss(
+                pred_frame.view(pred_frame.size(0), -1),
+                driving_frame.view(driving_frame.size(0), -1)
+            )
             
-            # Cross-reenactment
+            # Cross-reenactment with proper reduction
             cross_reenacted_image = self.Gbase(source_frame_star, driving_frame)
             
-            # Calculate motion encodings with reduced memory usage
+            # Calculate motion encodings - ensure proper dimensions
             with torch.no_grad():
-                z_pred = self.Gbase.motionEncoder(pred_frame)[-1]
-                zd = self.Gbase.motionEncoder(driving_frame)[-1]
-                z_star_pred = self.Gbase.motionEncoder(cross_reenacted_image)[-1]
-                zd_star = self.Gbase.motionEncoder(driving_frame_star)[-1]
+                z_pred = self.Gbase.motionEncoder(pred_frame)[-1].view(pred_frame.size(0), -1)
+                zd = self.Gbase.motionEncoder(driving_frame)[-1].view(driving_frame.size(0), -1)
+                z_star_pred = self.Gbase.motionEncoder(cross_reenacted_image)[-1].view(cross_reenacted_image.size(0), -1)
+                zd_star = self.Gbase.motionEncoder(driving_frame_star)[-1].view(driving_frame_star.size(0), -1)
             
             # Calculate cycle consistency loss
             P = [(z_pred, zd), (z_star_pred, zd)]
             N = [(z_pred, zd_star), (z_star_pred, zd_star)]
             loss_cycle = cosine_loss(P, N)
             
-            # Total generator loss 
-            loss_G = (self.cfg.training.w_per * loss_perceptual +
-                    self.cfg.training.w_adv * loss_G_adv +
-                    self.cfg.training.w_fm * loss_fm +
-                    self.cfg.training.w_cos * loss_cycle)
+            # Total generator loss with verification
+            loss_G = (
+                self.cfg.training.w_per * loss_perceptual +
+                self.cfg.training.w_adv * loss_G_adv +
+                self.cfg.training.w_fm * loss_fm +
+                self.cfg.training.w_cos * loss_cycle
+            )
+            
+            # Debug prints for loss shapes
+            # print(f"Loss values:")
+            # print(f"Perceptual: {loss_perceptual.item():.4f}")
+            # print(f"Adversarial: {loss_G_adv.item():.4f}")
+            # print(f"Feature matching: {loss_fm.item():.4f}")
+            # print(f"Cycle: {loss_cycle.item():.4f}")
+            # print(f"Total G: {loss_G.item():.4f}")
+            # print(f"D: {loss_D.item():.4f}")
             
             return {
                 'loss_G': loss_G,
@@ -416,9 +435,8 @@ class VASAStage1Trainer:
                 'loss_adversarial': loss_G_adv,
                 'loss_feature_matching': loss_fm,
                 'loss_cycle': loss_cycle,
-                'pred_frame': pred_frame
+                'pred_frame': pred_frame  # Keep this for visualization only
             }
-
 
     def save_checkpoint(self, filename, metrics):
         checkpoint = {
@@ -453,7 +471,7 @@ def main(cfg: OmegaConf) -> None:
         video_dir=cfg.training.video_dir,
         width=512,
         height=512,
-        initial_pairs=10,
+        initial_pairs=1,
         cache_dir=cfg.training.cache_video_dir,
         transform=transform,
         remove_background=True,
