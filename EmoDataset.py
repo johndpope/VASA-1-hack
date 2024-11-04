@@ -312,13 +312,20 @@ class EMODataset(Dataset):
             processed_frames.append(image_frame)
         return processed_frames
 
-    def __getitem__(self, index: int) -> Dict[str, Any]:
-        video_id = self.video_ids[index]
-        # Use next item in the list for video_id_star, wrap around if at the end
-        video_id_star = self.video_ids_star[(index + 1) % len(self.video_ids_star)]
-        vid_pil_image_list = self.load_and_process_video(os.path.join(self.video_dir, f"{video_id}.mp4"))
-        vid_pil_image_list_star = self.load_and_process_video(os.path.join(self.video_dir, f"{video_id_star}.mp4"))
 
+
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        while True: # Keep trying until we get a valid video
+            try:
+                video_id = self.video_ids[index]
+                # Use next item in the list for video_id_star, wrap around if at the end
+                video_id_star = self.video_ids_star[(index + 1) % len(self.video_ids_star)]
+                vid_pil_image_list = self.load_and_process_video(os.path.join(self.video_dir, f"{video_id}.mp4"))
+                vid_pil_image_list_star = self.load_and_process_video(os.path.join(self.video_dir, f"{video_id_star}.mp4"))
+
+                break
+            except Exception as e:
+                print(f"Error loading video {index}: {e}")
         sample = {
             "video_id": video_id,
             "source_frames": vid_pil_image_list,
@@ -328,3 +335,5 @@ class EMODataset(Dataset):
             "driving_frames_star": self.driving_vid_pil_image_list_star,
         }
         return sample
+    
+

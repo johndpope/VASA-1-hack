@@ -4,7 +4,14 @@ data:
   sample_rate: 25 
   n_sample_frames: 1
   n_motion_frames: 2
+  frame_size: [512, 512]
+  train_data: ./junk # data/voxceleb2/train
+  val_data: ./junk  #data/voxceleb2/val
+  max_videos: null
+  cache_audio: true
+  preextract_audio: true
 training:
+  log_dir: './logs'
   project_name: "vasa-training"
   gradient_accumulation_steps: 1
   frame_offset: 20
@@ -18,7 +25,7 @@ training:
   lambda_gaze: 1.0
   lambda_supervised: 1.0
   lambda_unsupervised: 1.0
-  batch_size: 24
+  batch_size: 1
   num_workers: 0
   lr: 1.0e-5
   base_epochs: 100
@@ -40,3 +47,14 @@ training:
   w_pairwise: 1
   w_identity: 1
   w_cyc:  1
+
+
+
+  num_epochs: 100
+  learning_rate: 2.0e-4
+  min_lr: 1.0e-6
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 0.01
+  save_frequency: 5
+  checkpoint_dir: "checkpoints/stage1"

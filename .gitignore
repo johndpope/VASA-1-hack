@@ -13,3 +13,6 @@ junk/audio_cache/-2KGPYEFnsU_8.wav
 junk/audio_cache/-2KGPYEFnsU_11.wav
 junk/audio_cache/audio_status.json
 junk/audio_cache/M2Ohb0FAaJU_1.wav
+
+logs/*
+wandb/*
