@@ -152,6 +152,78 @@ class RunningAverage:
         self.count += 1
 
 
+
+
+def custom_collate_fn(batch):
+    """
+    Custom collate function for batching video frames of different sizes.
+    
+    Args:
+        batch: List of dictionaries containing video data
+        
+    Returns:
+        Dictionary with batched and padded tensors
+    """
+    # Initialize empty lists for each key in the batch
+    batch_dict = {
+        "video_id": [],
+        "source_frames": [],
+        "driving_frames": [],
+        "video_id_star": [],
+        "source_frames_star": [],
+        "driving_frames_star": []
+    }
+    
+    # Collect all frame tensors to determine max dimensions
+    all_frames = []
+    for item in batch:
+        all_frames.extend(item['source_frames'])
+        all_frames.extend(item['driving_frames'])
+        all_frames.extend(item['source_frames_star'])
+        all_frames.extend(item['driving_frames_star'])
+    
+    # Find maximum dimensions
+    max_height = max(frame.shape[1] for frame in all_frames)
+    max_width = max(frame.shape[2] for frame in all_frames)
+    
+    def pad_and_stack_frames(frames):
+        """Helper function to pad and stack frames to maximum dimensions"""
+        padded_frames = []
+        for frame in frames:
+            # Calculate padding sizes
+            pad_h = max_height - frame.shape[1]
+            pad_w = max_width - frame.shape[2]
+            
+            # Pad frame to match maximum dimensions
+            padded_frame = torch.nn.functional.pad(
+                frame,
+                (0, pad_w, 0, pad_h),  # padding left, right, top, bottom
+                mode='constant',
+                value=0
+            )
+            padded_frames.append(padded_frame)
+        
+        return torch.stack(padded_frames) if padded_frames else torch.tensor([])
+    
+    # Process each item in the batch
+    for item in batch:
+        batch_dict['video_id'].append(item['video_id'])
+        batch_dict['video_id_star'].append(item['video_id_star'])
+        
+        # Pad and stack frames
+        batch_dict['source_frames'].append(pad_and_stack_frames(item['source_frames']))
+        batch_dict['driving_frames'].append(pad_and_stack_frames(item['driving_frames']))
+        batch_dict['source_frames_star'].append(pad_and_stack_frames(item['source_frames_star']))
+        batch_dict['driving_frames_star'].append(pad_and_stack_frames(item['driving_frames_star']))
+    
+    # Stack all frame tensors along batch dimension
+    batch_dict['source_frames'] = torch.stack(batch_dict['source_frames'])
+    batch_dict['driving_frames'] = torch.stack(batch_dict['driving_frames'])
+    batch_dict['source_frames_star'] = torch.stack(batch_dict['source_frames_star'])
+    batch_dict['driving_frames_star'] = torch.stack(batch_dict['driving_frames_star'])
+    
+    return batch_dict
+
 class VASAStage1Trainer:
     def __init__(self, cfg, Gbase, Dbase, dataloader):
         self.cfg = cfg
@@ -402,12 +474,12 @@ def main(cfg: OmegaConf) -> None:
         video_dir=cfg.training.video_dir,
         json_file=cfg.training.json_file,
         transform=transform,
-        apply_crop_warping=False # this is broken...
+        apply_warping=True  
     )
 
 
     
-    dataloader = DataLoader(dataset, batch_size=cfg.training.batch_size, shuffle=True, num_workers=1)
+    dataloader = DataLoader(dataset, batch_size=cfg.training.batch_size, shuffle=True, num_workers=1, collate_fn=custom_collate_fn)
 
     
     Gbase = model.Gbase()
