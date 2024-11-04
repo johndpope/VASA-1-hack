@@ -5,7 +5,7 @@ import torchvision.transforms as transforms
 from torch.utils.data import Dataset
 import json
 import os
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 from decord import VideoReader, cpu
 from rembg import remove
 import io
@@ -20,9 +20,16 @@ import random
 from skimage.transform import PiecewiseAffineTransform, warp
 import gc
 from memory_profiler import profile
+import math
 
 class EMODataset(Dataset):
-    def __init__(self, use_gpu: False, sample_rate: int, n_sample_frames: int, width: int, height: int, img_scale: Tuple[float, float], img_ratio: Tuple[float, float] = (0.9, 1.0), video_dir: str = ".", drop_ratio: float = 0.1, json_file: str = "", stage: str = 'stage1', transform: transforms.Compose = None, remove_background=False, use_greenscreen=False, apply_warping=False):
+    def __init__(self, use_gpu: False, sample_rate: int, n_sample_frames: int, width: int, height: int, 
+                 img_scale: Tuple[float, float], img_ratio: Tuple[float, float] = (0.9, 1.0), 
+                 video_dir: str = ".", drop_ratio: float = 0.1, json_file: str = "", 
+                 stage: str = 'stage1', transform: transforms.Compose = None, 
+                 remove_background=False, use_greenscreen=False, apply_warping=False,
+                 max_frames: Optional[int] = None,
+                 duplicate_short: bool = True):
         self.sample_rate = sample_rate
         self.n_sample_frames = n_sample_frames
         self.width = width
@@ -37,6 +44,8 @@ class EMODataset(Dataset):
         self.remove_background = remove_background
         self.use_greenscreen = use_greenscreen
         self.apply_warping = apply_warping
+        self.max_frames = max_frames
+        self.duplicate_short = duplicate_short
         
         with open(json_file, 'r') as f:
             self.celebvhq_info = json.load(f)
@@ -68,31 +77,27 @@ class EMODataset(Dataset):
     def __len__(self) -> int:
         return len(self.video_ids)
 
-    def apply_warp_transform(self, image_tensor, warp_strength=0.01):
-        # Convert tensor to numpy array for warping
-        if image_tensor.ndim == 4:
-            image_tensor = image_tensor.squeeze(0)
+    def duplicate_frames_to_length(self, frames: List[torch.Tensor], target_length: int) -> List[torch.Tensor]:
+        """
+        Duplicate frames to reach the target length while maintaining temporal consistency
+        """
+        if not frames:
+            return frames
+            
+        current_length = len(frames)
+        if current_length >= target_length:
+            return frames[:target_length]
+            
+        # Calculate how many times we need to repeat frames and if we need extra frames
+        repeat_times = math.ceil(target_length / current_length)
+        duplicated_frames = []
         
-        image = to_pil_image(image_tensor)
-        image_array = np.array(image)
-        
-        # Generate random control points for warping
-        rows, cols = image_array.shape[:2]
-        src_points = np.array([[0, 0], [cols-1, 0], [0, rows-1], [cols-1, rows-1]])
-        dst_points = src_points + np.random.randn(4, 2) * (rows * warp_strength)
-        
-        # Create and apply the warping transform
-        tps = PiecewiseAffineTransform()
-        tps.estimate(src_points, dst_points)
-        
-        # Apply warping to each channel separately to handle RGB
-        warped_array = np.zeros_like(image_array)
-        for i in range(image_array.shape[2]):
-            warped_array[..., i] = warp(image_array[..., i], tps, output_shape=(rows, cols))
-        
-        # Convert back to PIL Image and then to tensor
-        warped_image = Image.fromarray((warped_array * 255).astype(np.uint8))
-        return to_tensor(warped_image)
+        # Repeat the sequence as needed
+        for _ in range(repeat_times):
+            duplicated_frames.extend(frames)
+            
+        # Trim to exact length
+        return duplicated_frames[:target_length]
 
     def load_and_process_video(self, video_path: str) -> List[torch.Tensor]:
         video_id = Path(video_path).stem
@@ -105,6 +110,11 @@ class EMODataset(Dataset):
             print(f"Loading processed tensors from file: {tensor_file_path}")
             with np.load(tensor_file_path) as data:
                 tensor_frames = [torch.tensor(data[key]) for key in data]
+                if self.max_frames is not None:
+                    if len(tensor_frames) < self.max_frames and self.duplicate_short:
+                        tensor_frames = self.duplicate_frames_to_length(tensor_frames, self.max_frames)
+                    else:
+                        tensor_frames = tensor_frames[:self.max_frames]
                 del data
                 gc.collect()
                 return tensor_frames
@@ -136,8 +146,16 @@ class EMODataset(Dataset):
             del video_reader
             gc.collect()
             
+            # Save all processed frames to cache
             np.savez_compressed(tensor_file_path, *[tensor_frame.numpy() for tensor_frame in tensor_frames])
             print(f"Processed tensors saved to file: {tensor_file_path}")
+            
+            # Apply max_frames and duplication if needed
+            if self.max_frames is not None:
+                if len(tensor_frames) < self.max_frames and self.duplicate_short:
+                    tensor_frames = self.duplicate_frames_to_length(tensor_frames, self.max_frames)
+                else:
+                    tensor_frames = tensor_frames[:self.max_frames]
             
             return tensor_frames
             
@@ -145,6 +163,32 @@ class EMODataset(Dataset):
             del processed_frames
             gc.collect()
             torch.cuda.empty_cache()
+
+    def apply_warp_transform(self, image_tensor, warp_strength=0.01):
+        # Convert tensor to numpy array for warping
+        if image_tensor.ndim == 4:
+            image_tensor = image_tensor.squeeze(0)
+        
+        image = to_pil_image(image_tensor)
+        image_array = np.array(image)
+        
+        # Generate random control points for warping
+        rows, cols = image_array.shape[:2]
+        src_points = np.array([[0, 0], [cols-1, 0], [0, rows-1], [cols-1, rows-1]])
+        dst_points = src_points + np.random.randn(4, 2) * (rows * warp_strength)
+        
+        # Create and apply the warping transform
+        tps = PiecewiseAffineTransform()
+        tps.estimate(src_points, dst_points)
+        
+        # Apply warping to each channel separately to handle RGB
+        warped_array = np.zeros_like(image_array)
+        for i in range(image_array.shape[2]):
+            warped_array[..., i] = warp(image_array[..., i], tps, output_shape=(rows, cols))
+        
+        # Convert back to PIL Image and then to tensor
+        warped_image = Image.fromarray((warped_array * 255).astype(np.uint8))
+        return to_tensor(warped_image)
 
     def augmentation(self, images, transform, state=None):
         if state is not None:

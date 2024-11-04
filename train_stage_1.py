@@ -153,7 +153,6 @@ class RunningAverage:
 
 
 
-
 def custom_collate_fn(batch):
     """
     Custom collate function for batching video frames of different sizes.
@@ -465,7 +464,7 @@ def main(cfg: OmegaConf) -> None:
 
     dataset = EMODataset(
         use_gpu=use_cuda,
-        remove_background=False,
+        remove_background=True,
         width=cfg.data.train_width,
         height=cfg.data.train_height,
         n_sample_frames=cfg.training.n_sample_frames,
@@ -474,12 +473,22 @@ def main(cfg: OmegaConf) -> None:
         video_dir=cfg.training.video_dir,
         json_file=cfg.training.json_file,
         transform=transform,
+        max_frames=100,  # Desired number of frames
         apply_warping=True  
     )
 
 
-    
-    dataloader = DataLoader(dataset, batch_size=cfg.training.batch_size, shuffle=True, num_workers=1, collate_fn=custom_collate_fn)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=cfg.training.batch_size,
+        shuffle=True,
+        num_workers=1,  # Reduce number of workers to manage memory better
+        collate_fn=custom_collate_fn,
+        pin_memory=False,  # Disable pin_memory to reduce memory usage
+        persistent_workers=True,  # Keep workers alive between iterations
+        prefetch_factor=2,  # Reduce prefetch factor to manage memory
+    )
+
 
     
     Gbase = model.Gbase()
