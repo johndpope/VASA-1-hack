@@ -177,7 +177,7 @@ class EMODataset(Dataset):
         else:
             return None, None
 
-    @profile
+    # @profile
     def load_and_process_video(self, video_path: str) -> List[torch.Tensor]:
         video_id = Path(video_path).stem
         output_dir = Path(self.video_dir + "/" + video_id)

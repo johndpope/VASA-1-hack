@@ -8,3 +8,4 @@ seaborn
 hydra-core
 rich 
 memory_profiler
+git+https://github.com/pythonprofilers/memory_profiler.git

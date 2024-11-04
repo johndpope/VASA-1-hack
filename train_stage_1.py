@@ -242,7 +242,7 @@ class VASAStage1Trainer:
             torch.cuda.synchronize()
 
 
-    @profile
+    # @profile
     def train_step(self, source_frame, driving_frame, source_frame_star, driving_frame_star):
         """Training step with accelerator-prepared models"""
         with self.accelerator.accumulate(self.Gbase):
@@ -402,7 +402,7 @@ def main(cfg: OmegaConf) -> None:
         video_dir=cfg.training.video_dir,
         json_file=cfg.training.json_file,
         transform=transform,
-        apply_crop_warping=False
+        apply_crop_warping=False # this is broken...
     )
 
 

@@ -50,7 +50,7 @@ class VASAStage2Trainer:
         self.accelerator = Accelerator(
             gradient_accumulation_steps=config.training.gradient_accumulation_steps,
             log_with="wandb",
-            mixed_precision="fp16",
+            mixed_precision=None
         )
 
         # Initialize trackers
