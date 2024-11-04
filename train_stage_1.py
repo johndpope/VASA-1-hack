@@ -163,7 +163,7 @@ class VASAStage1Trainer:
             mixed_precision=None
         )
         
-        experiment_name = "test1"
+        experiment_name = "megaportraits"
         print(f"Generated experiment name: {experiment_name}")
 
         # Initialize trackers
