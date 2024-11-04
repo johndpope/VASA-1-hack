@@ -24,7 +24,9 @@ I update progress here - https://github.com/johndpope/VASA-1-hack/issues/20
 
 models seem good
 
-trainer is in progress.
+stage 1 trainer I had working some time back - running into OOM problems...
+https://github.com/johndpope/MegaPortrait-hack/tree/5fb4398634c0e27c60d850d4ab997f9b1df2c3fe
+
 
 https://wandb.ai/snoozie/vasa?nw=nwusersnoozie
 
@@ -32,6 +34,11 @@ https://wandb.ai/snoozie/vasa?nw=nwusersnoozie
 
 ```shell
 python dataset_testing.py 
+
+
+
+
+ulimit -n 65535
 
 
 

@@ -223,19 +223,11 @@ class VASAStage1Trainer:
 
             with torch.cuda.amp.autocast():
                 # Generator forward passes
-                pred_frame, pred_pyramids = self.Gbase(source_frame, driving_frame)
-                cross_frame, _ = self.Gbase(source_frame_star, driving_frame)
+                pred_frame = self.Gbase(source_frame, driving_frame)
+                cross_frame = self.Gbase(source_frame_star, driving_frame)
 
-                # Compute perceptual pyramid loss
-                loss_perceptual = 0
-                for scale, pred in pred_pyramids.items():
-                    target = F.interpolate(
-                        driving_frame, 
-                        size=pred.shape[2:],
-                        mode='bilinear',
-                        align_corners=False
-                    )
-                    loss_perceptual += self.perceptual_loss(pred, target)
+                # Compute perceptual loss
+                loss_perceptual = self.perceptual_loss(pred_frame, driving_frame)
 
                 # Extract motion codes
                 _, _, zs = self.Gbase.motionEncoder(source_frame)
@@ -262,6 +254,7 @@ class VASAStage1Trainer:
                 )
                 
                 loss_identity = self.identity_loss(
+                      self.Gbase,
                     source_frame_star,
                     next_frame_star
                 )
@@ -392,7 +385,7 @@ class VASAStage1Trainer:
                 source_frame = batch['source_frames'][:4]  # Take first 4 samples
                 driving_frame = batch['driving_frames'][:4]
                 
-                pred_frame, _ = self.Gbase(source_frame, driving_frame)
+                pred_frame = self.Gbase(source_frame, driving_frame)
                 
                 # Create grid of images
                 images = {
@@ -455,7 +448,7 @@ def main(cfg: OmegaConf) -> None:
 
     dataset = EMODataset(
         use_gpu=use_cuda,
-        remove_background=True,
+        remove_background=False,
         width=cfg.data.train_width,
         height=cfg.data.train_height,
         n_sample_frames=cfg.training.n_sample_frames,
@@ -464,12 +457,12 @@ def main(cfg: OmegaConf) -> None:
         video_dir=cfg.training.video_dir,
         json_file=cfg.training.json_file,
         transform=transform,
-        apply_crop_warping=True
+        apply_crop_warping=False
     )
 
 
     
-    dataloader = DataLoader(dataset, batch_size=cfg.training.batch_size, shuffle=True, num_workers=0)
+    dataloader = DataLoader(dataset, batch_size=cfg.training.batch_size, shuffle=True, num_workers=1)
 
     
     Gbase = model.Gbase().to(device)

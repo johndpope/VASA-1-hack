@@ -1134,7 +1134,6 @@ class Gbase(nn.Module):
         self.G3d = G3d(in_channels=96)
         self.G2d = G2d(in_channels=96)
 
-        self.image_pyramid = ImagePyramide(scales=[0.5, 0.25], num_channels=3)
 
 #    @profile
     def forward(self, xs, xd):
@@ -1171,13 +1170,12 @@ class Gbase(nn.Module):
         vc2d_projected = torch.sum(vc2d_warped, dim=2)
 
         # Pass projected features through G2d to obtain the final output image (xhat)
-        xhat_base = self.G2d(vc2d_projected)
-
+        # xhat_base = self.G2d(vc2d_projected)
+        xhat = self.G2d(vc2d_projected)
         #self.visualize_warp_fields(xs, xd, w_s2c, w_c2d, Rs, ts, Rd, td)
        
-        pyramids = self.image_pyramid(xhat_base)
 
-        return xhat_base, pyramids
+        return xhat
 
     def visualize_warp_fields(self, xs, xd, w_s2c, w_c2d, Rs, ts, Rd, td):
         """
