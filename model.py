@@ -12,16 +12,9 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from resnet import ResNet,Bottleneck, resnet18
-import torchvision.models as models
 import math
 import colored_traceback.auto
-from torchsummary import summary
-from resnet50 import ResNet50
-from memory_profiler import profile
-import logging
 import cv2
-import torchvision.models as models
 from facenet_pytorch import InceptionResnetV1
 import torchvision.transforms as transforms
 from torchvision.transforms.functional import to_pil_image, to_tensor
@@ -208,30 +201,30 @@ class Eapp(nn.Module):
         super().__init__()
         
           # First part: producing volumetric features vs
-        self.conv = nn.Conv2d(3, 64, 7, stride=1, padding=3).to(device)
-        self.resblock_128 = ResBlock_Custom(dimension=2, in_channels=64, out_channels=128).to(device)
-        self.resblock_256 = ResBlock_Custom(dimension=2, in_channels=128, out_channels=256).to(device)
-        self.resblock_512 = ResBlock_Custom(dimension=2, in_channels=256, out_channels=512).to(device)
+        self.conv = nn.Conv2d(3, 64, 7, stride=1, padding=3)
+        self.resblock_128 = ResBlock_Custom(dimension=2, in_channels=64, out_channels=128)
+        self.resblock_256 = ResBlock_Custom(dimension=2, in_channels=128, out_channels=256)
+        self.resblock_512 = ResBlock_Custom(dimension=2, in_channels=256, out_channels=512)
 
         # round 0
-        self.resblock3D_96 = ResBlock3D_Adaptive(in_channels=96, out_channels=96).to(device)
-        self.resblock3D_96_2 = ResBlock3D_Adaptive(in_channels=96, out_channels=96).to(device)
+        self.resblock3D_96 = ResBlock3D_Adaptive(in_channels=96, out_channels=96)
+        self.resblock3D_96_2 = ResBlock3D_Adaptive(in_channels=96, out_channels=96)
 
         # round 1
-        self.resblock3D_96_1 = ResBlock3D_Adaptive(in_channels=96, out_channels=96).to(device)
-        self.resblock3D_96_1_2 = ResBlock3D_Adaptive(in_channels=96, out_channels=96).to(device)
+        self.resblock3D_96_1 = ResBlock3D_Adaptive(in_channels=96, out_channels=96)
+        self.resblock3D_96_1_2 = ResBlock3D_Adaptive(in_channels=96, out_channels=96)
 
         # round 2
-        self.resblock3D_96_2 = ResBlock3D_Adaptive(in_channels=96, out_channels=96).to(device)
-        self.resblock3D_96_2_2 = ResBlock3D_Adaptive(in_channels=96, out_channels=96).to(device)
+        self.resblock3D_96_2 = ResBlock3D_Adaptive(in_channels=96, out_channels=96)
+        self.resblock3D_96_2_2 = ResBlock3D_Adaptive(in_channels=96, out_channels=96)
 
-        self.conv_1 = nn.Conv2d(in_channels=512, out_channels=1536, kernel_size=1, stride=1, padding=0).to(device)
+        self.conv_1 = nn.Conv2d(in_channels=512, out_channels=1536, kernel_size=1, stride=1, padding=0)
 
         # Adjusted AvgPool to reduce spatial dimensions effectively
-        self.avgpool = nn.AvgPool2d(kernel_size=2, stride=2, padding=0).to(device)
+        self.avgpool = nn.AvgPool2d(kernel_size=2, stride=2, padding=0)
 
         # Second part: producing global descriptor es
-        self.custom_resnet50 = CustomResNet50().to(device)
+        self.custom_resnet50 = CustomResNet50()
         '''
         ### TODO 2: Change vs/es here for vector size
         According to the description of the paper (Page11: predict the head pose and expression vector), 
@@ -416,24 +409,24 @@ class FlowField(nn.Module):
     def __init__(self):
         super(FlowField, self).__init__()
         
-        self.conv1x1 = nn.Conv2d(512, 2048, kernel_size=1).to(device)
+        self.conv1x1 = nn.Conv2d(512, 2048, kernel_size=1)
 
 
         
         # reshape the tensor from [batch_size, 2048, height, width] to [batch_size, 512, 4, height, width], effectively splitting the channels into a channels dimension of size 512 and a depth dimension of size 4.
-        self.reshape_layer = lambda x: x.view(-1, 512, 4, *x.shape[2:]).to(device)
+        self.reshape_layer = lambda x: x.view(-1, 512, 4, *x.shape[2:])
 
-        self.resblock1 = ResBlock3D_Adaptive(in_channels=512, out_channels=256).to(device)
-        self.upsample1 = nn.Upsample(scale_factor=(2, 2, 2)).to(device)
-        self.resblock2 = ResBlock3D_Adaptive( in_channels=256, out_channels=128).to(device)
-        self.upsample2 = nn.Upsample(scale_factor=(2, 2, 2)).to(device)
-        self.resblock3 =  ResBlock3D_Adaptive( in_channels=128, out_channels=64).to(device)
-        self.upsample3 = nn.Upsample(scale_factor=(1, 2, 2)).to(device)
-        self.resblock4 = ResBlock3D_Adaptive( in_channels=64, out_channels=32).to(device)
-        self.upsample4 = nn.Upsample(scale_factor=(1, 2, 2)).to(device)
-        self.conv3x3x3 = nn.Conv3d(32, 3, kernel_size=3, padding=1).to(device)
-        self.gn = nn.GroupNorm(1, 3).to(device)
-        self.tanh = nn.Tanh().to(device)
+        self.resblock1 = ResBlock3D_Adaptive(in_channels=512, out_channels=256)
+        self.upsample1 = nn.Upsample(scale_factor=(2, 2, 2))
+        self.resblock2 = ResBlock3D_Adaptive( in_channels=256, out_channels=128)
+        self.upsample2 = nn.Upsample(scale_factor=(2, 2, 2))
+        self.resblock3 =  ResBlock3D_Adaptive( in_channels=128, out_channels=64)
+        self.upsample3 = nn.Upsample(scale_factor=(1, 2, 2))
+        self.resblock4 = ResBlock3D_Adaptive( in_channels=64, out_channels=32)
+        self.upsample4 = nn.Upsample(scale_factor=(1, 2, 2))
+        self.conv3x3x3 = nn.Conv3d(32, 3, kernel_size=3, padding=1)
+        self.gn = nn.GroupNorm(1, 3)
+        self.tanh = nn.Tanh()
     
 #    @profile
     def forward(self, zs,adaptive_gamma, adaptive_beta): # 
@@ -579,7 +572,7 @@ class G3d(nn.Module):
             ResBlock3D(192, 384),
             nn.AvgPool3d(kernel_size=2, stride=2),
             ResBlock3D(384, 768),
-        ).to(device)
+        )
         self.upsampling = nn.Sequential(
             ResBlock3D(768, 384),
             nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True),
@@ -587,8 +580,8 @@ class G3d(nn.Module):
             nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True),
             ResBlock3D(192, 96),
             nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True),
-        ).to(device)
-        self.final_conv = nn.Conv3d(96, 96, kernel_size=3, padding=1).to(device)
+        )
+        self.final_conv = nn.Conv3d(96, 96, kernel_size=3, padding=1)
 
     def forward(self, x):
         x = self.downsampling(x)
@@ -715,8 +708,8 @@ Finally, a 3x3 convolution outputs the synthesized image with 3 color channels.
 class G2d(nn.Module):
     def __init__(self, in_channels):
         super(G2d, self).__init__()
-        self.reshape = nn.Conv2d(96, 1536, kernel_size=1).to(device)  # Reshape C96xD16 → C1536
-        self.conv1x1 = nn.Conv2d(1536, 512, kernel_size=1).to(device)  # 1x1 convolution to reduce channels to 512
+        self.reshape = nn.Conv2d(96, 1536, kernel_size=1)  # Reshape C96xD16 → C1536
+        self.conv1x1 = nn.Conv2d(1536, 512, kernel_size=1)  # 1x1 convolution to reduce channels to 512
 
         self.res_blocks = nn.Sequential(
             ResBlock2D(512, 512),
@@ -727,29 +720,29 @@ class G2d(nn.Module):
             ResBlock2D(512, 512),
             ResBlock2D(512, 512),
             ResBlock2D(512, 512),
-        ).to(device)
+        )
 
         self.upsample1 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
             ResBlock2D(512, 256)
-        ).to(device)
+        )
 
         self.upsample2 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
             ResBlock2D(256, 128)
-        ).to(device)
+        )
 
         self.upsample3 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
             ResBlock2D(128, 64)
-        ).to(device)
+        )
 
         self.final_conv = nn.Sequential(
             nn.GroupNorm(num_groups=32, num_channels=64),
             nn.ReLU(inplace=True), 
             nn.Conv2d(64, 3, kernel_size=3, padding=1),
             nn.Sigmoid()
-        ).to(device)
+        )
 
     def forward(self, x):
         logging.debug(f"G2d > x:{x.shape}")
@@ -871,11 +864,11 @@ class Emtn(nn.Module):
         super().__init__()
         # https://github.com/johndpope/MegaPortrait-hack/issues/19
         # replace this with off the shelf SixDRepNet
-        self.head_pose_net = resnet18(pretrained=True).to(device)
-        self.head_pose_net.fc = nn.Linear(self.head_pose_net.fc.in_features, 6).to(device)  # 6 corresponds to rotation and translation parameters
+        self.head_pose_net = resnet18(pretrained=True)
+        self.head_pose_net.fc = nn.Linear(self.head_pose_net.fc.in_features, 6)  # 6 corresponds to rotation and translation parameters
         self.rotation_net =  SixDRepNet_Detector()
 
-        model = resnet18(pretrained=False,num_classes=512).to(device)  # 512 feature_maps = resnet18(input_image) ->   Should print: torch.Size([1, 512, 7, 7])
+        model = resnet18(pretrained=False,num_classes=512)  # 512 feature_maps = resnet18(input_image) ->   Should print: torch.Size([1, 512, 7, 7])
         # Remove the fully connected layer and the adaptive average pooling layer
         self.expression_net = nn.Sequential(*list(model.children())[:-1])
         self.expression_net.adaptive_pool = nn.AdaptiveAvgPool2d(FEATURE_SIZE)  # https://github.com/neeek2303/MegaPortraits/issues/3
@@ -931,8 +924,8 @@ class WarpGeneratorS2C(nn.Module):
         self.num_channels = COMPRESS_DIM ### TODO 3
         
         # Adaptive parameters are generated by multiplying these sums with learned matrices.
-        self.adaptive_matrix_gamma = nn.Parameter(torch.randn(self.num_channels, self.num_channels)).to(device) ### TODO 3
-        self.adaptive_matrix_beta = nn.Parameter(torch.randn(self.num_channels, self.num_channels)).to(device)
+        self.adaptive_matrix_gamma = nn.Parameter(torch.randn(self.num_channels, self.num_channels)) ### TODO 3
+        self.adaptive_matrix_beta = nn.Parameter(torch.randn(self.num_channels, self.num_channels))
 
 #    @profile
     def forward(self, Rs, ts, zs, es):
@@ -982,8 +975,8 @@ class WarpGeneratorC2D(nn.Module):
         self.num_channels = COMPRESS_DIM ### TODO 3
         
         # Adaptive parameters are generated by multiplying these sums with learned matrices.
-        self.adaptive_matrix_gamma = nn.Parameter(torch.randn(self.num_channels, self.num_channels)).to(device) ### TODO 3
-        self.adaptive_matrix_beta = nn.Parameter(torch.randn(self.num_channels, self.num_channels)).to(device)
+        self.adaptive_matrix_gamma = nn.Parameter(torch.randn(self.num_channels, self.num_channels)) ### TODO 3
+        self.adaptive_matrix_beta = nn.Parameter(torch.randn(self.num_channels, self.num_channels))
 
 #    @profile
     def forward(self, Rd, td, zd, es):
@@ -1124,6 +1117,7 @@ Finally, the projected features (vc2d_projected) are passed through the 2D convo
 import matplotlib.pyplot as plt
 
 
+
 class Gbase(nn.Module):
     def __init__(self):
         super(Gbase, self).__init__()
@@ -1135,7 +1129,7 @@ class Gbase(nn.Module):
         self.G2d = G2d(in_channels=96)
 
 
-#    @profile
+    # @profile
     def forward(self, xs, xd):
         vs, es = self.appearanceEncoder(xs)
    
@@ -1931,18 +1925,18 @@ class PerceptualLoss(nn.Module):
 
         # VGG19 network
         vgg19 = models.vgg19(pretrained=True).features
-        self.vgg19 = nn.Sequential(*[vgg19[i] for i in range(30)]).to(device).eval()
+        self.vgg19 = nn.Sequential(*[vgg19[i] for i in range(30)]).eval()
         self.vgg19_layers = [1, 6, 11, 20, 29]
 
         # VGGFace network
-        self.vggface = InceptionResnetV1(pretrained='vggface2').to(device).eval()
+        self.vggface = InceptionResnetV1(pretrained='vggface2').eval()
         self.vggface_layers = [4, 5, 6, 7]
 
         # Gaze loss
         self.gaze_loss = MPGazeLoss(device)
 
         # LPips   
-        self.lpips = LPIPS(net='vgg').to(device).eval()
+        self.lpips = LPIPS(net='vgg').eval()
 
     def forward(self, predicted, target, use_fm_loss=False):
         # Normalize input images
@@ -2166,7 +2160,7 @@ def get_foreground_mask(image):
 
     # Move the input tensor to the same device as the model
     device = next(model.parameters()).device
-    input_tensor = input_tensor.to(device)
+    input_tensor = input_tensor
 
     # Perform the segmentation
     with torch.no_grad():
@@ -2178,12 +2172,16 @@ def get_foreground_mask(image):
     # Convert the segmentation mask to a binary foreground mask
     foreground_mask = (mask == 15).float()  # Assuming class 15 represents the person class
 
-    return foreground_mask.to(device)
+    return foreground_mask
 
+
+from memory_profiler import profile
 
 class PairwiseTransferLoss(nn.Module):
     def __init__(self):
         super(PairwiseTransferLoss, self).__init__()
+
+
 
     def forward(self, Gbase, I1, I2):
         # Extract appearance features and motion parameters

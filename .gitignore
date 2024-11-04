@@ -16,3 +16,4 @@ junk/audio_cache/M2Ohb0FAaJU_1.wav
 
 logs/*
 wandb/*
+*.dat

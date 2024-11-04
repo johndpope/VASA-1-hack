@@ -6,3 +6,5 @@ torchaudio
 vgg19
 seaborn
 hydra-core
+rich 
+memory_profiler

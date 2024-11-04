@@ -19,7 +19,7 @@ import torchvision.transforms as transforms
 import os
 import torchvision.utils as vutils
 import time
-from torch.cuda.amp import autocast, GradScaler
+
 from torch.autograd import Variable
 
 from scipy.linalg import sqrtm
@@ -34,8 +34,17 @@ import accelerate
 from tqdm import tqdm
 from utils import get_vasa_exp_name
 
-
+from memory_profiler import profile
+from collections import defaultdict
 from helper import log_grad_flow,consistent_sub_sample,count_model_params,normalize,visualize_latent_token, add_gradient_hooks, sample_recon
+from rich.console import Console
+from rich.traceback import install
+console = Console(width=3000)
+# Install Rich traceback handling
+install()
+
+
+
 
 output_dir = "output_images"
 os.makedirs(output_dir, exist_ok=True)
@@ -132,34 +141,47 @@ def cosine_loss(positive_pairs, negative_pairs, margin=0.5, scale=5):
     
     return loss.mean().requires_grad_()
 
+class RunningAverage:
+    """Efficient running average computation"""
+    def __init__(self):
+        self.avg = 0
+        self.count = 0
+
+    def update(self, value):
+        self.avg = (self.avg * self.count + value) / (self.count + 1)
+        self.count += 1
+
+
 class VASAStage1Trainer:
-    def __init__(self, cfg, Gbase, Dbase):
+    def __init__(self, cfg, Gbase, Dbase, dataloader):
         self.cfg = cfg
-        self.Gbase = Gbase
-        self.Dbase = Dbase
         
-        # Initialize accelerator
+        # Initialize accelerator first
         self.accelerator = Accelerator(
             gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
             log_with="wandb",
-            mixed_precision="fp16"
+            mixed_precision=None
         )
         
-        experiment_name =  "test1" #get_vasa_exp_name(config)
+        experiment_name = "test1"
         print(f"Generated experiment name: {experiment_name}")
 
-        # Initialize trackers for experiment logging
+        # Initialize trackers
         self.accelerator.init_trackers(
             project_name=cfg.training.project_name,
             config=OmegaConf.to_container(cfg, resolve=True),
             init_kwargs={"wandb": {
-                "name":experiment_name,
+                "name": experiment_name,
                 "dir": cfg.training.log_dir
             }}
         )
         
-        # Initialize loss functions on correct device
-        self.perceptual_loss = LPIPS(net='alex').to(self.accelerator.device)
+        # Initialize models without moving to device
+        self.Gbase = Gbase
+        self.Dbase = Dbase
+        
+        # Initialize loss functions
+        self.perceptual_loss = LPIPS(net='alex')
         self.pairwise_transfer_loss = PairwiseTransferLoss()
         self.identity_loss = IdentitySimilarityLoss()
         
@@ -188,223 +210,163 @@ class VASAStage1Trainer:
             T_max=cfg.training.base_epochs,
             eta_min=cfg.training.min_lr
         )
+        
+        # Prepare models, optimizers, and dataloader with accelerator
+        (
+            self.Gbase,
+            self.Dbase,
+            self.optimizer_G,
+            self.optimizer_D,
+            self.perceptual_loss,
+            dataloader,
+        ) = self.accelerator.prepare(
+            self.Gbase,
+            self.Dbase,
+            self.optimizer_G,
+            self.optimizer_D,
+            self.perceptual_loss,
+            dataloader
+        )
+        
+        self.dataloader = dataloader  # Save prepared dataloader
 
-    def train_step(self, batch):
-        """Single training step processing all frames in batch"""
-        metrics = {
-            'loss_G': 0,
-            'loss_D': 0,
-            'loss_perceptual': 0,
-            'loss_gan': 0,
-            'loss_pairwise': 0,
-            'loss_identity': 0,
-            'loss_motion': 0
-        }
 
-        # Extract frame sequences
-        source_frames = batch['source_frames']
-        driving_frames = batch['driving_frames']
-        source_frames_star = batch['source_frames_star']
-        driving_frames_star = batch['driving_frames_star']
+ 
 
-        num_frames = len(driving_frames)
-        len_source_frames = len(source_frames)
-        len_driving_frames = len(driving_frames)
-        len_source_frames_star = len(source_frames_star)
-        len_driving_frames_star = len(driving_frames_star)
 
-        # Process all frames in sequence
-        for idx in range(num_frames):
-            # Get current frames with wraparound
-            source_frame = source_frames[idx % len_source_frames].to(self.accelerator.device)
-            driving_frame = driving_frames[idx % len_driving_frames].to(self.accelerator.device)
-            source_frame_star = source_frames_star[idx % len_source_frames_star].to(self.accelerator.device)
-            driving_frame_star = driving_frames_star[idx % len_driving_frames_star].to(self.accelerator.device)
 
-            with torch.cuda.amp.autocast():
-                # Generator forward passes
-                pred_frame = self.Gbase(source_frame, driving_frame)
-                cross_frame = self.Gbase(source_frame_star, driving_frame)
+    def _cleanup_memory(self):
+        """Clean up memory by explicitly clearing cuda cache"""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
-                # Compute perceptual loss
-                loss_perceptual = self.perceptual_loss(pred_frame, driving_frame)
 
-                # Extract motion codes
-                _, _, zs = self.Gbase.motionEncoder(source_frame)
-                _, _, zd = self.Gbase.motionEncoder(driving_frame)
-                _, _, zs_star = self.Gbase.motionEncoder(source_frame_star)
-                _, _, zd_star = self.Gbase.motionEncoder(driving_frame_star)
-                _, _, z_pred = self.Gbase.motionEncoder(pred_frame)
-                _, _, z_cross = self.Gbase.motionEncoder(cross_frame)
+    @profile
+    def train_step(self, source_frame, driving_frame, source_frame_star, driving_frame_star):
+        """Training step with accelerator-prepared models"""
+        with self.accelerator.accumulate(self.Gbase):
+            # Generator forward pass
+            pred_frame = self.Gbase(source_frame, driving_frame)
+            
+            # Calculate losses
+            loss_perceptual = self.perceptual_loss(pred_frame, source_frame)
+            
+            # Discriminator losses
+            real_pred = self.Dbase(driving_frame, source_frame)
+            with torch.no_grad():  # Reduce memory usage during backprop
+                fake_pred = self.Dbase(pred_frame.detach(), source_frame)
+            loss_D = discriminator_loss(real_pred, fake_pred, loss_type='lsgan')
+            
+            # Generator adversarial loss
+            fake_pred = self.Dbase(pred_frame, source_frame)
+            loss_G_adv = -torch.mean(fake_pred)
+            
+            # Feature matching loss
+            loss_fm = F.mse_loss(pred_frame, driving_frame)
+            
+            # Cross-reenactment and cycle consistency
+            cross_reenacted_image = self.Gbase(source_frame_star, driving_frame)
+            
+            # Calculate motion encodings with reduced memory usage
+            with torch.no_grad():
+                z_pred = self.Gbase.motionEncoder(pred_frame)[-1]
+                zd = self.Gbase.motionEncoder(driving_frame)[-1]
+                z_star_pred = self.Gbase.motionEncoder(cross_reenacted_image)[-1]
+                zd_star = self.Gbase.motionEncoder(driving_frame_star)[-1]
+            
+            # Calculate cycle consistency loss
+            P = [(z_pred, zd), (z_star_pred, zd)]
+            N = [(z_pred, zd_star), (z_star_pred, zd_star)]
+            loss_cycle = cosine_loss(P, N)
+            
+            # Total generator loss
+            loss_G = (self.cfg.training.w_per * loss_perceptual +
+                    self.cfg.training.w_adv * loss_G_adv +
+                    self.cfg.training.w_fm * loss_fm +
+                    self.cfg.training.w_cos * loss_cycle)
+            
+            return {
+                'loss_G': loss_G,
+                'loss_D': loss_D,
+                'loss_perceptual': loss_perceptual,
+                'loss_adversarial': loss_G_adv,
+                'loss_feature_matching': loss_fm,
+                'loss_cycle': loss_cycle,
+                'pred_frame': pred_frame
+            }
 
-                # GAN loss
-                pred_fake = self.Dbase(pred_frame, source_frame)
-                loss_gan = -pred_fake.mean()
-
-                # Get the next frame index for disentanglement
-                next_idx = (idx + 20) % len_source_frames
-                next_frame = source_frames[next_idx].to(self.accelerator.device)
-                next_frame_star = source_frames_star[next_idx % len_source_frames_star].to(self.accelerator.device)
-
-                # Compute disentanglement losses
-                loss_pairwise = self.pairwise_transfer_loss(
-                    self.Gbase,
-                    source_frame,
-                    next_frame
-                )
-                
-                loss_identity = self.identity_loss(
-                      self.Gbase,
-                    source_frame_star,
-                    next_frame_star
-                )
-
-                # Motion contrastive loss
-                P = [(z_pred, zd), (z_cross, zd)]
-                N = [(z_pred, zd_star), (z_cross, zd_star)]
-                loss_motion = cosine_loss(P, N)
-
-                # Total generator loss
-                loss_G = (
-                    self.cfg.loss.perceptual_weight * loss_perceptual +
-                    self.cfg.loss.gan_weight * loss_gan +
-                    self.cfg.loss.pairwise_weight * loss_pairwise +
-                    self.cfg.loss.identity_weight * loss_identity +
-                    self.cfg.loss.motion_weight * loss_motion
-                )
-
-                # Train discriminator
-                pred_real = self.Dbase(driving_frame, source_frame)
-                pred_fake = self.Dbase(pred_frame.detach(), source_frame)
-                loss_D = discriminator_loss(pred_real, pred_fake)
-
-            # Accumulate losses
-            metrics['loss_G'] += loss_G.item()
-            metrics['loss_D'] += loss_D.item()
-            metrics['loss_perceptual'] += loss_perceptual.item()
-            metrics['loss_gan'] += loss_gan.item()
-            metrics['loss_pairwise'] += loss_pairwise.item()
-            metrics['loss_identity'] += loss_identity.item()
-            metrics['loss_motion'] += loss_motion.item()
-
-            # Optional: Save sample images
-            if idx == 0 and self.accelerator.is_local_main_process:  # Save only first frame
-                sample_images = {
-                    'source': source_frame,
-                    'driving': driving_frame,
-                    'predicted': pred_frame,
-                    'cross_reenacted': cross_frame
-                }
-                vutils.save_image(
-                    torch.cat([img for img in sample_images.values()]),
-                    f"{self.cfg.training.sample_dir}/train_step_{self.global_step}.png",
-                    nrow=len(sample_images)
-                )
-
-        # Average metrics over all frames
-        for key in metrics:
-            metrics[key] /= num_frames
-
-        return metrics
 
     def train(self, train_loader, start_epoch=0):
-        """Full training loop"""
-        self.global_step = start_epoch * len(train_loader)
-
-        # Prepare for distributed training
-        (self.Gbase, self.Dbase, self.optimizer_G, self.optimizer_D, 
-        self.scheduler_G, self.scheduler_D, train_loader) = self.accelerator.prepare(
-            self.Gbase, self.Dbase, self.optimizer_G, self.optimizer_D,
-            self.scheduler_G, self.scheduler_D, train_loader
-        )
-
-        for epoch in range(start_epoch, self.cfg.training.base_epochs):
-            self.Gbase.train()
-            self.Dbase.train()
-            
-            progress_bar = tqdm(
-                train_loader,
-                desc=f"Epoch {epoch+1}/{self.cfg.training.base_epochs}"
-            )
-
-            for batch_idx, batch in enumerate(progress_bar):
-                # Generator update
-                self.optimizer_G.zero_grad()
+            """Training loop using accelerator-prepared components"""
+            for epoch in range(start_epoch, self.cfg.training.base_epochs):
+                print(f"Epoch: {epoch}")
                 
-                with self.accelerator.accumulate(self.Gbase):
-                    metrics = self.train_step(batch)
-                    self.accelerator.backward(metrics['loss_G'])
-                    
-                    if self.accelerator.sync_gradients:
-                        self.accelerator.clip_grad_norm_(self.Gbase.parameters(), 1.0)
-                    
-                    self.optimizer_G.step()
-
-                # Discriminator update
-                self.optimizer_D.zero_grad()
+                running_metrics = defaultdict(lambda: RunningAverage())
+                progress_bar = tqdm(self.dataloader, desc=f'Epoch {epoch}')  # Use prepared dataloader
                 
-                with self.accelerator.accumulate(self.Dbase):
-                    self.accelerator.backward(metrics['loss_D'])
-                    
-                    if self.accelerator.sync_gradients:
-                        self.accelerator.clip_grad_norm_(self.Dbase.parameters(), 1.0)
-                    
-                    self.optimizer_D.step()
+                for batch_idx, batch in enumerate(progress_bar):
+                    # No need to move batch to device - accelerator handles this
+                    for idx in range(len(batch['driving_frames'])):
+                        source_frame = batch['source_frames'][idx % len(batch['source_frames'])]
+                        driving_frame = batch['driving_frames'][idx % len(batch['driving_frames'])]
+                        source_frame_star = batch['source_frames_star'][idx % len(batch['source_frames_star'])]
+                        driving_frame_star = batch['driving_frames_star'][idx % len(batch['driving_frames_star'])]
+                        
+                        # Training step
+                        metrics = self.train_step(
+                            source_frame, driving_frame,
+                            source_frame_star, driving_frame_star
+                        )
+                        
+                        # Use accelerator for backwards pass
+                        self.accelerator.backward(metrics['loss_G'])
+                        self.optimizer_G.step()
+                        self.optimizer_G.zero_grad()
+                        
+                        self.accelerator.backward(metrics['loss_D'])
+                        self.optimizer_D.step()
+                        self.optimizer_D.zero_grad()
 
-                # Update progress bar
-                progress_bar.set_postfix({
-                    'G_Loss': f"{metrics['loss_G']:.4f}",
-                    'D_Loss': f"{metrics['loss_D']:.4f}"
+                        
+                        # Log images periodically
+                        if idx == 0 and batch_idx % self.cfg.training.log_interval == 0:
+                            wandb.log({
+                                "source_frame": wandb.Image(source_frame),
+                                "driving_frame": wandb.Image(driving_frame),
+                                "predicted_frame": wandb.Image(metrics['pred_frame'])
+                            })
+                        
+                        # Clean up memory
+                        del metrics
+                        torch.cuda.empty_cache()
+                    
+                    # Update progress bar
+                    progress_bar.set_postfix({k: f"{v.avg:.4f}" for k, v in running_metrics.items()})
+                
+                # Log epoch metrics
+                wandb.log({
+                    'epoch': epoch,
+                    **{k: v.avg for k, v in running_metrics.items()},
+                    'learning_rate_G': self.scheduler_G.get_last_lr()[0],
+                    'learning_rate_D': self.scheduler_D.get_last_lr()[0]
                 })
-
-                # Log metrics
-                if self.global_step % self.cfg.training.log_interval == 0:
-                    self.accelerator.log(
-                        {f"train/{k}": v for k, v in metrics.items()},
-                        step=self.global_step
-                    )
-
-                self.global_step += 1
-
-            # Step schedulers
-            self.scheduler_G.step()
-            self.scheduler_D.step()
-
-            # Save checkpoint
-            if (epoch + 1) % self.cfg.training.save_interval == 0:
-                self.save_checkpoint(
-                    f"checkpoint_epoch_{epoch+1}.pt",
-                    metrics
-                )
-
-        self.accelerator.end_training()
-    def log_samples(self, batch):
-        """Log sample images to wandb"""
-        if self.accelerator.is_local_main_process:
-            with torch.no_grad():
-                source_frame = batch['source_frames'][:4]  # Take first 4 samples
-                driving_frame = batch['driving_frames'][:4]
                 
-                pred_frame = self.Gbase(source_frame, driving_frame)
+                # Step schedulers
+                self.scheduler_G.step()
+                self.scheduler_D.step()
                 
-                # Create grid of images
-                images = {
-                    "source": self.accelerator.gather(source_frame),
-                    "driving": self.accelerator.gather(driving_frame),
-                    "generated": self.accelerator.gather(pred_frame)
-                }
-                
-                self.accelerator.log({"samples": images})
+                # Save checkpoint
+                if (epoch + 1) % self.cfg.training.save_interval == 0:
+                    self.save_checkpoint(f"checkpoint_epoch_{epoch+1}.pt", running_metrics)
+            
+            wandb.finish()
+
 
     def save_checkpoint(self, filename, metrics):
-        """Save training checkpoint"""
-        # Unwrap models before saving
-        unwrapped_Gbase = self.accelerator.unwrap_model(self.Gbase)
-        unwrapped_Dbase = self.accelerator.unwrap_model(self.Dbase)
-        
         checkpoint = {
-            'Gbase_state_dict': unwrapped_Gbase.state_dict(),
-            'Dbase_state_dict': unwrapped_Dbase.state_dict(),
+            'Gbase_state_dict': self.Gbase.state_dict(),
+            'Dbase_state_dict': self.Dbase.state_dict(),
             'optimizer_G_state_dict': self.optimizer_G.state_dict(),
             'optimizer_D_state_dict': self.optimizer_D.state_dict(),
             'scheduler_G_state_dict': self.scheduler_G.state_dict(),
@@ -413,25 +375,8 @@ class VASAStage1Trainer:
             'config': self.cfg
         }
         
-        self.accelerator.save(checkpoint, filename)
-
-    
-
-    
-def load_checkpoint(checkpoint_path, model_G, model_D, optimizer_G, optimizer_D):
-    if os.path.isfile(checkpoint_path):
-        print(f"Loading checkpoint '{checkpoint_path}'")
-        checkpoint = torch.load(checkpoint_path)
-        model_G.load_state_dict(checkpoint['model_G_state_dict'])
-        model_D.load_state_dict(checkpoint['model_D_state_dict'])
-        optimizer_G.load_state_dict(checkpoint['optimizer_G_state_dict'])
-        optimizer_D.load_state_dict(checkpoint['optimizer_D_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1
-        print(f"Loaded checkpoint '{checkpoint_path}' (epoch {checkpoint['epoch']})")
-    else:
-        print(f"No checkpoint found at '{checkpoint_path}'")
-        start_epoch = 0
-    return start_epoch
+        torch.save(checkpoint, filename)
+        wandb.save(filename)
 
 
 
@@ -465,21 +410,14 @@ def main(cfg: OmegaConf) -> None:
     dataloader = DataLoader(dataset, batch_size=cfg.training.batch_size, shuffle=True, num_workers=1)
 
     
-    Gbase = model.Gbase().to(device)
-    Dbase = model.Discriminator().to(device)
-    
-    optimizer_G = torch.optim.AdamW(Gbase.parameters(), lr=cfg.training.lr, betas=(0.5, 0.999), weight_decay=1e-2)
-    optimizer_D = torch.optim.AdamW(Dbase.parameters(), lr=cfg.training.lr, betas=(0.5, 0.999), weight_decay=1e-2)
-
-    # Load checkpoint if available
-    checkpoint_path = cfg.training.checkpoint_path
-    start_epoch = load_checkpoint(checkpoint_path, Gbase, Dbase, optimizer_G, optimizer_D)
+    Gbase = model.Gbase()
+    Dbase = model.Discriminator()
 
 
     # Initialize trainer
-    trainer = VASAStage1Trainer(config, Gbase, Dbase)
+    trainer = VASAStage1Trainer(config, Gbase, Dbase,dataloader)
     # Start training
-    trainer.train(train_loader=dataloader,start_epoch=start_epoch)
+    trainer.train(train_loader=dataloader,start_epoch=0)
 
 
 

@@ -20,6 +20,10 @@ import random
 # face warp
 from skimage.transform import PiecewiseAffineTransform, warp
 import face_recognition
+import gc
+
+from memory_profiler import profile
+
 
 class EMODataset(Dataset):
     def __init__(self, use_gpu: False, sample_rate: int, n_sample_frames: int, width: int, height: int, img_scale: Tuple[float, float], img_ratio: Tuple[float, float] = (0.9, 1.0), video_dir: str = ".", drop_ratio: float = 0.1, json_file: str = "", stage: str = 'stage1', transform: transforms.Compose = None, remove_background=False, use_greenscreen=False, apply_crop_warping=False):
@@ -47,26 +51,23 @@ class EMODataset(Dataset):
 
         self.video_ids = list(self.celebvhq_info['clips'].keys())
 
+            # Load videos with proper cleanup
         random_video_id = random.choice(self.video_ids)
         driving = os.path.join(self.video_dir, f"{random_video_id}.mp4")
-        print("driving:",driving)
-
+        print("driving:", driving)
+        
         self.driving_vid_pil_image_list = self.load_and_process_video(driving)
+        torch.cuda.empty_cache()  # Clear CUDA cache if using GPU
+        gc.collect()  # Force garbage collection
+        
         self.video_ids_star = list(self.celebvhq_info['clips'].keys())
-
         random_video_id = random.choice(self.video_ids_star)
         driving_star = os.path.join(self.video_dir, f"{random_video_id}.mp4")
-        print("driving_star:",driving_star)
-
+        print("driving_star:", driving_star)
+        
         self.driving_vid_pil_image_list_star = self.load_and_process_video(driving_star)
-
-        # TODO - make this more dynamic
-        # driving = os.path.join(self.video_dir, "-2KGPYEFnsU_11.mp4")
-        # self.driving_vid_pil_image_list = self.load_and_process_video(driving)
-        # self.video_ids = ["M2Ohb0FAaJU_1"]  # list(self.celebvhq_info['clips'].keys())
-        # self.video_ids_star = ["-1eKufUP5XQ_4"]  # list(self.celebvhq_info['clips'].keys())
-        # driving_star = os.path.join(self.video_dir, "-2KGPYEFnsU_8.mp4")
-        # self.driving_vid_pil_image_list_star = self.load_and_process_video(driving_star)
+        torch.cuda.empty_cache()
+        gc.collect()
 
     def __len__(self) -> int:
         return len(self.video_ids)
@@ -176,76 +177,79 @@ class EMODataset(Dataset):
         else:
             return None, None
 
-
+    @profile
     def load_and_process_video(self, video_path: str) -> List[torch.Tensor]:
-        # Extract video ID from the path
         video_id = Path(video_path).stem
-        output_dir =  Path(self.video_dir + "/" + video_id)
+        output_dir = Path(self.video_dir + "/" + video_id)
         output_dir.mkdir(exist_ok=True)
         
-        processed_frames = []
-        tensor_frames = []
-
         tensor_file_path = output_dir / f"{video_id}_tensors.npz"
-
-        # Check if the tensor file exists
+        
         if tensor_file_path.exists():
             print(f"Loading processed tensors from file: {tensor_file_path}")
             with np.load(tensor_file_path) as data:
                 tensor_frames = [torch.tensor(data[key]) for key in data]
-        else:
-            if self.apply_crop_warping:
-                print(f"Warping + Processing and saving video frames to directory: {output_dir}")
-            else:
-                print(f"Processing and saving video frames to directory: {output_dir}")
+                del data  # Explicitly delete the loaded data
+                gc.collect()  # Force garbage collection
+                return tensor_frames
+        
+        processed_frames = []
+        tensor_frames = []
+        
+        try:
             video_reader = VideoReader(video_path, ctx=self.ctx)
-            for frame_idx in tqdm(range(len(video_reader)), desc="Processing Video Frames"):
+            total_frames = len(video_reader)
+            
+            for frame_idx in tqdm(range(total_frames), desc="Processing Video Frames"):
                 frame = Image.fromarray(video_reader[frame_idx].numpy())
                 state = torch.get_rng_state()
-                # here we run the color jitter / random flip
                 tensor_frame, image_frame = self.augmentation(frame, self.pixel_transform, state)
-                processed_frames.append(image_frame)
-
+                
                 if self.apply_crop_warping:
                     transform = transforms.Compose([
-                        transforms.Resize((512, 512)), # get the cropped image back to this size - TODO support 256
+                        transforms.Resize((512, 512)),
                         transforms.ToTensor(),
                     ])
                     video_name = Path(video_path).stem
-
-                    # vanilla crop                    
-                    _,sweet_tensor_frame1 = self.warp_and_crop_face(tensor_frame, video_name, frame_idx, transform, apply_warp=False)
-                    # Save frame as PNG image
-                    # img = to_pil_image(tensor_frame1)
-                    # img.save(output_dir / f"{frame_idx:06d}.png")
-                    # tensor_frames.append(tensor_frame1)
-
-                    img = to_pil_image(sweet_tensor_frame1)
-                    img.save(output_dir / f"s_{frame_idx:06d}.png")
-                    tensor_frames.append(sweet_tensor_frame1)
-
-                    # vanilla crop + warp                  
-                    _,sweet_tensor_frame2 = self.warp_and_crop_face(tensor_frame, video_name, frame_idx, transform, apply_warp=True)
-                    # Save frame as PNG image
-                    # img = to_pil_image(tensor_frame2)
-                    # img.save(output_dir / f"w_{frame_idx:06d}.png")
-                    # tensor_frames.append(tensor_frame2)
-
-                    # Save frame as PNG image
-                    img = to_pil_image(sweet_tensor_frame2)
-                    img.save(output_dir / f"sw_{frame_idx:06d}.png")
-                    tensor_frames.append(sweet_tensor_frame2)
+                    
+                    _, sweet_tensor_frame1 = self.warp_and_crop_face(tensor_frame, video_name, frame_idx, transform, apply_warp=False)
+                    if sweet_tensor_frame1 is not None:
+                        img = to_pil_image(sweet_tensor_frame1)
+                        img.save(output_dir / f"s_{frame_idx:06d}.png")
+                        tensor_frames.append(sweet_tensor_frame1)
+                        del img
+                    
+                    _, sweet_tensor_frame2 = self.warp_and_crop_face(tensor_frame, video_name, frame_idx, transform, apply_warp=True)
+                    if sweet_tensor_frame2 is not None:
+                        img = to_pil_image(sweet_tensor_frame2)
+                        img.save(output_dir / f"sw_{frame_idx:06d}.png")
+                        tensor_frames.append(sweet_tensor_frame2)
+                        del img
                 else:
-                    # Save frame as PNG image
                     image_frame.save(output_dir / f"{frame_idx:06d}.png")
                     tensor_frames.append(tensor_frame)
-
-            # Convert tensor frames to numpy arrays and save them
+                
+                # Clean up intermediate objects
+                del frame, tensor_frame, image_frame
+                if frame_idx % 10 == 0:  # Periodic cleanup
+                    gc.collect()
+                    torch.cuda.empty_cache()
+            
+            # Clean up video reader
+            del video_reader
+            gc.collect()
+            
+            # Save processed tensors
             np.savez_compressed(tensor_file_path, *[tensor_frame.numpy() for tensor_frame in tensor_frames])
             print(f"Processed tensors saved to file: {tensor_file_path}")
-
-        return tensor_frames
-
+            
+            return tensor_frames
+            
+        finally:
+            # Clean up all intermediate objects
+            del processed_frames
+            gc.collect()
+            torch.cuda.empty_cache()
     def augmentation(self, images, transform, state=None):
         if state is not None:
             torch.set_rng_state(state)
@@ -314,26 +318,41 @@ class EMODataset(Dataset):
 
 
 
+    
     def __getitem__(self, index: int) -> Dict[str, Any]:
-        while True: # Keep trying until we get a valid video
+        while True:
             try:
                 video_id = self.video_ids[index]
-                # Use next item in the list for video_id_star, wrap around if at the end
                 video_id_star = self.video_ids_star[(index + 1) % len(self.video_ids_star)]
+                
+                # Load videos with cleanup
                 vid_pil_image_list = self.load_and_process_video(os.path.join(self.video_dir, f"{video_id}.mp4"))
+                gc.collect()
+                torch.cuda.empty_cache()
+                
                 vid_pil_image_list_star = self.load_and_process_video(os.path.join(self.video_dir, f"{video_id_star}.mp4"))
-
-                break
+                gc.collect()
+                torch.cuda.empty_cache()
+                
+                sample = {
+                    "video_id": video_id,
+                    "source_frames": vid_pil_image_list,
+                    "driving_frames": self.driving_vid_pil_image_list,
+                    "video_id_star": video_id_star,
+                    "source_frames_star": vid_pil_image_list_star,
+                    "driving_frames_star": self.driving_vid_pil_image_list_star,
+                }
+                return sample
+                
             except Exception as e:
                 print(f"Error loading video {index}: {e}")
-        sample = {
-            "video_id": video_id,
-            "source_frames": vid_pil_image_list,
-            "driving_frames": self.driving_vid_pil_image_list,
-            "video_id_star": video_id_star,
-            "source_frames_star": vid_pil_image_list_star,
-            "driving_frames_star": self.driving_vid_pil_image_list_star,
-        }
-        return sample
-    
+                gc.collect()
+                torch.cuda.empty_cache()
+
+    def __del__(self):
+        """Cleanup method called when the dataset object is destroyed"""
+        del self.driving_vid_pil_image_list
+        del self.driving_vid_pil_image_list_star
+        gc.collect()
+        torch.cuda.empty_cache()
 
