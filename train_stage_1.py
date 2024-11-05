@@ -148,6 +148,8 @@ def train_base(cfg, Gbase, Dbase, dataloader):
         
         progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{cfg.training.base_epochs}")
         
+        expr_norm = nn.LayerNorm(cfg.model.expression_dim).to(accelerator.device)
+
         for batch in progress_bar:
             source_frames = batch['source_frames']
             driving_frames = batch['driving_frames']
@@ -192,12 +194,28 @@ def train_base(cfg, Gbase, Dbase, dataloader):
 
                     # Cross reenactment
                     cross_reenacted_image = Gbase(source_frame_star, driving_frame)
-                    
-                    # Motion descriptors
-                    _, _, z_pred = Gbase.motionEncoder(pred_frame)
-                    _, _, zd = Gbase.motionEncoder(driving_frame)
-                    _, _, z_star_pred = Gbase.motionEncoder(cross_reenacted_image)
-                    _, _, zd_star = Gbase.motionEncoder(driving_frame_star)
+    
+                     # Get motion descriptors with identity protection
+                    def get_motion_features(frame, detach_identity=False):
+                        identity, pose, expression = Gbase.motionEncoder(frame)
+                        
+                        if detach_identity:
+                            identity = identity.detach()
+                        
+                        # Normalize expression features using LayerNorm
+                        expression = expr_norm(expression)
+                        
+                        # Optional: Add extra normalization for better disentanglement
+                        expression = F.normalize(expression, p=2, dim=1)
+                        
+                        return identity, pose, expression
+
+                    # Get features with proper identity isolation
+                    _, _, z_pred = get_motion_features(pred_frame)
+                    _, _, zd = get_motion_features(driving_frame, detach_identity=True)
+                    _, _, z_star_pred = get_motion_features(cross_reenacted_image)
+                    _, _, zd_star = get_motion_features(driving_frame_star, detach_identity=True)
+
 
                     # Cosine loss
                     P = [(z_pred, zd), (z_star_pred, zd)]

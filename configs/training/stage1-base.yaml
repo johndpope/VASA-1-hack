@@ -2,6 +2,9 @@ wandb:
   project_name: "megaportraits"
 
   
+model:
+  expression_dim: 512   # Dimension of expression features
+  
 data:
   train_width: 512 
   train_height: 512 
