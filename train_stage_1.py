@@ -374,25 +374,9 @@ class VASAStage1Trainer:
                         # Generator update
                         self.Gbase.zero_grad(set_to_none=True)  # More efficient than zero_grad()
                         metrics = self.train_step(**frames)
-                        pred_frame = metrics['pred_frame'].detach()  # Detach to free memory
-                        
-                        self.accelerator.backward(metrics['loss_G'], retain_graph=True)
-                        self.optimizer_G.step()
-                        
-                        # Discriminator update
-                        self.Dbase.zero_grad(set_to_none=True)
-                        self.accelerator.backward(metrics['loss_D'])
-                        self.optimizer_D.step()
                     
-                    # Update metrics with memory optimization
-                    for k, v in metrics.items():
-                        if k.startswith('loss_') and isinstance(v, (int, float, torch.Tensor)):
-                            if torch.is_tensor(v):
-                                if v.numel() == 1:
-                                    metrics_tracker.update(k, v.item())
-                                    del v  # Explicitly delete tensor
-                            else:
-                                metrics_tracker.update(k, v)
+                    pred_frame = metrics['pred_frame']
+        
                     
                     # Log with memory optimization
                     if batch_idx % self.cfg.training.log_interval == 0:
@@ -462,65 +446,62 @@ class VASAStage1Trainer:
     def train_step(self, source_frame, next_source, driving_frame, next_driving, source_frame_star, driving_frame_star):
         """Training step with accelerator-prepared models and proper graph retention"""
         
+        # Get source and driving frames
+        source = source_frame
+        driving = driving_frame
+        
+        # Cross-identity sample for cycle consistency
+        source_star = source_frame_star
+        
         # Generator forward pass
-        pred_frame = self.Gbase(source_frame, driving_frame)
+        pred_frame = self.Gbase(source, driving)
+        pred_star = self.Gbase(source_star, driving)
         
-        # Calculate perceptual loss
-        loss_perceptual = self.perceptual_loss(pred_frame, driving_frame).mean()
+        # Extract motion descriptors
+        Rs, ts, zs = self.Gbase.motionEncoder(source)
+        Rd, td, zd = self.Gbase.motionEncoder(driving)
+        Rs_star, ts_star, zs_star = self.Gbase.motionEncoder(source_star)
+        _, _, zd_star = self.Gbase.motionEncoder(driving_frame_star)
+        # Cycle consistency - positive pairs should align with driving
+        P = [(zs, zd), (zs_star, zd)]
+        N = [(zs, zd_star), (zs_star, zd_star)]
+        loss_cycle = cosine_loss(P, N)
         
-        # Adversarial ground truths
-        patch = (1, self.cfg.data.train_width // 2 ** 4, self.cfg.data.train_height // 2 ** 4)
-        valid = Variable(torch.ones((driving_frame.size(0), *patch)), requires_grad=False).to(driving_frame.device)
-        fake = Variable(torch.ones((driving_frame.size(0), *patch)) * -1, requires_grad=False).to(driving_frame.device)
-
-        # Calculate discriminator predictions
-        real_pred = self.Dbase(driving_frame, source_frame)
-        fake_pred = self.Dbase(pred_frame.detach(), source_frame) 
-        
-        # Calculate discriminator loss
-        loss_real = self.hinge_loss(real_pred, valid)
-        loss_fake = self.hinge_loss(fake_pred, fake)
-        loss_D = discriminator_loss(real_pred, fake_pred, loss_type='lsgan')
-
-        # Calculate generator adversarial loss
-        # Note: Need a new forward pass through discriminator for generator training
-        fake_pred_G = self.Dbase(pred_frame, source_frame)  # Not detached for generator
-        loss_G_adv = 0.5 * (self.hinge_loss(fake_pred_G, valid) + loss_fake)
-
-        # Feature matching loss
+        #feature matching
         loss_fm = self.feature_matching_loss(pred_frame, driving_frame)
+
+
+
+        # Perceptual & adversarial losses
+        loss_perceptual = self.perceptual_loss(pred_frame, driving)
+        pred_fake = self.Dbase(pred_frame, source)
+        loss_gan = -pred_fake.mean()
         
-        # Cross-reenactment
-        cross_reenacted_image = self.Gbase(source_frame_star, driving_frame)
+        # Generator total loss
+        loss_G = (self.cfg.training.w_per * loss_perceptual + 
+                 self.cfg.training.w_adv * loss_gan +
+                 self.cfg.training.w_fm * loss_fm +
+                 self.cfg.training.w_cos * loss_cycle)
+
+        # Discriminator loss  
+        pred_real = self.Dbase(driving, source)
+        pred_fake = self.Dbase(pred_frame.detach(), source)
+        loss_D = discriminator_loss(pred_real, pred_fake)
         
-        # Motion descriptors
-        with torch.no_grad():
-            _, _, z_pred = self.Gbase.motionEncoder(pred_frame)
-            _, _, zd = self.Gbase.motionEncoder(driving_frame)
-            _, _, z_star_pred = self.Gbase.motionEncoder(cross_reenacted_image)
-            _, _, zd_star = self.Gbase.motionEncoder(driving_frame_star)
+        # Optimization
+        self.optimizer_G.zero_grad()
+        loss_G.backward()
+        self.optimizer_G.step()
         
-        # Cycle consistency loss
-        P = [(z_pred, zd), (z_star_pred, zd)]
-        N = [(z_pred, zd_star), (z_star_pred, zd_star)]
-        loss_G_cos = cosine_loss(P, N)
+        self.optimizer_D.zero_grad()
+        loss_D.backward()
+        self.optimizer_D.step()
         
-        # Calculate total generator loss
-        loss_G_total = (
-            self.cfg.training.w_per * loss_perceptual +
-            self.cfg.training.w_adv * loss_G_adv +
-            self.cfg.training.w_fm * loss_fm +
-            self.cfg.training.w_cos * loss_G_cos
-        )
-        
-        # Return all losses and predictions
         return {
-            'loss_G': loss_G_total,
-            'loss_D': loss_D,
-            'loss_perceptual': loss_perceptual,
-            'loss_adversarial': loss_G_adv,
-            'loss_feature_matching': loss_fm,
-            'loss_cycle': loss_G_cos,
+            'loss_G': loss_G.item(),
+            'loss_D': loss_D.item(),
+            'loss_perceptual': loss_perceptual.item(),
+            'loss_cycle': loss_cycle.item(),
             'pred_frame': pred_frame
         }
 

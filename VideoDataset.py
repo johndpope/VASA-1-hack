@@ -68,12 +68,13 @@ class VideoDataset(Dataset):
 
     def _set_random_state(self, seed):
         """Set random states for all random number generators"""
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
+        print("ok")
+        # random.seed(seed)
+        # np.random.seed(seed)
+        # torch.manual_seed(seed)
+        # if torch.cuda.is_available():
+        #     torch.cuda.manual_seed(seed)
+        #     torch.cuda.manual_seed_all(seed)
 
     def _get_next_video_batch(self, n_videos):
         """Get next batch of unprocessed videos with consistent randomization"""
@@ -137,26 +138,7 @@ class VideoDataset(Dataset):
             pairs.append((vid1, vid2))
         return pairs
 
-    def _load_random_frame(self, video_path):
-        """Load a random frame with consistent selection"""
-        frame_dir = self.cache_dir / video_path.stem
-        frame_files = sorted(list(frame_dir.glob("*.png")))  # Sort for consistency
-        if not frame_files:
-            raise ValueError(f"No frames found for {video_path}")
-        
-        # Create reproducible random state for this video and epoch
-        rng = random.Random() #hash(str(video_path)) + self.epoch + self.random_seed
-        frame_path = rng.choice(frame_files)
-        frame = Image.open(frame_path).convert('RGB')
-        
-        if self.transform:
-            frame = self.transform(frame)
-            if self.apply_warping:
-                frame = self.apply_warp_transform(frame)
-        else:
-            frame = to_tensor(frame)
-            
-        return frame
+    
 
     def apply_warp_transform(self, image_tensor):
         """Apply warping transformation with consistent randomization"""
@@ -213,7 +195,7 @@ class VideoDataset(Dataset):
             raise ValueError(f"No frames found for {video_path}")
         
         # Create reproducible random state for this video and epoch
-        rng = random.Random(hash(str(video_path)) + self.epoch + self.random_seed)
+        rng = random.Random() #hash(str(video_path)) + self.epoch + self.random_seed
         
         # Select random index ensuring we can get next frame
         max_idx = len(frame_files) - 2  # -2 to ensure we can get next frame
