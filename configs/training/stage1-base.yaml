@@ -1,3 +1,7 @@
+wandb:
+  project_name: "megaportraits"
+
+  
 data:
   train_width: 512 
   train_height: 512 
@@ -11,6 +15,10 @@ data:
   cache_audio: true
   preextract_audio: true
 training:
+  logging_dir: "logs"
+  batch_size: 1
+  num_workers: 0
+  sample_interval: 100
   save_frames: True
   log_dir: './logs'
   project_name: "vasa-training"
@@ -26,10 +34,7 @@ training:
   lambda_gaze: 1.0
   lambda_supervised: 1.0
   lambda_unsupervised: 1.0
-  batch_size: 1
-  num_workers: 0
   lr: 1.0e-5
-
   hr_epochs: 50
   student_epochs: 100
   use_gpu_video_tensor: True
