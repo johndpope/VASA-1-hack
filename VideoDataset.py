@@ -94,7 +94,7 @@ class VideoDataset(Dataset):
             # Use deterministic frame selection
             if n_frames > self.max_frames:
                 # Create reproducible random state for this video
-                rng = random.Random(hash(str(video_path)) + self.random_seed)
+                rng = random.Random() #hash(str(video_path)) + self.random_seed
                 indices = sorted(rng.sample(range(n_frames), self.max_frames))
             else:
                 indices = range(min(n_frames, self.max_frames))
@@ -126,7 +126,7 @@ class VideoDataset(Dataset):
                              if (self.cache_dir / v.stem).exists()])
         
         # Create reproducible random state for this epoch
-        rng = random.Random(self.random_seed + self.epoch)
+        rng = random.Random() #self.random_seed + self.epoch
         
         pairs = []
         for _ in range(self.current_pairs):
@@ -145,7 +145,7 @@ class VideoDataset(Dataset):
             raise ValueError(f"No frames found for {video_path}")
         
         # Create reproducible random state for this video and epoch
-        rng = random.Random(hash(str(video_path)) + self.epoch + self.random_seed)
+        rng = random.Random() #hash(str(video_path)) + self.epoch + self.random_seed
         frame_path = rng.choice(frame_files)
         frame = Image.open(frame_path).convert('RGB')
         
@@ -170,7 +170,7 @@ class VideoDataset(Dataset):
         src_points = np.array([[0, 0], [cols-1, 0], [0, rows-1], [cols-1, rows-1]])
         
         # Use consistent random state for warping
-        rng = np.random.RandomState(self.random_seed + self.epoch)
+        rng = np.random.RandomState() #self.random_seed + self.epoch
         dst_points = src_points + rng.randn(4, 2) * (rows * self.warp_strength)
         
         tps = PiecewiseAffineTransform()
@@ -203,7 +203,44 @@ class VideoDataset(Dataset):
                 self.processed_videos.add(video_path)
         
         self.pairs = self._create_epoch_pairs()
-        print(f"Epoch {self.epoch}: Dataset size = {len(self.pairs)} pairs")
+        # print(f"Epoch {self.epoch}: Dataset size = {len(self.pairs)} pairs")
+
+    def _load_consecutive_frames(self, video_path):
+        """Load a random frame and its next frame with consistent selection"""
+        frame_dir = self.cache_dir / video_path.stem
+        frame_files = sorted(list(frame_dir.glob("*.png")))  # Sort for consistency
+        if not frame_files:
+            raise ValueError(f"No frames found for {video_path}")
+        
+        # Create reproducible random state for this video and epoch
+        rng = random.Random(hash(str(video_path)) + self.epoch + self.random_seed)
+        
+        # Select random index ensuring we can get next frame
+        max_idx = len(frame_files) - 2  # -2 to ensure we can get next frame
+        if max_idx < 0:
+            raise ValueError(f"Not enough frames in {video_path}")
+        
+        frame_idx = rng.randint(0, max_idx)
+        
+        # Get current and next frame paths
+        frame_path = frame_files[frame_idx]
+        next_frame_path = frame_files[frame_idx + 1]
+        
+        # Load and transform both frames
+        frame = Image.open(frame_path).convert('RGB')
+        next_frame = Image.open(next_frame_path).convert('RGB')
+        
+        if self.transform:
+            frame = self.transform(frame)
+            next_frame = self.transform(next_frame)
+            if self.apply_warping:
+                frame = self.apply_warp_transform(frame)
+                next_frame = self.apply_warp_transform(next_frame)
+        else:
+            frame = to_tensor(frame)
+            next_frame = to_tensor(next_frame)
+            
+        return frame, next_frame
 
     def __getitem__(self, index):
         max_retries = 5
@@ -213,12 +250,16 @@ class VideoDataset(Dataset):
             try:
                 vid1_path, vid2_path = self.pairs[index]
                 
-                source_frame = self._load_random_frame(vid1_path)
-                driving_frame = self._load_random_frame(vid2_path)
+                # Load consecutive frames for both source and driving videos
+                source_frame, next_source_frame = self._load_consecutive_frames(vid1_path)
+                driving_frame, next_driving_frame = self._load_consecutive_frames(vid2_path)
                 
+                # WARNING - update collate_fn if changing output structure
                 return {
                     "source_frame": source_frame,
+                    "next_source_frame": next_source_frame,
                     "driving_frame": driving_frame,
+                    "next_driving_frame": next_driving_frame,
                     "source_vid": vid1_path.stem,
                     "driving_vid": vid2_path.stem
                 }
@@ -231,14 +272,55 @@ class VideoDataset(Dataset):
                     fallback_rng = random.Random(self.random_seed + self.epoch + index)
                     index = fallback_rng.randrange(len(self))
                 continue
-    
+
+    def _process_video(self, video_path):
+        """Process single video ensuring frames are saved in sequence"""
+        cache_path = self.cache_dir / video_path.stem
+        if cache_path.exists():
+            return
+
+        try:
+            cache_path.mkdir(exist_ok=True)
+            vr = VideoReader(str(video_path), ctx=cpu())
+            n_frames = len(vr)
+            
+            # For consecutive frames, we want sequential indices
+            if n_frames > self.max_frames:
+                # Create reproducible random state for this video
+                rng = random.Random(hash(str(video_path)) + self.random_seed)
+                # Select a random starting point that allows for max_frames consecutive frames
+                start_idx = rng.randint(0, n_frames - self.max_frames)
+                indices = range(start_idx, start_idx + self.max_frames)
+            else:
+                indices = range(n_frames)
+            
+            for idx in indices:
+                out_path = cache_path / f"{idx:06d}.png"
+                if not out_path.exists():
+                    frame = vr[idx]
+                    if hasattr(frame, 'asnumpy'):
+                        frame = frame.asnumpy()
+                    frame = Image.fromarray(np.uint8(frame))
+                    frame = frame.resize((self.width, self.height))
+                    
+                    if self.remove_background:
+                        frame = self.remove_bg(frame)
+                    
+                    frame.save(out_path)
+
+        except Exception as e:
+            print(f"Error processing {video_path}: {e}")
+            if cache_path.exists():
+                import shutil
+                shutil.rmtree(cache_path)
+            return None
     def _process_initial_videos(self):
         """Process an initial batch of videos"""
         initial_videos = self._get_next_video_batch(self.initial_pairs * 2)  # 2x for pairs
         for video_path in tqdm(initial_videos, desc="Processing initial videos"):
             self._process_video(video_path)
             self.processed_videos.add(video_path)
-            
+
     def __len__(self):
         return len(self.pairs)
 

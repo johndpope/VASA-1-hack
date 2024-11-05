@@ -44,6 +44,12 @@ ulimit -n 65535
 
 #!/bin/bash
 
+
+# Debug memory
+mprof run train_stage_1.py
+
+
+
 # 1. STAGE 1 - Basic single GPU training
 accelerate launch --mixed_precision fp16 train_stage1.py \
     --config configs/training/stage1-base.yaml

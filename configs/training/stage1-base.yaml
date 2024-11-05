@@ -11,12 +11,13 @@ data:
   cache_audio: true
   preextract_audio: true
 training:
+  save_frames: True
   log_dir: './logs'
   project_name: "vasa-training"
   gradient_accumulation_steps: 1
   frame_offset: 20
   checkpoint_path: './checkpoint_epoch100.pth'
-  save_interval: 50
+  save_interval: 500
   log_interval: 100
   lambda_perceptual: 1.0
   lambda_adversarial: 1.0
@@ -25,10 +26,10 @@ training:
   lambda_gaze: 1.0
   lambda_supervised: 1.0
   lambda_unsupervised: 1.0
-  batch_size: 16
+  batch_size: 1
   num_workers: 0
   lr: 1.0e-5
-  base_epochs: 100
+
   hr_epochs: 50
   student_epochs: 100
   use_gpu_video_tensor: True
@@ -52,7 +53,8 @@ training:
 
 
 
-  num_epochs: 100
+  num_epochs: 1000
+  base_epochs: 1000
   learning_rate: 2.0e-4
   min_lr: 1.0e-6
   beta1: 0.9

@@ -37,6 +37,8 @@ class TrainingLogger:
         # Initialize wandb
         if use_wandb:
             wandb.init(project="vasa", name=exp_name)
+        
+
         self.use_wandb = use_wandb
         
         # Setup file logger

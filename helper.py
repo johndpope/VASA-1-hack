@@ -14,7 +14,44 @@ import io
 from PIL import Image
 from mpl_toolkits.mplot3d import Axes3D
 
+from rich.console import Console
+from rich.traceback import install
+from rich.progress import track
 
+console = Console(width=3000)
+
+def handle_training_error(e: Exception, batch_idx: int = None, extra_info: str = None):
+    """Enhanced error handling with Rich output"""
+    console.print("\n[bold red]Training Error Occurred![/bold red]")
+    if batch_idx is not None:
+        console.print(f"[yellow]Batch Index:[/yellow] {batch_idx}")
+    if extra_info:
+        console.print(f"[yellow]Additional Info:[/yellow] {extra_info}")
+    console.print("[bold yellow]Exception Details:[/bold yellow]")
+    console.print_exception()
+
+
+
+def resize_for_wandb(tensor_image, size=128):
+    """
+    Resize a tensor image for wandb logging.
+    Args:
+        tensor_image: Input tensor of shape [C, H, W] or [B, C, H, W]
+        size: Target size (both height and width)
+    Returns:
+        Resized tensor of shape [C, size, size]
+    """
+    if tensor_image.dim() == 4:
+        tensor_image = tensor_image[0]  # Take first image if batched
+    
+    return F.interpolate(
+        tensor_image.unsqueeze(0),  # Add batch dimension
+        size=(size, size),
+        mode='bilinear',
+        align_corners=False
+    ).squeeze(0)  # Remove batch dimension
+
+    
 def consistent_sub_sample(tensor1, tensor2, sub_sample_size):
     """
     Consistently sub-sample two tensors with the same random offset.

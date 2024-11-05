@@ -36,14 +36,31 @@ from utils import get_vasa_exp_name
 
 from memory_profiler import profile
 from collections import defaultdict
-from helper import log_grad_flow,consistent_sub_sample,count_model_params,normalize,visualize_latent_token, add_gradient_hooks, sample_recon
+from helper import handle_training_error,resize_for_wandb,log_grad_flow,consistent_sub_sample,count_model_params,normalize,visualize_latent_token, add_gradient_hooks, sample_recon
 from rich.console import Console
 from rich.traceback import install
+from rich.progress import track
+
 console = Console(width=3000)
 # Install Rich traceback handling
-install()
+# Install Rich traceback handler with custom settings
+install(
+    console=console,
+    # show_locals=True,     # Show local variables in tracebacks
+    width=None,           # Full width
+    word_wrap=False,      # Disable word wrapping
+    indent_guides=True,   # Show indent guides
+    suppress=[           # Suppress specific modules from traceback
+        "torch",
+        "numpy",
+        "wandb"
+    ],
+    max_frames=10        # Show last 10 frames
+)
 
 
+
+from losses.FeatureMatchingLoss import FeatureMatchingLoss
 
 
 output_dir = "output_images"
@@ -104,13 +121,17 @@ def discriminator_loss(real_pred, fake_pred, loss_type='lsgan'):
 def cosine_loss(positive_pairs, negative_pairs, margin=0.5, scale=5):
     """
     Calculates the cosine loss for the positive and negative pairs.
-    Returns a scalar loss value.
+
+    Args:
+        positive_pairs (list): List of tuples containing positive pairs (z_i, z_j).
+        negative_pairs (list): List of tuples containing negative pairs (z_i, z_j).
+        margin (float): Margin value for the cosine distance (default: 0.5).
+        scale (float): Scaling factor for the cosine distance (default: 5).
+
+    Returns:
+        torch.Tensor: Cosine loss value.
     """
     def cosine_distance(z_i, z_j):
-        # Ensure inputs are 2D tensors
-        z_i = z_i.view(z_i.size(0), -1)
-        z_j = z_j.view(z_j.size(0), -1)
-        
         # Normalize the feature vectors
         z_i = F.normalize(z_i, dim=-1)
         z_j = F.normalize(z_j, dim=-1)
@@ -124,21 +145,62 @@ def cosine_loss(positive_pairs, negative_pairs, margin=0.5, scale=5):
         return cos_dist
 
     # Calculate the cosine distance for positive pairs
-    pos_cos_dist = torch.stack([cosine_distance(z_i, z_j) for z_i, z_j in positive_pairs])
-    
+    pos_cos_dist = [cosine_distance(z_i, z_j) for z_i, z_j in positive_pairs]
+    pos_cos_dist = torch.stack(pos_cos_dist)
+
     # Calculate the cosine distance for negative pairs
-    neg_cos_dist = torch.stack([cosine_distance(z_i, z_j) for z_i, z_j in negative_pairs])
+    neg_cos_dist = [cosine_distance(z_i, z_j) for z_i, z_j in negative_pairs]
+    neg_cos_dist = torch.stack(neg_cos_dist)
+
+    # Calculate the cosine loss
+    loss = -torch.log(torch.exp(pos_cos_dist) / (torch.exp(pos_cos_dist) + torch.sum(torch.exp(neg_cos_dist))))
     
-    # Calculate the cosine loss and ensure it's a scalar
-    numerator = torch.exp(pos_cos_dist)
-    denominator = numerator + torch.sum(torch.exp(neg_cos_dist), dim=0)
-    loss = -torch.log(numerator / denominator)
-    
-    # Return mean over batch
     return loss.mean()
 
-class RunningAverage:
-    """Efficient running average computation"""
+
+
+
+def custom_collate_fn(batch):
+    """
+    Custom collate function for batching paired frames with consecutive frames
+    
+    Args:
+        batch: List of dictionaries containing paired frames
+        
+    Returns:
+        Dictionary with batched tensors
+    """
+    # Initialize batch dictionary with all required keys
+    batch_dict = {
+        "source_frame": [],
+        "next_source_frame": [],
+        "driving_frame": [],
+        "next_driving_frame": [],
+        "source_vid": [],
+        "driving_vid": []
+    }
+    
+    for item in batch:
+        # Add frames
+        batch_dict["source_frame"].append(item["source_frame"])
+        batch_dict["next_source_frame"].append(item["next_source_frame"])
+        batch_dict["driving_frame"].append(item["driving_frame"])
+        batch_dict["next_driving_frame"].append(item["next_driving_frame"])
+        
+        # Add video IDs
+        batch_dict["source_vid"].append(item["source_vid"])
+        batch_dict["driving_vid"].append(item["driving_vid"])
+    
+    # Stack tensors
+    batch_dict["source_frame"] = torch.stack(batch_dict["source_frame"])
+    batch_dict["next_source_frame"] = torch.stack(batch_dict["next_source_frame"])
+    batch_dict["driving_frame"] = torch.stack(batch_dict["driving_frame"])
+    batch_dict["next_driving_frame"] = torch.stack(batch_dict["next_driving_frame"])
+    
+    return batch_dict
+
+class RunningMetric:
+    """Class to track running averages of metrics"""
     def __init__(self):
         self.avg = 0
         self.count = 0
@@ -147,63 +209,52 @@ class RunningAverage:
         self.avg = (self.avg * self.count + value) / (self.count + 1)
         self.count += 1
 
+    def get_value(self):
+        return self.avg
+
+class MetricsTracker:
+    """Class to manage multiple running metrics"""
+    def __init__(self):
+        self.metrics = {}
+
+    def update(self, name, value):
+        if name not in self.metrics:
+            self.metrics[name] = RunningMetric()
+        self.metrics[name].update(value)
+
+    def get_average(self, name):
+        return self.metrics[name].get_value() if name in self.metrics else 0
+
+    def get_all_averages(self):
+        return {name: metric.get_value() for name, metric in self.metrics.items()}
 
 
-def custom_collate_fn(batch):
-    """
-    Custom collate function for batching paired frames
-    
-    Args:
-        batch: List of dictionaries containing paired frames
-        
-    Returns:
-        Dictionary with batched tensors
-    """
-    # Initialize batch dictionary
-    batch_dict = {
-        "source_frame": [],
-        "driving_frame": [],
-        "source_vid": [],
-        "driving_vid": []
-    }
-    
-    for item in batch:
-        # Add frames
-        batch_dict["source_frame"].append(item["source_frame"])
-        batch_dict["driving_frame"].append(item["driving_frame"])
-        
-        # Add video IDs
-        batch_dict["source_vid"].append(item["source_vid"])
-        batch_dict["driving_vid"].append(item["driving_vid"])
-    
-    # Stack tensors
-    batch_dict["source_frame"] = torch.stack(batch_dict["source_frame"])
-    batch_dict["driving_frame"] = torch.stack(batch_dict["driving_frame"])
-    
-    return batch_dict
+output_dir = "output_images"
+os.makedirs(output_dir, exist_ok=True)
 
 class VASAStage1Trainer:
     def __init__(self, cfg, Gbase, Dbase, dataloader):
         self.cfg = cfg
         
+
+    
         # Initialize accelerator first
         self.accelerator = Accelerator(
             gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
-            log_with="wandb",
+          
             mixed_precision=None
         )
         
         experiment_name = "megaportraits"
         print(f"Generated experiment name: {experiment_name}")
+        wandb.init(project="vasa", name=experiment_name,settings=wandb.Settings(save_code=False))  # Disable code saving
+
 
         # Initialize trackers
         self.accelerator.init_trackers(
             project_name=cfg.training.project_name,
             config=OmegaConf.to_container(cfg, resolve=True),
-            init_kwargs={"wandb": {
-                "name": experiment_name,
-                "dir": cfg.training.log_dir
-            }}
+          
         )
         
         # Initialize models without moving to device
@@ -211,10 +262,12 @@ class VASAStage1Trainer:
         self.Dbase = Dbase
         
         # Initialize loss functions
-        self.perceptual_loss = LPIPS(net='alex')
+        self.perceptual_loss = PerceptualLoss(device, weights={'vgg19': 20.0, 'vggface': 4.0, 'gaze': 5.0,'lpips':10.0})
         self.pairwise_transfer_loss = PairwiseTransferLoss()
         self.identity_loss = IdentitySimilarityLoss()
-        
+        self.hinge_loss = nn.HingeEmbeddingLoss(reduction='mean')
+        self.feature_matching_loss = FeatureMatchingLoss()
+      
         # Setup optimizers
         self.optimizer_G = torch.optim.AdamW(
             self.Gbase.parameters(),
@@ -267,176 +320,210 @@ class VASAStage1Trainer:
 
 
     def _cleanup_memory(self):
-        """Clean up memory by explicitly clearing cuda cache"""
+        """Enhanced memory cleanup"""
         if torch.cuda.is_available():
+            # Clear GPU cache
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+            
+            # Reset peak stats
+            torch.cuda.reset_peak_memory_stats()
+            
+            # Optional: force garbage collection
+            import gc
+            gc.collect()
 
+
+
+    # @profile    
     def train(self, train_loader, start_epoch=0):
-        """Training loop for paired data"""
+        """Training loop with enhanced memory management"""
+        torch.cuda.empty_cache()  # Initial cache clear
+        
         for epoch in range(start_epoch, self.cfg.training.base_epochs):
-            print(f"Epoch: {epoch}")
+            metrics_tracker = MetricsTracker()
             
-            # Initialize metrics for loss values only
-            running_metrics = defaultdict(lambda: RunningAverage())
-            progress_bar = tqdm(self.dataloader, desc=f'Epoch {epoch}')
+            # Reset memory at start of epoch
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
             
-            for batch_idx, batch in enumerate(progress_bar):
+            for batch_idx in tqdm(range(len(self.dataloader)), desc=f'Epoch {epoch}'):
                 try:
-                    # Each batch contains single pairs
-                    source_frame = batch['source_frame']
-                    driving_frame = batch['driving_frame']
+                    # Get batches with memory cleanup
+                    with torch.cuda.amp.autocast(enabled=False):  # Disable mixed precision temporarily
+                        current_batch = next(iter(self.dataloader))
+                        next_batch = next(iter(self.dataloader))
                     
-                    # Get next batch for star/reference pairs
-                    source_star = batch['source_frame']
-                    driving_star = batch['driving_frame']
-                    
-                    # Training step
-                    metrics = self.train_step(
-                        source_frame,
-                        driving_frame,
-                        source_star,
-                        driving_star
-                    )
-                    
-                    # Update metrics - only for loss values
-                    loss_metrics = {
-                        k: v for k, v in metrics.items() 
-                        if k.startswith('loss_') and isinstance(v, (int, float, torch.Tensor))
+                    # Extract frames and immediately move to device
+                    frames = {
+                        'source_frame': current_batch['source_frame'],  # Changed from 'source'
+                        'next_source': current_batch['next_source_frame'],
+                        'driving_frame': current_batch['driving_frame'], # Changed from 'driving'
+                        'next_driving': current_batch['next_driving_frame'],
+                        'source_frame_star': next_batch['source_frame'], # Changed from 'source_star'
+                        'driving_frame_star': next_batch['driving_frame'] # Changed from 'driving_star'
                     }
                     
-                    for k, v in loss_metrics.items():
-                        if torch.is_tensor(v):
-                            # Ensure the tensor is a scalar before converting to item
-                            if v.numel() == 1:
-                                running_metrics[k].update(v.item())
-                            else:
-                                print(f"Warning: Loss '{k}' has shape {v.shape}, expected scalar")
-                        else:
-                            running_metrics[k].update(v)
-                    
-                    # Use accelerator for backwards pass
-                    self.accelerator.backward(metrics['loss_G'])
-                    self.optimizer_G.step()
-                    self.optimizer_G.zero_grad()
-                    
-                    self.accelerator.backward(metrics['loss_D'])
-                    self.optimizer_D.step()
-                    self.optimizer_D.zero_grad()
-                    
-                    # Log images periodically
-                    if batch_idx % self.cfg.training.log_interval == 0:
-                        with torch.no_grad():
-                            wandb.log({
-                                "source_frame": wandb.Image(source_frame[0].cpu()),
-                                "driving_frame": wandb.Image(driving_frame[0].cpu()),
-                                "predicted_frame": wandb.Image(metrics['pred_frame'][0].cpu()),
-                                "source_star": wandb.Image(source_star[0].cpu()),
-                                "driving_star": wandb.Image(driving_star[0].cpu())
-                            })
-                    
-                    # Update progress bar with loss metrics only
-                    progress_bar.set_postfix({
-                        k: f"{v.avg:.4f}" for k, v in running_metrics.items()
-                    })
-                    
-                    # Cleanup
-                    del metrics
+                    # Clear unused batch data
+                    del current_batch
+                    del next_batch
                     torch.cuda.empty_cache()
                     
+                    # Training step with memory optimization
+                    with self.accelerator.accumulate(self.Gbase):
+                        # Generator update
+                        self.Gbase.zero_grad(set_to_none=True)  # More efficient than zero_grad()
+                        metrics = self.train_step(**frames)
+                        pred_frame = metrics['pred_frame'].detach()  # Detach to free memory
+                        
+                        self.accelerator.backward(metrics['loss_G'], retain_graph=True)
+                        self.optimizer_G.step()
+                        
+                        # Discriminator update
+                        self.Dbase.zero_grad(set_to_none=True)
+                        self.accelerator.backward(metrics['loss_D'])
+                        self.optimizer_D.step()
+                    
+                    # Update metrics with memory optimization
+                    for k, v in metrics.items():
+                        if k.startswith('loss_') and isinstance(v, (int, float, torch.Tensor)):
+                            if torch.is_tensor(v):
+                                if v.numel() == 1:
+                                    metrics_tracker.update(k, v.item())
+                                    del v  # Explicitly delete tensor
+                            else:
+                                metrics_tracker.update(k, v)
+                    
+                    # Log with memory optimization
+                    if batch_idx % self.cfg.training.log_interval == 0:
+                        with torch.no_grad():
+                            source_frame_cpu = frames['source_frame'][0].cpu()
+                            pred_frame_cpu = pred_frame[0].cpu()
+                            
+                            wandb.log({
+                                "source_frame": wandb.Image(resize_for_wandb(source_frame_cpu)),
+                                "pred_frame": wandb.Image(resize_for_wandb(pred_frame_cpu))
+                            })
+                            
+                            del source_frame_cpu
+                            del pred_frame_cpu
+                    # Explicit cleanup
+                    for v in frames.values():
+                        del v
+                    del frames
+                    del metrics
+                    del pred_frame
+                    
+                    # Force garbage collection and cache clearing
+                    self._cleanup_memory()
+                    
                 except Exception as e:
-                    print(f"Error processing batch {batch_idx}: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    handle_training_error(
+                        e, 
+                        batch_idx=batch_idx,
+                        extra_info=f"Error occurred during epoch {epoch}"
+                    )
+                    
+                    # Memory cleanup after error
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+                    
+                    # You might want to break the epoch if error is severe
+                    if isinstance(e, (RuntimeError, AssertionError)):
+                        console.print("[bold red]Critical error detected - Breaking epoch[/bold red]")
+                        break
+                        
                     continue
+                
+            # End of epoch cleanup
+            self.scheduler_G.step()
+            self.scheduler_D.step()
+            self.dataset.reset_pairs()
             
             # Log epoch metrics
             wandb.log({
                 'epoch': epoch,
-                **{k: v.avg for k, v in running_metrics.items()},
+                **metrics_tracker.get_all_averages(),
                 'learning_rate_G': self.scheduler_G.get_last_lr()[0],
-                'learning_rate_D': self.scheduler_D.get_last_lr()[0]
+                'learning_rate_D': self.scheduler_D.get_last_lr()[0],
+                'peak_memory_gb': torch.cuda.max_memory_allocated() / 1e9
             })
             
-            # Step schedulers
-            self.scheduler_G.step()
-            self.scheduler_D.step()
-            
-            # Reset pairs
-            self.dataset.reset_pairs()
-            
-            # Save checkpoint
             if (epoch + 1) % self.cfg.training.save_interval == 0:
-                self.save_checkpoint(f"checkpoint_epoch_{epoch+1}.pt", running_metrics)
+                self.save_checkpoint(f"checkpoint_epoch_{epoch+1}.pt", metrics_tracker.get_all_averages())
+            
+            # Epoch-end cleanup
+            self._cleanup_memory()
         
         wandb.finish()
 
-    def train_step(self, source_frame, driving_frame, source_frame_star, driving_frame_star):
-        """Training step with accelerator-prepared models"""
-        with self.accelerator.accumulate(self.Gbase):
-            # Generator forward pass
-            pred_frame = self.Gbase(source_frame, driving_frame)
-            
-            # Calculate losses - ensure all are scalars
-            loss_perceptual = self.perceptual_loss(pred_frame, driving_frame).mean()
-            
-            # Discriminator losses
-            real_pred = self.Dbase(driving_frame, source_frame)
-            with torch.no_grad():
-                fake_pred = self.Dbase(pred_frame.detach(), source_frame)
-            loss_D = discriminator_loss(real_pred, fake_pred, loss_type='lsgan')
-            
-            # Generator adversarial loss
-            fake_pred = self.Dbase(pred_frame, source_frame)
-            loss_G_adv = -torch.mean(fake_pred)
-            
-            # Feature matching loss
-            loss_fm = F.mse_loss(
-                pred_frame.view(pred_frame.size(0), -1),
-                driving_frame.view(driving_frame.size(0), -1)
-            )
-            
-            # Cross-reenactment with proper reduction
-            cross_reenacted_image = self.Gbase(source_frame_star, driving_frame)
-            
-            # Calculate motion encodings - ensure proper dimensions
-            with torch.no_grad():
-                z_pred = self.Gbase.motionEncoder(pred_frame)[-1].view(pred_frame.size(0), -1)
-                zd = self.Gbase.motionEncoder(driving_frame)[-1].view(driving_frame.size(0), -1)
-                z_star_pred = self.Gbase.motionEncoder(cross_reenacted_image)[-1].view(cross_reenacted_image.size(0), -1)
-                zd_star = self.Gbase.motionEncoder(driving_frame_star)[-1].view(driving_frame_star.size(0), -1)
-            
-            # Calculate cycle consistency loss
-            P = [(z_pred, zd), (z_star_pred, zd)]
-            N = [(z_pred, zd_star), (z_star_pred, zd_star)]
-            loss_cycle = cosine_loss(P, N)
-            
-            # Total generator loss with verification
-            loss_G = (
-                self.cfg.training.w_per * loss_perceptual +
-                self.cfg.training.w_adv * loss_G_adv +
-                self.cfg.training.w_fm * loss_fm +
-                self.cfg.training.w_cos * loss_cycle
-            )
-            
-            # Debug prints for loss shapes
-            # print(f"Loss values:")
-            # print(f"Perceptual: {loss_perceptual.item():.4f}")
-            # print(f"Adversarial: {loss_G_adv.item():.4f}")
-            # print(f"Feature matching: {loss_fm.item():.4f}")
-            # print(f"Cycle: {loss_cycle.item():.4f}")
-            # print(f"Total G: {loss_G.item():.4f}")
-            # print(f"D: {loss_D.item():.4f}")
-            
-            return {
-                'loss_G': loss_G,
-                'loss_D': loss_D,
-                'loss_perceptual': loss_perceptual,
-                'loss_adversarial': loss_G_adv,
-                'loss_feature_matching': loss_fm,
-                'loss_cycle': loss_cycle,
-                'pred_frame': pred_frame  # Keep this for visualization only
-            }
+    # @profile
+    def train_step(self, source_frame, next_source, driving_frame, next_driving, source_frame_star, driving_frame_star):
+        """Training step with accelerator-prepared models and proper graph retention"""
+        
+        # Generator forward pass
+        pred_frame = self.Gbase(source_frame, driving_frame)
+        
+        # Calculate perceptual loss
+        loss_perceptual = self.perceptual_loss(pred_frame, driving_frame).mean()
+        
+        # Adversarial ground truths
+        patch = (1, self.cfg.data.train_width // 2 ** 4, self.cfg.data.train_height // 2 ** 4)
+        valid = Variable(torch.ones((driving_frame.size(0), *patch)), requires_grad=False).to(driving_frame.device)
+        fake = Variable(torch.ones((driving_frame.size(0), *patch)) * -1, requires_grad=False).to(driving_frame.device)
+
+        # Calculate discriminator predictions
+        real_pred = self.Dbase(driving_frame, source_frame)
+        fake_pred = self.Dbase(pred_frame.detach(), source_frame) 
+        
+        # Calculate discriminator loss
+        loss_real = self.hinge_loss(real_pred, valid)
+        loss_fake = self.hinge_loss(fake_pred, fake)
+        loss_D = discriminator_loss(real_pred, fake_pred, loss_type='lsgan')
+
+        # Calculate generator adversarial loss
+        # Note: Need a new forward pass through discriminator for generator training
+        fake_pred_G = self.Dbase(pred_frame, source_frame)  # Not detached for generator
+        loss_G_adv = 0.5 * (self.hinge_loss(fake_pred_G, valid) + loss_fake)
+
+        # Feature matching loss
+        loss_fm = self.feature_matching_loss(pred_frame, driving_frame)
+        
+        # Cross-reenactment
+        cross_reenacted_image = self.Gbase(source_frame_star, driving_frame)
+        
+        # Motion descriptors
+        with torch.no_grad():
+            _, _, z_pred = self.Gbase.motionEncoder(pred_frame)
+            _, _, zd = self.Gbase.motionEncoder(driving_frame)
+            _, _, z_star_pred = self.Gbase.motionEncoder(cross_reenacted_image)
+            _, _, zd_star = self.Gbase.motionEncoder(driving_frame_star)
+        
+        # Cycle consistency loss
+        P = [(z_pred, zd), (z_star_pred, zd)]
+        N = [(z_pred, zd_star), (z_star_pred, zd_star)]
+        loss_G_cos = cosine_loss(P, N)
+        
+        # Calculate total generator loss
+        loss_G_total = (
+            self.cfg.training.w_per * loss_perceptual +
+            self.cfg.training.w_adv * loss_G_adv +
+            self.cfg.training.w_fm * loss_fm +
+            self.cfg.training.w_cos * loss_G_cos
+        )
+        
+        # Return all losses and predictions
+        return {
+            'loss_G': loss_G_total,
+            'loss_D': loss_D,
+            'loss_perceptual': loss_perceptual,
+            'loss_adversarial': loss_G_adv,
+            'loss_feature_matching': loss_fm,
+            'loss_cycle': loss_G_cos,
+            'pred_frame': pred_frame
+        }
+
 
     def save_checkpoint(self, filename, metrics):
         checkpoint = {
@@ -451,7 +538,7 @@ class VASAStage1Trainer:
         }
         
         torch.save(checkpoint, filename)
-        wandb.save(filename)
+        # wandb.save(filename)
 
 
 
@@ -461,9 +548,9 @@ def main(cfg: OmegaConf) -> None:
 
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(),
-        # transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        # transforms.RandomHorizontalFlip(),
+        # transforms.ColorJitter(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
 
@@ -471,12 +558,12 @@ def main(cfg: OmegaConf) -> None:
         video_dir=cfg.training.video_dir,
         width=512,
         height=512,
-        initial_pairs=1,
+        initial_pairs=1, # just 1 video pair
         cache_dir=cfg.training.cache_video_dir,
         transform=transform,
         remove_background=True,
         use_greenscreen=False,
-        apply_warping=True,
+        apply_warping=False,
         max_frames=100,
         duplicate_short=True,
         warp_strength=0.01
