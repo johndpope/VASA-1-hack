@@ -1925,18 +1925,18 @@ class PerceptualLoss(nn.Module):
 
         # VGG19 network
         vgg19 = models.vgg19(pretrained=True).features
-        self.vgg19 = nn.Sequential(*[vgg19[i] for i in range(30)]).eval()
+        self.vgg19 = nn.Sequential(*[vgg19[i] for i in range(30)]).to(device).eval()
         self.vgg19_layers = [1, 6, 11, 20, 29]
 
         # VGGFace network
-        self.vggface = InceptionResnetV1(pretrained='vggface2').eval()
+        self.vggface = InceptionResnetV1(pretrained='vggface2').to(device).eval()
         self.vggface_layers = [4, 5, 6, 7]
+
+        # LPIPS
+        self.lpips = LPIPS(net='vgg').to(device).eval()
 
         # Gaze loss
         self.gaze_loss = MPGazeLoss(device)
-
-        # LPips   
-        self.lpips = LPIPS(net='vgg').eval()
 
     def forward(self, predicted, target, use_fm_loss=False):
         # Normalize input images
@@ -1949,11 +1949,11 @@ class PerceptualLoss(nn.Module):
         # Compute VGGFace perceptual loss
         vggface_loss = self.compute_vggface_loss(predicted, target)
 
-        # Compute gaze loss
-        # gaze_loss = self.gaze_loss(predicted, target)
-        
         # Compute LPIPS loss
         lpips_loss = self.lpips(predicted, target).mean()
+
+        # Compute gaze loss
+        # gaze_loss = self.gaze_loss(predicted, target) - broken
 
         # Compute total perceptual loss
         total_loss = (
@@ -1983,11 +1983,8 @@ class PerceptualLoss(nn.Module):
         loss = 0.0
         predicted_features = predicted
         target_features = target
-        #print(f"predicted_features:{predicted_features.shape}")
-        #print(f"target_features:{target_features.shape}")
 
         for i, layer in enumerate(model.children()):
-            # print(f"i{i}")
             if isinstance(layer, nn.Conv2d):
                 predicted_features = layer(predicted_features)
                 target_features = layer(target_features)

@@ -40,9 +40,9 @@ training:
   # video_dir: './junk'
   sample_rate: 25  
   n_sample_frames: 100
-  # json_file: './data/overfit.json'
+  json_file: './data/overfit.json'
 
-  json_file: './data/celebvhq_info.json'
+  # json_file: './data/celebvhq_info.json'
   w_per: 20  # perceptual loss
   w_adv: 1   # adversarial loss
   w_fm: 40   # feature matching loss
