@@ -25,7 +25,7 @@ training:
   gradient_accumulation_steps: 1
   frame_offset: 20
   checkpoint_path: './checkpoint_epoch100.pth'
-  save_interval: 500
+  save_interval: 50
   log_interval: 100
   lambda_perceptual: 1.0
   lambda_adversarial: 1.0
@@ -39,13 +39,15 @@ training:
   student_epochs: 100
   use_gpu_video_tensor: True
   prev_frames: 2  # Add this line to specify the number of previous frames to consider
-  video_dir:  '/media/oem/12TB/Downloads/CelebV-HQ/celebvhq/35666' # point to your junk folder or 40gb - https://academictorrents.com/details/843b5adb0358124d388c4e9836654c246b988ff4
-  cache_video_dir: '/media/oem/12TB/Downloads/CelebV-HQ/celebvhq/35666/cache' 
+  video_dir:  './junk' # point to your junk folder or 40gb - https://academictorrents.com/details/843b5adb0358124d388c4e9836654c246b988ff4
+  cache_video_dir: './junk/cache' 
 
   # video_dir: './junk'
   sample_rate: 25  
   n_sample_frames: 100
-  json_file: './data/overfit.json'
+  # json_file: './data/overfit.json'
+  json_file: './data/driving_video.json'
+  
 
   # json_file: './data/celebvhq_info.json'
   w_per: 20  # perceptual loss

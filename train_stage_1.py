@@ -20,6 +20,8 @@ from tqdm import tqdm
 from EmoDataset import EMODataset
 from model import PerceptualLoss
 import os
+import random
+import torchvision.transforms.functional as TF
 
 
 output_dir = "output_images"
@@ -280,8 +282,92 @@ def train_base(cfg, Gbase, Dbase, dataloader):
     # End training
     accelerator.end_training()
 
+
+
+class RandomGaussianBlur(object):
+    def __init__(self, kernel_range=(3, 7), sigma_range=(0.1, 2.0)):
+        self.kernel_range = kernel_range
+        self.sigma_range = sigma_range
+
+    def __call__(self, img):
+        kernel_size = random.randrange(self.kernel_range[0], self.kernel_range[1] + 1, 2)
+        sigma = random.uniform(self.sigma_range[0], self.sigma_range[1])
+        return TF.gaussian_blur(img, kernel_size, [sigma, sigma])
+
+class RandomSharpness(object):
+    def __init__(self, range=(0.0, 4.0)):
+        self.range = range
+    
+    def __call__(self, img):
+        factor = random.uniform(self.range[0], self.range[1])
+        return TF.adjust_sharpness(img, factor)
+
+# Custom color jitter that applies transformations with random probability
+class RandomColorJitter(object):
+    def __init__(self, brightness=0.5, contrast=0.5, saturation=0.5, hue=0.5):
+        self.brightness = brightness
+        self.contrast = contrast
+        self.saturation = saturation
+        self.hue = hue
+
+    def __call__(self, img):
+        transforms_list = []
+        
+        if random.random() < 0.5 and self.brightness > 0:
+            brightness_factor = random.uniform(1-self.brightness, 1+self.brightness)
+            transforms_list.append(lambda x: TF.adjust_brightness(x, brightness_factor))
+        
+        if random.random() < 0.5 and self.contrast > 0:
+            contrast_factor = random.uniform(1-self.contrast, 1+self.contrast)
+            transforms_list.append(lambda x: TF.adjust_contrast(x, contrast_factor))
+        
+        if random.random() < 0.5 and self.saturation > 0:
+            saturation_factor = random.uniform(1-self.saturation, 1+self.saturation)
+            transforms_list.append(lambda x: TF.adjust_saturation(x, saturation_factor))
+        
+        if random.random() < 0.5 and self.hue > 0:
+            hue_factor = random.uniform(-self.hue, self.hue)
+            transforms_list.append(lambda x: TF.adjust_hue(x, hue_factor))
+        
+        random.shuffle(transforms_list)
+        
+        for t in transforms_list:
+            img = t(img)
+        
+        return img
+
+
+
+
 def main(cfg: OmegaConf) -> None:
-    transform = transforms.Compose([
+ # Main transform pipeline
+    # N.b. the npz saved file will freeze the random state
+    # transform_train = transforms.Compose([
+    #     transforms.RandomHorizontalFlip(p=0.5),
+    #     transforms.RandomRotation(degrees=(-5, 5)),
+    #     transforms.RandomAffine(
+    #         degrees=0,
+    #         translate=(0.05, 0.05),
+    #         scale=(0.95, 1.05),
+    #         shear=(-5, 5, -5, 5)
+    #     ),
+    #     RandomColorJitter(
+    #         brightness=0.3,
+    #         contrast=0.3,
+    #         saturation=0.3,
+    #         hue=0.1
+    #     ),
+    #     # RandomGaussianBlur(kernel_range=(3, 5), sigma_range=(0.1, 1.0)),
+    #     RandomSharpness(range=(0.0, 2.0)),
+    #     transforms.RandomGrayscale(p=0.02),
+    #     transforms.ToTensor(),
+    #     transforms.Normalize(
+    #         mean=[0.485, 0.456, 0.406],
+    #         std=[0.229, 0.224, 0.225]
+    #     ),
+    # ])
+
+    transform_train = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
@@ -296,9 +382,9 @@ def main(cfg: OmegaConf) -> None:
         img_scale=(1.0, 1.0),
         video_dir=cfg.training.video_dir,
         json_file=cfg.training.json_file,
-        transform=transform,
+        transform=transform_train,
         max_frames=100,
-        apply_warping=True 
+        apply_warping=False 
     )
 
     dataloader = DataLoader(

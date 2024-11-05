@@ -17,3 +17,6 @@ junk/audio_cache/M2Ohb0FAaJU_1.wav
 logs/*
 wandb/*
 *.dat
+*.safetensors
+*.bin
+checkpoint-epoch-50/random_states_0.pkl
