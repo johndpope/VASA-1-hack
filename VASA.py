@@ -57,6 +57,200 @@ class AudioEncoder(nn.Module):
         return x
 
 
+import torch
+import torch.nn as nn
+from typing import Dict, Tuple, Optional
+from tqdm import tqdm
+
+class AdaCacheDiffusionSampler:
+    """
+    Enhanced diffusion sampler with Adaptive Caching for VASA
+    """
+    def __init__(
+        self,
+        num_steps: int = 50,
+        min_beta: float = 1e-4,
+        max_beta: float = 0.02,
+        cache_metrics: str = "l1",  # l1, l2, or cosine
+        base_rates: Optional[Dict[str, int]] = None,
+        use_motion_reg: bool = True
+    ):
+        self.num_steps = num_steps
+        
+        # Set up diffusion parameters
+        self.beta = torch.linspace(min_beta, max_beta, num_steps)
+        self.alpha = 1.0 - self.beta
+        self.alpha_bar = torch.cumprod(self.alpha, dim=0)
+        
+        # Pre-compute sampling parameters
+        self.sqrt_alpha = torch.sqrt(self.alpha)
+        self.sqrt_one_minus_alpha = torch.sqrt(1.0 - self.alpha)
+        self.sqrt_recip_alpha = torch.sqrt(1.0 / self.alpha)
+        self.sqrt_recip_alpha_bar = torch.sqrt(1.0 / self.alpha_bar)
+        
+        # AdaCache parameters
+        self.cache_metrics = cache_metrics
+        self.use_motion_reg = use_motion_reg
+        
+        # Default cache rates for different speed profiles
+        self.base_rates = base_rates or {
+            "fast": [12, 10, 8, 6, 4, 3],
+            "medium": [8, 6, 4, 2, 1],
+            "slow": [2, 1]
+        }
+        
+        # Cache rate thresholds (can be tuned)
+        self.thresholds = {
+            0.08: 6,
+            0.16: 5,
+            0.24: 4,
+            0.32: 3,
+            0.40: 2,
+            1.00: 1
+        }
+
+    def compute_distance_metric(
+        self,
+        current: torch.Tensor,
+        previous: torch.Tensor,
+        steps_apart: int
+    ) -> torch.Tensor:
+        """Compute distance between current and previous representations"""
+        if self.cache_metrics == "l1":
+            return torch.abs(current - previous).mean() / steps_apart
+        elif self.cache_metrics == "l2":
+            return torch.sqrt(((current - previous) ** 2).mean()) / steps_apart
+        else:  # cosine
+            current_flat = current.view(current.size(0), -1)
+            previous_flat = previous.view(previous.size(0), -1)
+            return 1 - torch.nn.functional.cosine_similarity(
+                current_flat, previous_flat, dim=1
+            ).mean()
+
+    def compute_motion_score(
+        self,
+        features: torch.Tensor,
+        frame_step: int = 1
+    ) -> torch.Tensor:
+        """Compute motion score based on frame differences"""
+        if not self.use_motion_reg:
+            return torch.tensor(1.0, device=features.device)
+            
+        B, T = features.shape[:2]
+        frame_diffs = []
+        
+        for i in range(0, T - frame_step, frame_step):
+            diff = torch.abs(features[:, i+frame_step:] - features[:, :-frame_step])
+            frame_diffs.append(diff.mean())
+            
+        motion_score = torch.stack(frame_diffs).mean()
+        return motion_score
+
+    def get_cache_rate(
+        self,
+        distance: torch.Tensor,
+        motion_score: Optional[torch.Tensor] = None
+    ) -> int:
+        """Determine caching rate based on distance and motion"""
+        if motion_score is not None:
+            distance = distance * (1 + motion_score)
+            
+        for threshold, rate in self.thresholds.items():
+            if distance < threshold:
+                return rate
+        return 1
+
+    @torch.no_grad()
+    def ddim_sample_with_adacache(
+        self,
+        model: nn.Module,
+        shape: Tuple[int, ...],
+        conditions: Dict[str, torch.Tensor],
+        cfg_scales: Dict[str, float],
+        eta: float = 0.0,
+        device: Optional[torch.device] = None
+    ) -> torch.Tensor:
+        """
+        Enhanced DDIM sampling with AdaCache
+        """
+        device = device or next(model.parameters()).device
+        batch_size = shape[0]
+        x = torch.randn(shape, device=device)
+        
+        # Cache storage
+        cached_residuals = {}
+        last_computed_step = -1
+        
+        pbar = tqdm(reversed(range(self.num_steps)), desc='DDIM Sampling with AdaCache')
+        
+        for t in pbar:
+            # Get diffusion parameters
+            at = self.alpha_bar[t]
+            at_next = self.alpha_bar[t-1] if t > 0 else torch.tensor(1.0)
+            t_embed = torch.ones(batch_size, device=device) * t
+            
+            # Check if we need to compute or can use cache
+            compute_step = False
+            if t == self.num_steps - 1:  # First step
+                compute_step = True
+            elif last_computed_step >= 0:
+                # Get representations from model (without computing gradients)
+                with torch.no_grad():
+                    current_rep = model.get_intermediate_rep(x, t_embed, conditions)
+                    
+                # Compute distance metric
+                distance = self.compute_distance_metric(
+                    current_rep,
+                    cached_residuals['rep'],
+                    last_computed_step - t
+                )
+                
+                # Get motion score if enabled
+                motion_score = None
+                if self.use_motion_reg:
+                    motion_score = self.compute_motion_score(current_rep)
+                
+                # Determine cache rate
+                cache_rate = self.get_cache_rate(distance, motion_score)
+                compute_step = (last_computed_step - t) >= cache_rate
+            
+            if compute_step:
+                # Compute model prediction with CFG
+                uncond_conditions = {k: torch.zeros_like(v) for k, v in conditions.items()}
+                eps_uncond = model(x, t_embed, uncond_conditions)
+                eps_cond = model(x, t_embed, conditions)
+                
+                # Apply CFG scaling
+                eps = eps_uncond
+                for cond_type, scale in cfg_scales.items():
+                    eps = eps + scale * (eps_cond - eps_uncond)
+                
+                # Cache the computed values
+                cached_residuals = {
+                    'eps': eps,
+                    'rep': model.get_intermediate_rep(x, t_embed, conditions)
+                }
+                last_computed_step = t
+            else:
+                # Reuse cached values
+                eps = cached_residuals['eps']
+            
+            # DDIM update step
+            x0_pred = (x - torch.sqrt(1 - at) * eps) / torch.sqrt(at)
+            
+            # Optional stochastic component
+            sigma = eta * torch.sqrt((1 - at_next) / (1 - at)) * torch.sqrt(1 - at / at_next)
+            noise = torch.randn_like(x) if eta > 0 else 0
+            
+            # Compute x_(t-1)
+            x_prev = torch.sqrt(at_next) * x0_pred + \
+                    torch.sqrt(1 - at_next - sigma**2) * eps + \
+                    sigma * noise
+            
+            x = x_prev
+            
+        return x
+    
 
 class VASADiffusion:
     """

@@ -14,10 +14,9 @@ from collections import defaultdict
 import yaml
 
 from typing import List, Optional, Tuple
-from VASA import *
-from loss import *
+from VASA import VideoGenerator,MotionGenerator,VideoPostProcessor,Evaluator,VASALossModule, VASAFaceEncoder, VASAFaceDecoder, VASADiffusionTransformer, VASADiffusion, IdentityLoss, DPELoss,AdaCacheDiffusionSampler
 from vasa_config import VASAConfig
-from generator import VideoGenerator,MotionGenerator,VideoPostProcessor
+
 import wandb
 from dataset import VASADataset
 from omegaconf import OmegaConf
@@ -417,11 +416,18 @@ class VASATrainer:
         
         self.face_decoder = VASAFaceDecoder().to(self.device)
         
-        self.diffusion = VASADiffusion(
-            num_steps=self.config.num_steps,
-            beta_start=self.config.beta_start,
-            beta_end=self.config.beta_end
+        # self.diffusion = VASADiffusion(
+        #     num_steps=self.config.num_steps,
+        #     beta_start=self.config.beta_start,
+        #     beta_end=self.config.beta_end
+        # )
+
+        self.diffusion = AdaCacheDiffusionSampler(
+            num_steps=50,
+            use_motion_reg=True,  # Enable motion regularization
+            cache_metrics="l1"    # Use L1 distance metric
         )
+                
         
         # Wrap for distributed training
         if self.distributed:
