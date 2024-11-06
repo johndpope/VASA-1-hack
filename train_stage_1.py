@@ -22,23 +22,43 @@ from model import PerceptualLoss
 import os
 import random
 import torchvision.transforms.functional as TF
-
+from memory_profiler import profile
 
 output_dir = "output_images"
 os.makedirs(output_dir, exist_ok=True)
 
 # align to cyclegan
-def discriminator_loss(real_pred, fake_pred, loss_type='lsgan'):
-    if loss_type == 'lsgan':
-        real_loss = torch.mean((real_pred - 1)**2)
-        fake_loss = torch.mean(fake_pred**2)
-    elif loss_type == 'vanilla':
-        real_loss = F.binary_cross_entropy_with_logits(real_pred, torch.ones_like(real_pred))
-        fake_loss = F.binary_cross_entropy_with_logits(fake_pred, torch.zeros_like(fake_pred))
-    else:
-        raise NotImplementedError(f'Loss type {loss_type} is not implemented.')
+def discriminator_loss(real_preds, fake_preds, loss_type='lsgan'):
+    """
+    Compute discriminator loss for multi-scale predictions.
     
-    return ((real_loss + fake_loss) * 0.5).requires_grad_()
+    Args:
+        real_preds: List of discriminator predictions on real images at each scale
+        fake_preds: List of discriminator predictions on fake images at each scale
+        loss_type: Loss type ('lsgan' or 'vanilla')
+    """
+    # Initialize total loss
+    loss = 0
+    num_scales = len(real_preds)
+    
+    # Process each scale
+    for real_pred, fake_pred in zip(real_preds, fake_preds):
+        if loss_type == 'lsgan':
+            # LSGAN loss for current scale
+            real_loss = torch.mean((real_pred - 1)**2)
+            fake_loss = torch.mean(fake_pred**2)
+        elif loss_type == 'vanilla':
+            # BCE loss for current scale
+            real_loss = F.binary_cross_entropy_with_logits(real_pred, torch.ones_like(real_pred))
+            fake_loss = F.binary_cross_entropy_with_logits(fake_pred, torch.zeros_like(fake_pred))
+        else:
+            raise NotImplementedError(f'Loss type {loss_type} is not implemented.')
+        
+        # Add loss for current scale
+        loss += (real_loss + fake_loss) * 0.5
+    
+    # Average across scales and ensure gradients
+    return (loss / num_scales).requires_grad_()
 
 
 # cosine distance formula
@@ -104,6 +124,51 @@ def cosine_loss(pos_pairs, neg_pairs, accelerator, s=5.0, m=0.2):
     
     return final_loss.requires_grad_()
 
+def feature_matching_loss(real_features, fake_features):
+    """
+    Calculate feature matching loss between real and fake feature maps
+    from different layers and scales of the discriminator.
+    
+    Args:
+        real_features: List of lists of features from discriminator for real images
+                      [scale][layer] indexing
+        fake_features: List of lists of features from discriminator for fake images
+                      [scale][layer] indexing
+    """
+    fm_loss = 0.0
+    num_d = len(real_features)  # Number of discriminators (scales)
+    
+    for i in range(num_d):  # For each discriminator
+        num_layers = len(real_features[i])  # Number of layers in current discriminator
+        for j in range(num_layers):  # For each layer
+            fm_loss += F.l1_loss(fake_features[i][j], real_features[i][j].detach())
+            
+    return fm_loss / num_d  # Average over number of discriminators
+
+def adversarial_loss(discriminator_preds, is_real=False):
+    """
+    Compute generator/discriminator adversarial loss for multi-scale predictions.
+    
+    Args:
+        discriminator_preds: List of discriminator predictions at each scale
+        is_real: If True, compute loss for real samples, else for fake samples
+    
+    Returns:
+        Adversarial loss averaged over scales
+    """
+    loss = 0
+    num_scales = len(discriminator_preds)
+    
+    for pred in discriminator_preds:
+        if is_real:
+            # For real samples: -D(real)
+            loss += -torch.mean(pred)
+        else:
+            # For fake samples: D(fake)
+            loss += torch.mean(pred)
+            
+    return loss / num_scales
+
 
 def train_base(cfg, Gbase, Dbase, dataloader):
     # Initialize accelerator
@@ -125,7 +190,7 @@ def train_base(cfg, Gbase, Dbase, dataloader):
     # Move models, optimizers, and dataloader to appropriate device
     patch = (1, cfg.data.train_width // 2 ** 4, cfg.data.train_height // 2 ** 4)
     hinge_loss = nn.HingeEmbeddingLoss(reduction='mean')
-    feature_matching_loss = nn.MSELoss()
+
     
     optimizer_G = torch.optim.AdamW(Gbase.parameters(), lr=cfg.training.lr, betas=(0.5, 0.999), weight_decay=1e-2)
     optimizer_D = torch.optim.AdamW(Dbase.parameters(), lr=cfg.training.lr, betas=(0.5, 0.999), weight_decay=1e-2)
@@ -173,42 +238,45 @@ def train_base(cfg, Gbase, Dbase, dataloader):
                 with accelerator.accumulate(Gbase):
                     pred_frame = Gbase(source_frame, driving_frame)
                     
-                    # Calculate losses
-                    loss_G_per = perceptual_loss_fn(pred_frame, source_frame)
-                    
-                    # Adversarial ground truths
-                    valid = Variable(torch.ones((driving_frame.size(0), *patch)), requires_grad=False).to(accelerator.device)
-                    fake = Variable(torch.ones((driving_frame.size(0), *patch)) * -1, requires_grad=False).to(accelerator.device)
 
-                    real_pred = Dbase(driving_frame, source_frame)
-                    fake_pred = Dbase(pred_frame.detach(), source_frame)
-                    
-                    loss_real = hinge_loss(real_pred, valid)
-                    loss_fake = hinge_loss(fake_pred, fake)
-                    loss_G_adv = 0.5 * (loss_real + loss_fake)
 
-                    # Feature matching loss
-                    loss_fm = feature_matching_loss(pred_frame, driving_frame)
+                    # Get discriminator predictions and features
+                    fake_preds = Dbase(pred_frame)
+                    real_preds = Dbase(driving_frame)
+                    
+                    fake_features = Dbase.get_features(pred_frame)
+                    real_features = Dbase.get_features(driving_frame)
+
+
+                    # Calculate generator losses
+                    loss_G_adv = adversarial_loss(fake_preds)
+                    loss_G_fm = feature_matching_loss(real_features, fake_features)
+                    loss_G_per = perceptual_loss_fn(pred_frame, driving_frame)
+
+
 
                     # Cross reenactment
                     cross_reenacted_image = Gbase(source_frame_star, driving_frame)
                     
-                    # Motion descriptors
+                    # Get motion descriptors from direct encoding
                     _, _, z_pred = Gbase.motionEncoder(pred_frame)
                     _, _, zd = Gbase.motionEncoder(driving_frame)
+                    # Get motion descriptors from cross-reenacted results
                     _, _, z_star_pred = Gbase.motionEncoder(cross_reenacted_image)
                     _, _, zd_star = Gbase.motionEncoder(driving_frame_star)
 
-                    # Cosine loss
-                    P = [(z_pred, zd), (z_star_pred, zd)]
-                    N = [(z_pred, zd_star), (z_star_pred, zd_star)]
+                    # cycle_consistency_loss 
+                    P = [(z_pred, zd),  # Same video motion pair
+                         (z_star_pred, zd)] # Cross-video motion pair with same driving
+                    N = [(z_pred, zd_star), # Different motion
+                         (z_star_pred, zd_star)] # Different motion
                     loss_G_cos = cosine_loss(P, N,accelerator)
 
                     # Total generator loss
                     total_G_loss = (
                         cfg.training.w_per * loss_G_per +
                         cfg.training.w_adv * loss_G_adv +
-                        cfg.training.w_fm * loss_fm +
+                        cfg.training.w_fm * loss_G_fm +
                         cfg.training.w_cos * loss_G_cos
                     )
 
@@ -219,9 +287,10 @@ def train_base(cfg, Gbase, Dbase, dataloader):
 
                 # Discriminator forward pass
                 with accelerator.accumulate(Dbase):
-                    real_pred = Dbase(driving_frame, source_frame)
-                    fake_pred = Dbase(pred_frame.detach(), source_frame)
-                    loss_D = discriminator_loss(real_pred, fake_pred, loss_type='lsgan')
+                    fake_preds = Dbase(pred_frame.detach())
+                    real_preds = Dbase(driving_frame)
+                    
+                    loss_D = discriminator_loss(real_preds, fake_preds)
                     
                     accelerator.backward(loss_D)
                     optimizer_D.step()
@@ -395,7 +464,7 @@ def main(cfg: OmegaConf) -> None:
     )
 
     Gbase = model.Gbase()
-    Dbase = model.Discriminator()
+    Dbase = model.MultiScalePatchDiscriminator()
     
     train_base(cfg, Gbase, Dbase, dataloader)
 

@@ -289,6 +289,7 @@ class Eapp(nn.Module):
         # print(f"🍌 es:{es_resnet.shape}") # [1, 512, 2, 2]
         es_flatten = torch.flatten(es_resnet, start_dim=1)
         es = self.fc(es_flatten) # torch.Size([bs, 2048]) -> torch.Size([bs, 2])        
+        # print("es:",es.shape)
         return vs, es
 
 
@@ -2185,3 +2186,74 @@ class IdentitySimilarityLoss(nn.Module):
         loss = -similarity.mean()
         
         return loss
+    
+def make_grid(h, w, device, dtype):
+    grid_x = torch.linspace(-1, 1, w, device=device, dtype=dtype)
+    grid_y = torch.linspace(-1, 1, h, device=device, dtype=dtype)
+    v, u = torch.meshgrid(grid_y, grid_x)
+    grid = torch.stack([u, v], dim=2).view(1, h * w, 2)
+
+    return grid
+
+class MultiScalePatchDiscriminator(nn.Module):
+    def __init__(self, in_channels=3, n_scales=3):
+        super().__init__()
+        self.n_scales = n_scales
+        self.discriminators = nn.ModuleList()
+        
+        for _ in range(n_scales):
+            self.discriminators.append(self._make_discriminator_layers(in_channels))
+    
+    def _make_discriminator_layers(self, in_channels):
+        """Creates a single-scale patch discriminator that returns intermediate features"""
+        def discriminator_block(in_filters, out_filters, stride=2, normalize=True):
+            layers = [
+                nn.utils.spectral_norm(nn.Conv2d(in_filters, out_filters, 4, stride=stride, padding=1, bias=False))
+            ]
+            if normalize:
+                layers.append(nn.InstanceNorm2d(out_filters))
+            layers.append(nn.LeakyReLU(0.2, inplace=True))
+            return nn.Sequential(*layers)
+
+        # Store each layer separately to access intermediate features
+        return nn.ModuleDict({
+            'layer1': discriminator_block(in_channels, 64, normalize=False),
+            'layer2': discriminator_block(64, 128),
+            'layer3': discriminator_block(128, 256),
+            'layer4': discriminator_block(256, 512),
+            'layer5': nn.utils.spectral_norm(nn.Conv2d(512, 1, 4, padding=1, bias=False))
+        })
+
+    def get_features(self, x):
+        """Get intermediate features from all scales for feature matching loss"""
+        features = []
+        for i in range(self.n_scales):
+            if i > 0:
+                x = F.interpolate(x, scale_factor=0.5, mode='bilinear', align_corners=False)
+            
+            scale_features = []
+            feat = x
+            D = self.discriminators[i]
+            
+            # Collect features from each layer
+            for layer in D.values():
+                feat = layer(feat)
+                scale_features.append(feat)
+            
+            features.append(scale_features)
+        return features
+
+    def forward(self, x):
+        """Forward pass returns only final discriminator predictions"""
+        predictions = []
+        for i in range(self.n_scales):
+            if i > 0:
+                x = F.interpolate(x, scale_factor=0.5, mode='bilinear', align_corners=False)
+            
+            feat = x
+            D = self.discriminators[i]
+            for layer in D.values():
+                feat = layer(feat)
+            predictions.append(feat)
+            
+        return predictions
