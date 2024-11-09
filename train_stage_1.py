@@ -225,45 +225,54 @@ def train_base(cfg, Gbase, Dbase, dataloader):
                     mix_mask = outputs['pred_mixing_mask']
                     mix_masked = outputs['pred_mixing_masked_img']
 
+
+                    # Generate cross-reenacted image
+                    cross_outputs = Gbase(source_frame_star, driving_frame)
+                    cross_reenacted_image = cross_outputs['pred_target_img']
+
                     # Get motion encodings
                     Rs, ts, zs = outputs['source_rotation'], outputs['source_translation'], outputs['source_expression']
                     Rd, td, zd = outputs['target_rotation'], outputs['target_translation'], outputs['target_expression']
-                    
-                    # Get motion encodings for star frames
-                    Rs_star, ts_star, zs_star = Gbase.motionEncoder(source_frame_star)
-                    Rd_star, td_star, zd_star = Gbase.motionEncoder(driving_frame_star)
+                    Rs_star, ts_star, zs_star = cross_outputs['source_rotation'], cross_outputs['source_translation'], cross_outputs['source_expression']
 
-                    # Get discriminator predictions and features
+
+                  
+                    # Get discriminator predictions for all outputs
                     fake_preds = Dbase(pred_frame)
                     real_preds = Dbase(driving_frame)
+                    cross_preds = Dbase(cross_reenacted_image)
                     mix_preds = Dbase(mix_output) if mix_output is not None else None
                     
                     fake_features = Dbase.get_features(pred_frame)
                     real_features = Dbase.get_features(driving_frame)
+                    cross_features = Dbase.get_features(cross_reenacted_image)
 
-                    # Calculate generator losses
+
+                    # Calculate standard generator losses
                     loss_G_adv = adversarial_loss(fake_preds)
                     loss_G_fm = feature_matching_loss(real_features, fake_features)
                     loss_G_per = perceptual_loss_fn(pred_frame, driving_frame)
 
+                    # Cross-reenactment losses
+                    loss_G_cross_adv = adversarial_loss(cross_preds)
+                    loss_G_cross_fm = feature_matching_loss(real_features, cross_features)
+                    loss_G_cross_per = perceptual_loss_fn(cross_reenacted_image, driving_frame)
+
+                    # Expression consistency between predictions
+                    loss_expr_consistency = F.mse_loss(zd, cross_outputs['target_expression'])
+
+
                     # Calculate mixing losses if enabled
+                     # Calculate mixing losses if enabled
                     loss_G_mix = 0
                     if mix_output is not None:
-                        # Perceptual loss on masked regions
-                        loss_mix_per = perceptual_loss_fn(mix_masked, 
-                                                        driving_frame * mix_mask)
-                        
-                        # Adversarial loss on mixing output
+                        # Standard mixing losses
+                        loss_mix_per = perceptual_loss_fn(mix_masked, driving_frame * mix_mask)
                         loss_mix_adv = adversarial_loss(mix_preds)
+                        loss_mix_id = torch.mean(torch.abs(mix_masked - source_frame * mix_mask))
                         
-                        # Identity preservation loss
-                        loss_mix_id = torch.mean(torch.abs(mix_masked - 
-                                               source_frame * mix_mask))
-                        
-                        # Get mixing expressions for contrastive loss
-                        mix_out_dict = Gbase.get_mixing_expr_contrastive_data(outputs, 
-                                                                            source_frame, 
-                                                                            driving_frame)
+                        # Get mixing expressions
+                        mix_out_dict = Gbase.get_mixing_expr_contrastive_data(outputs, source_frame, driving_frame)
                         
                         # Expression contrastive loss
                         loss_mix_expr = contrastive_loss(
@@ -277,21 +286,17 @@ def train_base(cfg, Gbase, Dbase, dataloader):
                         # Cycle consistency if enabled
                         loss_cycle = 0
                         if cfg.training.use_cycle:
-                            cycle_out_dict = Gbase.get_cycle_consistency_data(outputs, 
-                                                                           source_frame, 
-                                                                           driving_frame)
+                            cycle_out_dict = Gbase.get_cycle_consistency_data(outputs, source_frame, driving_frame)
                             if 'cycle_mix_pred' in cycle_out_dict:
-                                loss_cycle = F.l1_loss(cycle_out_dict['cycle_mix_pred'], 
-                                                     pred_frame)
+                                loss_cycle = F.l1_loss(cycle_out_dict['cycle_mix_pred'], pred_frame)
                         
-                        # Combine mixing losses
                         loss_G_mix = (cfg.training.w_mix_per * loss_mix_per +
                                     cfg.training.w_mix_adv * loss_mix_adv + 
                                     cfg.training.w_mix_id * loss_mix_id +
                                     cfg.training.w_mix_expr * loss_mix_expr +
                                     cfg.training.w_cycle * loss_cycle)
 
-                    # Calculate contrastive loss on motion vectors
+                    # Calculate motion contrastive loss
                     loss_G_cos = contrastive_loss(
                         zs, zd, zs_star, zd_star,
                         accelerator
@@ -303,7 +308,11 @@ def train_base(cfg, Gbase, Dbase, dataloader):
                         cfg.training.w_adv * loss_G_adv +
                         cfg.training.w_fm * loss_G_fm +
                         cfg.training.w_cos * loss_G_cos +
-                        loss_G_mix  # Mixing losses already weighted
+                        cfg.training.w_cross_per * loss_G_cross_per +
+                        cfg.training.w_cross_adv * loss_G_cross_adv +
+                        cfg.training.w_cross_fm * loss_G_cross_fm +
+                        cfg.training.w_expr_consistency * loss_expr_consistency +
+                        loss_G_mix
                     )
 
                     accelerator.backward(total_G_loss)
@@ -314,15 +323,15 @@ def train_base(cfg, Gbase, Dbase, dataloader):
                 # Discriminator forward pass
                 with accelerator.accumulate(Dbase):
                     fake_preds = Dbase(pred_frame.detach())
+                    cross_preds = Dbase(cross_reenacted_image.detach())
                     real_preds = Dbase(driving_frame)
                     
-                    # Include mixing predictions in discriminator loss if available
+                    loss_D = discriminator_loss(real_preds, fake_preds) + \
+                            discriminator_loss(real_preds, cross_preds)
+                    
                     if mix_output is not None:
                         mix_preds = Dbase(mix_output.detach())
-                        loss_D = discriminator_loss(real_preds, fake_preds) + \
-                                discriminator_loss(real_preds, mix_preds)
-                    else:
-                        loss_D = discriminator_loss(real_preds, fake_preds)
+                        loss_D += discriminator_loss(real_preds, mix_preds)
                     
                     accelerator.backward(loss_D)
                     optimizer_D.step()
@@ -342,8 +351,10 @@ def train_base(cfg, Gbase, Dbase, dataloader):
                     # Create image dictionary
                     images_dict = {
                         "source": ensure_rgb(source_frame[0]),
+                        "source_star": ensure_rgb(source_frame_star[0]),
                         "driving": ensure_rgb(driving_frame[0]),
                         "predicted": ensure_rgb(pred_frame[0]),
+                        "cross_reenacted": ensure_rgb(cross_reenacted_image[0])
                     }
                     
                     # Add mixing-related images if available

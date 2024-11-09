@@ -1156,6 +1156,7 @@ class Gbase(nn.Module):
 
         return matte
 
+    @profile
     def forward(self, xs, xd):
         # Get appearance features
         vs, es = self.appearanceEncoder(xs)
