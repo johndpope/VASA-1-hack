@@ -15,6 +15,7 @@ data:
   cache_audio: true
   preextract_audio: true
 training:
+  temperature: 0.07
   logging_dir: "logs"
   batch_size: 1
   num_workers: 0
@@ -69,3 +70,11 @@ training:
   weight_decay: 0.01
   save_frequency: 5
   checkpoint_dir: "checkpoints/stage1"
+
+
+  w_mix_per: 10.0    # Mixing perceptual loss weight
+  w_mix_adv: 1.0     # Mixing adversarial loss weight
+  w_mix_id: 5.0      # Mixing identity preservation loss weight
+  w_mix_expr: 2.0    # Mixing expression contrastive loss weight
+  w_cycle: 10.0      # Cycle consistency loss weight
+  use_cycle: true    # Whether to use cycle consistency

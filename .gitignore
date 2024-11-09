@@ -20,3 +20,4 @@ wandb/*
 *.safetensors
 *.bin
 checkpoint-epoch-50/random_states_0.pkl
+repos/MODNet/

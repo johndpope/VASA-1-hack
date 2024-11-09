@@ -280,7 +280,7 @@ class EMODataset(Dataset):
 
     def __del__(self):
         """Cleanup method called when the dataset object is destroyed"""
-        del self.driving_vid_pil_image_list
-        del self.driving_vid_pil_image_list_star
+        # del self.driving_vid_pil_image_list
+        # del self.driving_vid_pil_image_list_star
         gc.collect()
         torch.cuda.empty_cache()

@@ -1084,219 +1084,181 @@ Finally, the projected features (vc2d_projected) are passed through the 2D convo
 '''
 
 import matplotlib.pyplot as plt
+from repos.MODNet.src.models.modnet import MODNet
 
 
 
 class Gbase(nn.Module):
-    def __init__(self):
+    def __init__(self, use_mix_losses=True):
         super(Gbase, self).__init__()
+        self.use_mix_losses = use_mix_losses
         self.appearanceEncoder = Eapp()
         self.motionEncoder = Emtn()
-        self.warp_generator_s2c = WarpGeneratorS2C(num_channels=512) # source-to-canonical
-        self.warp_generator_c2d = WarpGeneratorC2D(num_channels=512) # canonical-to-driving 
+        self.warp_generator_s2c = WarpGeneratorS2C(num_channels=512)
+        self.warp_generator_c2d = WarpGeneratorC2D(num_channels=512)
         self.G3d = G3d(in_channels=96)
         self.G2d = G2d(in_channels=96)
+        
+        if self.use_mix_losses:
+            self.modnet = MODNet(backbone_pretrained=False)
+            self.modnet = nn.DataParallel(self.modnet).cuda()
+            self.modnet.load_state_dict(torch.load('/media/oem/12TB/EMOPortraits/repos/MODNet/pretrained/modnet_photographic_portrait_matting.ckpt'))
+            self.modnet.eval()
 
 
-    # @profile
+    def predict_mixing(self, vs, es, zs, zd, Rs, ts, Rd, td):
+        """Generate mixing prediction using rolled expression"""
+        # Roll the driving expression vector
+        zd_rolled = torch.roll(zd, shifts=1, dims=0)
+        
+        # Generate warping with rolled expression
+        w_c2d_mix = self.warp_generator_c2d(Rd, td, zd_rolled, es)
+        vc2d_warped_mix = apply_warping_field(vs, w_c2d_mix)
+        vc2d_projected_mix = torch.sum(vc2d_warped_mix, dim=2)
+        xhat_mix = self.G2d(vc2d_projected_mix)
+        
+        return xhat_mix
+
+    def get_mask(self, img):
+
+        im_transform = transforms.Compose(
+            [
+
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+            ]
+        )
+        im = im_transform(img)
+        ref_size = 512
+        # add mini-batch dim
+
+        # resize image for input
+        im_b, im_c, im_h, im_w = im.shape
+        if max(im_h, im_w) < ref_size or min(im_h, im_w) > ref_size:
+            if im_w >= im_h:
+                im_rh = ref_size
+                im_rw = int(im_w / im_h * ref_size)
+            elif im_w < im_h:
+                im_rw = ref_size
+                im_rh = int(im_h / im_w * ref_size)
+        else:
+            im_rh = im_h
+            im_rw = im_w
+
+        im_rw = im_rw - im_rw % 32
+        im_rh = im_rh - im_rh % 32
+        im = F.interpolate(im, size=(im_rh, im_rw), mode='area')
+
+        # inference
+        _, _, matte = self.modnet(im.cuda(), True)
+
+        # resize and save matte
+        matte = F.interpolate(matte, size=(im_h, im_w), mode='area')
+
+        return matte
+
     def forward(self, xs, xd):
+        # Get appearance features
         vs, es = self.appearanceEncoder(xs)
    
-        # The motionEncoder outputs head rotations R𝑠/𝑑 ,translations t𝑠/𝑑 , and latent expression descriptors z𝑠/𝑑
+        # Get motion parameters
         Rs, ts, zs = self.motionEncoder(xs)
         Rd, td, zd = self.motionEncoder(xd)
 
-        logging.debug(f"es shape:{es.shape}")
-        logging.debug(f"zs shape:{zs.shape}")
-
-
+        # Generate source-to-canonical warping
         w_s2c = self.warp_generator_s2c(Rs, ts, zs, es)
-
-
-        logging.debug(f"vs shape:{vs.shape}") 
-        # Warp vs using w_s2c to obtain canonical volume vc
         vc = apply_warping_field(vs, w_s2c)
-        assert vc.shape[1:] == (96, 16, 64, 64), f"Expected vc shape (_, 96, 16, 64, 64), got {vc.shape}"
-
-        # Process canonical volume (vc) using G3d to obtain vc2d
+        
+        # Process canonical volume
         vc2d = self.G3d(vc)
-
-        # Generate warping field w_c2d
+        
+        # Generate canonical-to-driving warping
         w_c2d = self.warp_generator_c2d(Rd, td, zd, es)
-        logging.debug(f"w_c2d shape:{w_c2d.shape}") 
-
-        # Warp vc2d using w_c2d to impose driving motion
         vc2d_warped = apply_warping_field(vc2d, w_c2d)
-        assert vc2d_warped.shape[1:] == (96, 16, 64, 64), f"Expected vc2d_warped shape (_, 96, 16, 64, 64), got {vc2d_warped.shape}"
-
-        # Perform orthographic projection (P)
+        
+        # Generate main output
         vc2d_projected = torch.sum(vc2d_warped, dim=2)
-
-        # Pass projected features through G2d to obtain the final output image (xhat)
-        # xhat_base = self.G2d(vc2d_projected)
         xhat = self.G2d(vc2d_projected)
-        #self.visualize_warp_fields(xs, xd, w_s2c, w_c2d, Rs, ts, Rd, td)
-       
 
-        return xhat
+        # Prepare output dictionary
+        output_dict = {
+            'pred_target_img': xhat,
+            'source_rotation': Rs,
+            'target_rotation': Rd,
+            'source_translation': ts,
+            'target_translation': td,
+            'source_expression': zs,
+            'target_expression': zd,
+            'source_appearance': es
+        }
 
-    def visualize_warp_fields(self, xs, xd, w_s2c, w_c2d, Rs, ts, Rd, td):
-        """
-        Visualize images, warp fields, and rotations for source and driving data.
+        # Add mixing-related outputs if enabled
+        if self.use_mix_losses and self.training:
+            # Generate mixing prediction
+            xhat_mix = self.predict_mixing(vs, es, zs, zd, Rs, ts, Rd, td)
+            
+            # Generate mask for mixing output
+            with torch.no_grad():
+                mix_mask = self.get_mask(xhat_mix)
+                xhat_mix_masked = xhat_mix * mix_mask
+            
+            # Update dictionary with mixing outputs
+            mixing_outputs = {
+                'pred_mixing_img': xhat_mix,
+                'pred_mixing_mask': mix_mask,
+                'pred_mixing_masked_img': xhat_mix_masked,
+            }
+            output_dict.update(mixing_outputs)
 
-        Parameters:
-        - xs (torch.Tensor): Source image tensor.
-        - xd (torch.Tensor): Driving image tensor.
-        - w_s2c (torch.Tensor): Warp field from source to canonical.
-        - w_c2d (torch.Tensor): Warp field from canonical to driving.
-        - Rs (torch.Tensor): Rotation matrix for source.
-        - ts (torch.Tensor): Translation vectors for source.
-        - Rd (torch.Tensor): Rotation matrix for driving.
-        - td (torch.Tensor): Translation vectors for driving.
-        """
+        return output_dict
 
-        # Extract pitch, yaw, and roll from rotation vectors
-        pitch_s, yaw_s, roll_s = Rs[:, 0], Rs[:, 1], Rs[:, 2]
-        pitch_d, yaw_d, roll_d = Rd[:, 0], Rd[:, 1], Rd[:, 2]
+    def get_mixing_expr_contrastive_data(self, mix_out_dict, xs, xd):
+        """Generate data for expression contrastive loss"""
+        with torch.no_grad():
+            # Get expressions for mixing output
+            _, _, z_mix = self.motionEncoder(mix_out_dict['pred_mixing_img'])
+            _, _, z_target = self.motionEncoder(xd)
+            _, _, z_source = self.motionEncoder(xs)
 
-        logging.debug(f"Source Image Pitch: {pitch_s}, Yaw: {yaw_s}, Roll: {roll_s}")
-        logging.debug(f"Driving Image Pitch: {pitch_d}, Yaw: {yaw_d}, Roll: {roll_d}")
+            mix_out_dict.update({
+                'mixing_expr': z_mix,
+                'target_expr': z_target,
+                'source_expr': z_source
+            })
 
-        fig = plt.figure(figsize=(15, 10))
+        return mix_out_dict
 
-        # Convert tensors to numpy images
-        source_image = xs[0].permute(1, 2, 0).cpu().detach().numpy()
-        driving_image = xd[0].permute(1, 2, 0).cpu().detach().numpy()
+    def get_cycle_consistency_data(self, mix_out_dict, xs, xd):
+        """Generate data for cycle consistency"""
+        if not self.use_mix_losses or not self.training:
+            return mix_out_dict
+            
+        with torch.no_grad():
+            # Roll mixing prediction
+            rolled_mix = torch.roll(mix_out_dict['pred_mixing_img'], shifts=-1, dims=0)
+            
+            # Get motion for rolled mixing prediction
+            Rm, tm, zm = self.motionEncoder(rolled_mix)
+            
+            # Get target appearance
+            vs_target, es_target = self.appearanceEncoder(xd)
+            
+            # Process through warping sequence
+            w_s2c_cycle = self.warp_generator_s2c(Rm, tm, zm, es_target)
+            vc_cycle = apply_warping_field(vs_target, w_s2c_cycle)
+            vc2d_cycle = self.G3d(vc_cycle)
+            
+            w_c2d_cycle = self.warp_generator_c2d(Rm, tm, zm, es_target)
+            vc2d_warped_cycle = apply_warping_field(vc2d_cycle, w_c2d_cycle)
+            vc2d_projected_cycle = torch.sum(vc2d_warped_cycle, dim=2)
+            cycle_mix_pred = self.G2d(vc2d_projected_cycle)
+            
+            # Update dictionary with cycle outputs
+            mix_out_dict.update({
+                'cycle_mix_pred': cycle_mix_pred,
+                'rolled_mix': rolled_mix
+            })
 
-
-
-        # Draw rotation axes on images
-        # source_image = self.draw_axis(source_image, Rs[0,1], Rs[0,0], Rs[0,2])
-        # driving_image = self.draw_axis(driving_image, Rd[0,1], Rd[0,0], Rd[0,2])
-
-        # Plot images
-        fig, axs = plt.subplots(1, 2, figsize=(10, 5))
-        axs[0].imshow(source_image)
-        axs[0].set_title('Source Image with Axes')
-        axs[0].axis('off')
-
-        axs[1].imshow(driving_image)
-        axs[1].set_title('Driving Image with Axes')
-        axs[1].axis('off')
-
-
-        # Plot w_s2c warp field
-        ax_w_s2c = fig.add_subplot(2, 3, 4, projection='3d')
-        self.plot_warp_field(ax_w_s2c, w_s2c, 'w_s2c Warp Field')
-
-        # Plot w_c2d warp field
-        ax_w_c2d = fig.add_subplot(2, 3, 3, projection='3d')
-        self.plot_warp_field(ax_w_c2d, w_c2d, 'w_c2d Warp Field')
-
-
-        # pitch = Rs[0,1].cpu().detach().numpy() * np.pi / 180
-        # yaw = -(Rs[0,0].cpu().detach().numpy() * np.pi / 180)
-        # roll = Rs[0,2].cpu().detach().numpy() * np.pi / 180
-
-        # # # Plot canonical head rotations
-        # ax_rotations_s = fig.add_subplot(2, 3, 5, projection='3d')
-        # self.plot_rotations(ax_rotations_s, pitch,yaw,roll, 'Canonical Head Rotations')
-
-
-        # pitch = Rd[0,1].cpu().detach().numpy() * np.pi / 180
-        # yaw = -(Rd[0,0].cpu().detach().numpy() * np.pi / 180)
-        # roll = Rd[0,2].cpu().detach().numpy() * np.pi / 180
-
-        # # # Plot driving head rotations and translations
-        # ax_rotations_d = fig.add_subplot(2, 3, 6, projection='3d')
-        # self.plot_rotations(ax_rotations_d, pitch,yaw,roll, 'Driving Head Rotations') 
-
-        plt.tight_layout()
-        plt.show()
-
-    def plot_rotations(ax,pitch,yaw, roll,title,bla):
-        if ax is None:
-            fig = plt.figure()
-            ax = fig.add_subplot(111, projection='3d')
-
-        # Set the aspect ratio to 'auto' to prevent scaling distortion
-        ax.set_aspect('auto')
-
-        # Center of the plot (origin)
-        tdx, tdy, tdz = 0, 0, 0
-
-        # Convert angles to radians
-        pitch = pitch * np.pi / 180
-        yaw = yaw * np.pi / 180
-        roll = roll * np.pi / 180
-
-        # Calculate axis vectors
-        x_axis = np.array([np.cos(yaw) * np.cos(roll),
-                        np.cos(pitch) * np.sin(roll) + np.sin(pitch) * np.sin(yaw) * np.cos(roll),
-                        np.sin(yaw)])
-        y_axis = np.array([-np.cos(yaw) * np.sin(roll),
-                        np.cos(pitch) * np.cos(roll) - np.sin(pitch) * np.sin(yaw) * np.sin(roll),
-                        -np.cos(yaw) * np.sin(pitch)])
-        z_axis = np.array([np.sin(yaw),
-                        -np.cos(yaw) * np.sin(pitch),
-                        np.cos(pitch)])
-
-        # Length of the axes
-        axis_length = 1
-
-        # Plot each axis
-        ax.quiver(tdx, tdy, tdz, x_axis[0], x_axis[1], x_axis[2], color='r', length=axis_length, label='X-axis')
-        ax.quiver(tdx, tdy, tdz, y_axis[0], y_axis[1], y_axis[2], color='g', length=axis_length, label='Y-axis')
-        ax.quiver(tdx, tdy, tdz, z_axis[0], z_axis[1], z_axis[2], color='b', length=axis_length, label='Z-axis')
-
-        # Setting labels and title
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        ax.set_zlabel('Z')
-        ax.legend()
-        ax.set_title(title)
-
-
-
-    def plot_warp_field(self, ax, warp_field, title, sample_rate=3):
-        # Convert the warp field to numpy array
-        warp_field_np = warp_field.detach().cpu().numpy()[0]  # Assuming batch size of 1
-
-        # Get the spatial dimensions of the warp field
-        depth, height, width = warp_field_np.shape[1:]
-
-        # Create meshgrids for the spatial dimensions with sample_rate
-        x = np.arange(0, width, sample_rate)
-        y = np.arange(0, height, sample_rate)
-        z = np.arange(0, depth, sample_rate)
-        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
-
-        # Extract the x, y, and z components of the warp field with sample_rate
-        U = warp_field_np[0, ::sample_rate, ::sample_rate, ::sample_rate]
-        V = warp_field_np[1, ::sample_rate, ::sample_rate, ::sample_rate]
-        W = warp_field_np[2, ::sample_rate, ::sample_rate, ::sample_rate]
-
-        # Create a mask for positive and negative values
-        mask_pos = (U > 0) | (V > 0) | (W > 0)
-        mask_neg = (U < 0) | (V < 0) | (W < 0)
-
-        # Set colors for positive and negative values
-        color_pos = 'red'
-        color_neg = 'blue'
-
-        # Plot the quiver3D for positive values
-        ax.quiver3D(X[mask_pos], Y[mask_pos], Z[mask_pos], U[mask_pos], V[mask_pos], W[mask_pos],
-                    color=color_pos, length=0.3, normalize=True)
-
-        # Plot the quiver3D for negative values
-        ax.quiver3D(X[mask_neg], Y[mask_neg], Z[mask_neg], U[mask_neg], V[mask_neg], W[mask_neg],
-                    color=color_neg, length=0.3, normalize=True)
-
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        ax.set_zlabel('Z')
-        ax.set_title(title)
-
+        return mix_out_dict
 
 
 

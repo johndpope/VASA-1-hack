@@ -61,68 +61,54 @@ def discriminator_loss(real_preds, fake_preds, loss_type='lsgan'):
     return (loss / num_scales).requires_grad_()
 
 
-# cosine distance formula
-# s · (⟨zi, zj⟩ − m)
-def cosine_loss(pos_pairs, neg_pairs, accelerator, s=5.0, m=0.2):
+def contrastive_loss(z_source, z_driving, z_source_star, z_driving_star, accelerator, temperature=0.1):
     """
-    Compute cosine distance loss with proper device handling for accelerate.
+    Compute contrastive loss between motion descriptors to prevent identity leakage.
     
     Args:
-        pos_pairs (list): List of positive pair tuples (z1, z2)
-        neg_pairs (list): List of negative pair tuples (z1, z2)
-        accelerator (Accelerator): Accelerator instance for device management
-        s (float): Scaling factor for the cosine similarity
-        m (float): Margin parameter
+        z_source: Motion descriptor from source image
+        z_driving: Motion descriptor from driving image 
+        z_source_star: Motion descriptor from different source image
+        z_driving_star: Motion descriptor from different driving image
+        temperature: Temperature parameter for scaling
     """
-    assert isinstance(pos_pairs, list) and isinstance(neg_pairs, list), "pos_pairs and neg_pairs should be lists"
-    assert len(pos_pairs) > 0, "pos_pairs should not be empty"
-    assert len(neg_pairs) > 0, "neg_pairs should not be empty"
-    assert s > 0, "s should be greater than 0"
-    assert 0 <= m <= 1, "m should be between 0 and 1"
+    # Form positive pairs
+    positive_pairs = [
+        (z_source, z_driving),      # Same video motion pair
+        (z_source_star, z_driving)  # Cross-video motion pair with same driving
+    ]
     
-    # Initialize loss tensor on the correct device
-    loss = torch.tensor(0.0, requires_grad=True, device=accelerator.device)
+    # Form negative pairs 
+    negative_pairs = [
+        (z_source, z_driving_star),      # Different motion
+        (z_source_star, z_driving_star)  # Different motion
+    ]
 
-    for pos_pair in pos_pairs:
-        assert isinstance(pos_pair, tuple) and len(pos_pair) == 2, "Each pos_pair should be a tuple of length 2"
-        
-        # Ensure tensors are on the correct device
-        z1_pos = accelerator.prepare(pos_pair[0])
-        z2_pos = accelerator.prepare(pos_pair[1])
-        
-        # Calculate positive similarity
-        pos_sim = F.cosine_similarity(z1_pos, z2_pos, dim=0)
-        pos_dist = s * (pos_sim - m)
-        
-        # Initialize negative term on the correct device
-        neg_term = torch.tensor(0.0, requires_grad=True, device=accelerator.device)
-        
-        for neg_pair in neg_pairs:
-            assert isinstance(neg_pair, tuple) and len(neg_pair) == 2, "Each neg_pair should be a tuple of length 2"
-            
-            # Ensure tensors are on the correct device
-            z1_neg = accelerator.prepare(pos_pair[0])  # Using positive pair's first element
-            z2_neg = accelerator.prepare(neg_pair[1])  # Using negative pair's second element
-            
-            # Calculate negative similarity
-            neg_sim = F.cosine_similarity(z1_neg, z2_neg, dim=0)
-            neg_term = neg_term + torch.exp(s * (neg_sim - m))
-        
-        # Verify shapes match across devices
-        if accelerator.is_local_main_process:
-            assert pos_dist.shape == neg_term.shape, f"Shape mismatch: pos_dist {pos_dist.shape}, neg_term {neg_term.shape}"
-        
-        # Calculate loss term
-        loss = loss + torch.log(torch.exp(pos_dist) / (torch.exp(pos_dist) + neg_term))
+    def compute_similarity(z1, z2):
+        return torch.sum(z1 * z2, dim=-1) / (torch.norm(z1, dim=-1) * torch.norm(z2, dim=-1))
+
+    # Calculate positive similarities
+    pos_sims = torch.stack([compute_similarity(p[0], p[1]) for p in positive_pairs])
     
-    # Calculate mean loss and ensure gradient is maintained
-    final_loss = torch.mean(-loss / len(pos_pairs))
+    # Calculate negative similarities
+    neg_sims = torch.stack([compute_similarity(n[0], n[1]) for n in negative_pairs])
     
-    # Synchronize loss across processes if using distributed training
+    # Scale similarities by temperature
+    pos_sims = pos_sims / temperature
+    neg_sims = neg_sims / temperature
+    
+    # Compute log sum exp
+    neg_term = torch.logsumexp(neg_sims, dim=0)
+    
+    # Final contrastive loss
+    loss = -torch.mean(pos_sims - neg_term)
+    
+    # Synchronize across processes if using distributed training
     if accelerator.num_processes > 1:
-        final_loss = accelerator.gather(final_loss).mean()
-    
-    return final_loss.requires_grad_()
+        loss = accelerator.gather(loss).mean()
+        
+    return loss.requires_grad_()
+
 
 def feature_matching_loss(real_features, fake_features):
     """
@@ -187,11 +173,6 @@ def train_base(cfg, Gbase, Dbase, dataloader):
         }
     )
 
-    # Move models, optimizers, and dataloader to appropriate device
-    patch = (1, cfg.data.train_width // 2 ** 4, cfg.data.train_height // 2 ** 4)
-    hinge_loss = nn.HingeEmbeddingLoss(reduction='mean')
-
-    
     optimizer_G = torch.optim.AdamW(Gbase.parameters(), lr=cfg.training.lr, betas=(0.5, 0.999), weight_decay=1e-2)
     optimizer_D = torch.optim.AdamW(Dbase.parameters(), lr=cfg.training.lr, betas=(0.5, 0.999), weight_decay=1e-2)
     
@@ -199,7 +180,7 @@ def train_base(cfg, Gbase, Dbase, dataloader):
     scheduler_D = CosineAnnealingLR(optimizer_D, T_max=cfg.training.base_epochs, eta_min=1e-6)
 
     perceptual_loss_fn = PerceptualLoss(accelerator.device, weights={'vgg19': 20.0, 'vggface': 4.0, 'gaze': 5.0, 'lpips': 10.0})
-
+    
     # Prepare everything with accelerator
     Gbase, Dbase, optimizer_G, optimizer_D, dataloader = accelerator.prepare(
         Gbase, Dbase, optimizer_G, optimizer_D, dataloader
@@ -236,48 +217,93 @@ def train_base(cfg, Gbase, Dbase, dataloader):
 
                 # Generator forward pass
                 with accelerator.accumulate(Gbase):
-                    pred_frame = Gbase(source_frame, driving_frame)
-                    
+                    # Get outputs from Gbase including mixing predictions
+                    outputs = Gbase(source_frame, driving_frame)
+                    # print("outputs:", outputs)
+                    pred_frame = outputs['pred_target_img']
+                    mix_output = outputs['pred_mixing_img']
+                    mix_mask = outputs['pred_mixing_mask']
+                    mix_masked = outputs['pred_mixing_masked_img']
 
+                    # Get motion encodings
+                    Rs, ts, zs = outputs['source_rotation'], outputs['source_translation'], outputs['source_expression']
+                    Rd, td, zd = outputs['target_rotation'], outputs['target_translation'], outputs['target_expression']
+                    
+                    # Get motion encodings for star frames
+                    Rs_star, ts_star, zs_star = Gbase.motionEncoder(source_frame_star)
+                    Rd_star, td_star, zd_star = Gbase.motionEncoder(driving_frame_star)
 
                     # Get discriminator predictions and features
                     fake_preds = Dbase(pred_frame)
                     real_preds = Dbase(driving_frame)
+                    mix_preds = Dbase(mix_output) if mix_output is not None else None
                     
                     fake_features = Dbase.get_features(pred_frame)
                     real_features = Dbase.get_features(driving_frame)
-
 
                     # Calculate generator losses
                     loss_G_adv = adversarial_loss(fake_preds)
                     loss_G_fm = feature_matching_loss(real_features, fake_features)
                     loss_G_per = perceptual_loss_fn(pred_frame, driving_frame)
 
+                    # Calculate mixing losses if enabled
+                    loss_G_mix = 0
+                    if mix_output is not None:
+                        # Perceptual loss on masked regions
+                        loss_mix_per = perceptual_loss_fn(mix_masked, 
+                                                        driving_frame * mix_mask)
+                        
+                        # Adversarial loss on mixing output
+                        loss_mix_adv = adversarial_loss(mix_preds)
+                        
+                        # Identity preservation loss
+                        loss_mix_id = torch.mean(torch.abs(mix_masked - 
+                                               source_frame * mix_mask))
+                        
+                        # Get mixing expressions for contrastive loss
+                        mix_out_dict = Gbase.get_mixing_expr_contrastive_data(outputs, 
+                                                                            source_frame, 
+                                                                            driving_frame)
+                        
+                        # Expression contrastive loss
+                        loss_mix_expr = contrastive_loss(
+                            mix_out_dict['mixing_expr'],
+                            mix_out_dict['target_expr'],
+                            zs_star,
+                            zd_star,
+                            accelerator
+                        )
+                        
+                        # Cycle consistency if enabled
+                        loss_cycle = 0
+                        if cfg.training.use_cycle:
+                            cycle_out_dict = Gbase.get_cycle_consistency_data(outputs, 
+                                                                           source_frame, 
+                                                                           driving_frame)
+                            if 'cycle_mix_pred' in cycle_out_dict:
+                                loss_cycle = F.l1_loss(cycle_out_dict['cycle_mix_pred'], 
+                                                     pred_frame)
+                        
+                        # Combine mixing losses
+                        loss_G_mix = (cfg.training.w_mix_per * loss_mix_per +
+                                    cfg.training.w_mix_adv * loss_mix_adv + 
+                                    cfg.training.w_mix_id * loss_mix_id +
+                                    cfg.training.w_mix_expr * loss_mix_expr +
+                                    cfg.training.w_cycle * loss_cycle)
 
-
-                    # Cross reenactment
-                    cross_reenacted_image = Gbase(source_frame_star, driving_frame)
-                    
-                    # Get motion descriptors from direct encoding
-                    _, _, z_pred = Gbase.motionEncoder(pred_frame)
-                    _, _, zd = Gbase.motionEncoder(driving_frame)
-                    # Get motion descriptors from cross-reenacted results
-                    _, _, z_star_pred = Gbase.motionEncoder(cross_reenacted_image)
-                    _, _, zd_star = Gbase.motionEncoder(driving_frame_star)
-
-                    # cycle_consistency_loss 
-                    P = [(z_pred, zd),  # Same video motion pair
-                         (z_star_pred, zd)] # Cross-video motion pair with same driving
-                    N = [(z_pred, zd_star), # Different motion
-                         (z_star_pred, zd_star)] # Different motion
-                    loss_G_cos = cosine_loss(P, N,accelerator)
+                    # Calculate contrastive loss on motion vectors
+                    loss_G_cos = contrastive_loss(
+                        zs, zd, zs_star, zd_star,
+                        accelerator
+                    )
 
                     # Total generator loss
                     total_G_loss = (
                         cfg.training.w_per * loss_G_per +
                         cfg.training.w_adv * loss_G_adv +
                         cfg.training.w_fm * loss_G_fm +
-                        cfg.training.w_cos * loss_G_cos
+                        cfg.training.w_cos * loss_G_cos +
+                        loss_G_mix  # Mixing losses already weighted
                     )
 
                     accelerator.backward(total_G_loss)
@@ -290,7 +316,13 @@ def train_base(cfg, Gbase, Dbase, dataloader):
                     fake_preds = Dbase(pred_frame.detach())
                     real_preds = Dbase(driving_frame)
                     
-                    loss_D = discriminator_loss(real_preds, fake_preds)
+                    # Include mixing predictions in discriminator loss if available
+                    if mix_output is not None:
+                        mix_preds = Dbase(mix_output.detach())
+                        loss_D = discriminator_loss(real_preds, fake_preds) + \
+                                discriminator_loss(real_preds, mix_preds)
+                    else:
+                        loss_D = discriminator_loss(real_preds, fake_preds)
                     
                     accelerator.backward(loss_D)
                     optimizer_D.step()
@@ -299,21 +331,40 @@ def train_base(cfg, Gbase, Dbase, dataloader):
 
                 # Log samples periodically
                 if idx % cfg.training.sample_interval == 0:
-                    images = {
-                        "source": source_frame[0],
-                        "driving": driving_frame[0],
-                        "predicted": pred_frame[0],
-                        "cross_reenacted": cross_reenacted_image[0]
+                    def ensure_rgb(tensor):
+                        """Convert tensor to RGB if needed"""
+                        # Check if the tensor has 1 channel (grayscale)
+                        if tensor.shape[0] == 1:
+                            # Repeat the grayscale channel to create 3 channels
+                            tensor = tensor.repeat(3, 1, 1)
+                        return tensor
+
+                    # Create image dictionary
+                    images_dict = {
+                        "source": ensure_rgb(source_frame[0]),
+                        "driving": ensure_rgb(driving_frame[0]),
+                        "predicted": ensure_rgb(pred_frame[0]),
                     }
                     
-                    # Log images to wandb
+                    # Add mixing-related images if available
+                    if mix_output is not None:
+                        images_dict.update({
+                            "mixing": ensure_rgb(mix_output[0]),
+                            "mixing_masked": ensure_rgb(mix_masked[0]),
+                            "mixing_mask": ensure_rgb(mix_mask[0])
+                        })
+                    
+                    # Convert images to grid
+                    grid = vutils.make_grid(
+                        list(images_dict.values()),
+                        nrow=2,
+                        normalize=True
+                    )
+                    
+                    # Log to wandb
                     accelerator.log({
                         f"samples/epoch_{epoch}_idx_{idx}": 
-                        wandb.Image(vutils.make_grid(
-                            [images[k] for k in images], 
-                            nrow=2, 
-                            normalize=True
-                        ))
+                        wandb.Image(grid)
                     })
 
             # Average batch losses
@@ -350,8 +401,6 @@ def train_base(cfg, Gbase, Dbase, dataloader):
 
     # End training
     accelerator.end_training()
-
-
 
 class RandomGaussianBlur(object):
     def __init__(self, kernel_range=(3, 7), sigma_range=(0.1, 2.0)):
@@ -443,7 +492,7 @@ def main(cfg: OmegaConf) -> None:
 
     dataset = EMODataset(
         use_gpu=torch.cuda.is_available(),
-        remove_background=True,
+        remove_background=False,
         width=cfg.data.train_width,
         height=cfg.data.train_height,
         n_sample_frames=cfg.training.n_sample_frames,
