@@ -267,7 +267,9 @@ git commit -m "Lock nemo to specific version"
 
 ## 📄 License
 
-See LICENSE file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+Note: The nemo submodule and other dependencies may have their own licenses.
 
 ## 🙏 Acknowledgments
 
