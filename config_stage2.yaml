@@ -253,4 +253,4 @@ optimization:
   compile_model: false      # Whether to use torch.compile
   channels_last: true       # Use channels_last memory format
   gradient_checkpointing: false
-  sync_batchnorm: true
+  sync_batchnorm: true 

@@ -376,4 +376,4 @@ if __name__ == "__main__":
         video_path=f"{config.paths.video_folder}/3.mp4",
         output_dir="output",
         save_frames=True  # Set to False if you don't want to save individual frames
-    )
+    ) 

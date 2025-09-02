@@ -514,4 +514,4 @@ class SyncNetEvaluator:
             logger.error(traceback.format_exc())
             if return_metrics:
                 return torch.tensor(0.0).to(generated_frames.device), {}
-            return torch.tensor(0.0).to(generated_frames.device)
+            return torch.tensor(0.0).to(generated_frames.device) 

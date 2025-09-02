@@ -3290,4 +3290,4 @@ class LipStateAnalyzer:
                 'area': np.zeros(T),
                 'perimeter': np.zeros(T),
                 'states': ['closed'] * T
-            }
+            } 

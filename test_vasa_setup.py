@@ -82,4 +82,4 @@ if all_paths_ok:
     print("  python vasa_trainer.py")
 else:
     print("⚠ Some paths are missing. Please check the setup.")
-print("=" * 60)
+print("=" * 60) 

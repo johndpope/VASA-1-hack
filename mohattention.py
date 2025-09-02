@@ -558,4 +558,4 @@ DiT_models = {
     'MoH-DiT-L/2-90':  MoH_DiT_L_2_90,   'MoH-DiT-L/2-75':  MoH_DiT_L_2_75,
     'MoH-DiT-B/2-90':  MoH_DiT_B_2_90,   'MoH-DiT-B/2-75':  MoH_DiT_B_2_75,
     'MoH-DiT-S/2-90':  MoH_DiT_S_2_90,   'MoH-DiT-S/2-75':  MoH_DiT_S_2_75,
-}
+} 

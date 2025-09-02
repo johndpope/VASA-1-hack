@@ -275,4 +275,4 @@ Note: The nemo submodule and other dependencies may have their own licenses.
 
 - EMOPortraits team for the base implementation
 - VASA paper authors for the architecture design
-- Contributors to the nemo repository
+- Contributors to the nemo repository 

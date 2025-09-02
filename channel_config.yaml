@@ -121,4 +121,4 @@ projections:
                           ${landmarks.right_eye.points}*${landmarks.right_eye.coords},
                           ${landmarks.left_eye.points}*${landmarks.left_eye.coords},
                           ${landmarks.jaw.points}*${landmarks.jaw.coords},
-                          ${landmarks.nose.points}*${landmarks.nose.coords}}
+                          ${landmarks.nose.points}*${landmarks.nose.coords}} 
