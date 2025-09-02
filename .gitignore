@@ -83,5 +83,6 @@ junk/
 expression_norm_stats.pt
 expression_norm_stats.json
 
-# Nemo repository (tracked separately)
-nemo/
+# Nemo is now a git submodule - no need to ignore
+losses/loss_model_weights/mobilefacenet_model_best.pth.tar
+losses/loss_model_weights/PrivateTest_model.t7

@@ -20,6 +20,9 @@ from collections import defaultdict
 from omegaconf import OmegaConf
 from vasa_model import VASAModel,VASALossModule,MotionSequenceHandler
 import importlib
+import sys
+if 'nemo' not in sys.path:
+    sys.path.insert(0, 'nemo')
 from logger import logger,TorchDebugger
 import traceback
 from vasa_dataset import WorkerState, VASAIntegratedDataset

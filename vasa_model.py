@@ -10,12 +10,15 @@ from omegaconf import OmegaConf
 from facenet_pytorch import InceptionResnetV1
 from ibug.face_detection import RetinaFacePredictor
 from ibug.face_parsing import FaceParser as RTNetPredictor
-from logger import logger ,TorchDebugger
+import sys
+if 'nemo' not in sys.path:
+    sys.path.insert(0, 'nemo')
+from logger import logger, TorchDebugger
 import traceback
 import math
 from memory_profiler import profile
 from typing import Dict, Optional, List, Tuple, Generator
-from mem import memory_stats,ModelCounter
+from mem import memory_stats, ModelCounter
 import gc
 from torchvision.utils import save_image
 import os
@@ -25,6 +28,8 @@ from mem import TensorMemoryManager
 import torch
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+# syncnet is in nemo directory
+sys.path.insert(0, 'nemo') if 'nemo' not in sys.path else None
 from syncnet import SyncNetInstance
 import wandb
 from video_tracker import VideoEventData, VideoEvent, ProblematicVideosTracker

@@ -19,6 +19,9 @@ import torchvision.transforms as transforms
 import traceback
 import mediapipe as mp
 import matplotlib.pyplot as plt
+import sys
+if 'nemo' not in sys.path:
+    sys.path.insert(0, 'nemo')
 from logger import logger  
 from l2cs import L2CS, select_device, Pipeline
 import h5py

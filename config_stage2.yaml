@@ -1,0 +1,256 @@
+# VASA Configuration
+defaults:
+  - _self_
+
+
+
+# Model architecture
+model:
+  hidden_dim: 512
+  n_heads: 8
+  n_layers: 8
+  dim_feedforward: 2048
+  dropout: 0.1
+  motion_dim: 256
+  # Add these:
+  condition_embedding_dim: 512  # Dimension for condition embeddings
+  use_prev_motion: true        # Whether to use previous motion context
+  max_motion_length: 1000      # Maximum motion sequence length
+  use_relative_position: true  # Use relative position encoding
+
+
+
+# Diffusion parameters
+diffusion:
+  num_steps: 1000
+  beta_start: 1e-4
+  beta_end: 0.02
+  cfg_start_epoch: 5  # When to start using CFG
+  cfg_ramp_epochs: 10  # Epochs to ramp up CFG scales
+
+  schedule_mode: 'cosine'  # One of: linear, quadratic, sigmoid, cosine
+  schedule_s: 0.008  # Schedule parameters (for cosine schedule)
+
+# Motion generation parameters
+motion:
+  num_speed_buckets: 9
+  window_size: 50
+  stride: 25
+  context_size: 10
+  overlap_smooth: true
+  # Add these:
+  min_window_size: 15          # Minimum window size for curriculum
+  max_window_size: 30          # Maximum window size
+  smooth_window: 5             # Temporal smoothing window size
+  use_motion_prior: true       # Whether to use motion prior
+
+  warmup_steps: 100          # Number of warmup steps
+  scheduler:
+    type: "cosine"            # Learning rate scheduler type
+    min_lr: 1e-6              # Minimum learning rate
+    warmup_ratio: 0.1         # Warmup ratio
+  
+  # Progressive training
+  progressive:
+    enabled: true
+    start_sequence_length: 15
+    max_sequence_length: 50
+    length_increase_freq: 5    # Epochs between increases
+    
+  # Mixed precision training
+  amp: true                   # Whether to use automatic mixed precision
+  scaler_growth: 2.0          # Gradient scaler growth rate
+
+# Training parameters
+train:
+  resume_from: "" # "./checkpoints/checkpoint_epoch_1330.pt" #  # "./checkpoints/checkpoint_epoch_600.pt"  # or specify a path to checkpoint
+  # when to add conditional signals
+  control_start_epoch: 1750 # 👹 this should be 1 or 0 for large video datasets with smaller epochs
+
+
+  lr: 1e-3 # Base learning rate
+  motion_proj_lr: 0.1 # Optional: Higher learning rate for motion projections
+  expression_lr: 0.1   # Optional: Potentially different learning rate 
+
+  turn_off_noise: false # no noise signal / no drop out - Debugging the basic architecture - Verifying the conditioning works - Testing the training pipeline
+  learning_rates:
+    condition_embedding: 2e-4
+    motion_projections: 1e-4
+    transformer_early: 1.5e-4
+    transformer_late: 5e-5
+    output_projections: 2e-4
+
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  num_epochs: 4000
+
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  save_freq: 2 # checkpoint saving for 35000 youre gonna want it to be 0
+  
+  # Dropout probabilities for CFG
+  dropout_probs:
+    audio: 0.1
+    gaze: 0.1
+    head_distance: 0.1
+    emotion: 0.1
+
+  # CFG scales schedule
+  cfg_scales:
+    audio: 3.0
+    gaze: 1.0
+    head_distance: 0.8
+    emotion: 0.5
+
+  # Gradient monitoring
+  gradient_monitoring:
+    enabled: true
+    log_freq: 100  # Steps between gradient logs
+    save_grad_norms: true
+    save_grad_flows: true
+    num_layers_to_monitor: 8  # Number of transformer layers to track
+
+
+    
+    
+
+# Loss weights
+loss:
+  expression_weighting:
+    enabled: true
+    min_weight: 0.5  # Minimum weight for least important dimensions
+    
+  use_sync_loss: false
+  use_verification: true
+  lambda_verification: 10
+  
+  lambda_lips: 0     # Weight for lip motion loss
+  lambda_nonlip: 0.0    # Weight for non-lip facial landmarks
+  lambda_speed: 0
+  lambda_pose: 1
+  lambda_dynamics: 10.0 # expression
+  lambda_reconstruction: 1
+  # Audio-visual sync loss
+  lambda_sync: 1.0 
+
+  
+  # Control signal adherence loss
+  lambda_control: 0.3 # 🌻 circle back and fix thiss
+  lambda_lip: 1.0
+
+  lambda_gaze_direction: 0.2
+  lambda_head_distance: 0.2
+  lambda_emotion: 0.3
+
+  lambda_cfg: 0.5
+  lambda_perceptual: 0.1      # Perceptual loss weight
+  lambda_temporal: 0.8        # Temporal consistency loss
+  warmup_epochs: 0            # Loss warmup epochs - for many videos dont worry
+  
+    # Blink control loss
+  lambda_blink: 0.5  # Weight for blink state control
+  
+  # Loss scheduling
+  schedule:
+    enabled: true
+    start_epoch: 5
+    rampup_epochs: 10
+
+
+  blink:
+    start_weight: 0.1
+    final_weight: 0.5
+# Inference parameters
+inference:
+  batch_size: 1
+  cfg_scale: 3.0
+  eta: 0.0  # DDIM stochastic sampling parameter
+  output_size: [512, 512]
+  num_inference_steps: 50     # Number of DDIM steps during inference
+  temperature: 1.0            # Sampling temperature
+  top_k: 50                   # Top-k sampling parameter
+  top_p: 0.9                 # Nucleus sampling parameter
+  use_window_cache: true     # Cache window computations
+
+# Dataset parameters
+dataset:
+  sequence_length: 25
+  frame_size: [512, 512]
+  preextract_audio: true
+  cache_audio: true
+  hop_length: 10
+  max_videos: null
+  min_sequence_length: 15    # Minimum sequence length
+  max_sequence_samples: 1000 # Maximum samples per epoch
+  augmentation:
+    enabled: true
+    flip_prob: 0.5
+    temporal_crop_prob: 0.3
+    intensity_scale: 0.2
+    temporal_mask_prob: 0.1
+# Model checkpoint paths
+paths:
+  checkpoint_dir: "checkpoints"
+  syncnet_path: "pretrained/syncnet.pth"
+  emotion_model: "pretrained/emonet.pth"
+
+
+# Hardware/environment settings
+device: "cpu"
+seed: 42
+num_workers: 0
+debug: false
+wandb:
+  project: "vasa"
+  enabled: true
+
+# Additional components
+face_analysis:
+  face_detector: "retinaface"
+  face_parser: "rtnet"
+  emotion_recognizer: "hsemotion"
+  
+audio:
+  sample_rate: 16000
+  feature_type: "wav2vec2"
+  feature_dim: 768
+  normalize_audio: true
+
+# Visualization settings
+vis:
+  save_videos: true
+  save_frames: false
+  vis_freq: 25
+  num_vis_samples: 4
+
+
+# Logging configuration
+logging:
+  level: "INFO"
+  save_frequency: 100        # Steps between logging
+  metrics:
+    save_predictions: true
+    compute_fid: true
+    compute_kid: true
+
+  # Validation
+  validation:
+    frequency: 1            # Epochs between validation
+    num_samples: 100        # Number of validation samples
+    metrics: ["lip_sync", "id_similarity", "motion_naturalness"]
+
+# Distributed training
+distributed:
+  enabled: true
+  backend: "nccl"
+  find_unused_parameters: false
+  gradient_as_bucket_view: true
+
+# Optimization settings
+optimization:
+  compile_model: false      # Whether to use torch.compile
+  channels_last: true       # Use channels_last memory format
+  gradient_checkpointing: false
+  sync_batchnorm: true

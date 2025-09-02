@@ -1,0 +1,3 @@
+[submodule "nemo"]
+	path = nemo
+	url = https://github.com/johndpope/nemo.git

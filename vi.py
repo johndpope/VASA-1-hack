@@ -63,7 +63,7 @@ class VASAInference:
         
         # Load EMO weights with proper error handling
         try:
-            model_dict = torch.load(model_path, map_location='cuda')
+            model_dict = torch.load(model_path, map_location='cuda', weights_only=False)
             self.volumetric_avatar.load_state_dict(model_dict, strict=False)
             self.volumetric_avatar = self.volumetric_avatar.cuda()
             self.volumetric_avatar.eval()
@@ -84,7 +84,7 @@ class VASAInference:
         # Load VASA checkpoint with proper handling
         try:
             logger.info(f"Loading checkpoint from {checkpoint_path}")
-            checkpoint = torch.load(checkpoint_path, map_location=device)
+            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
             
             # Get current state dict
             model_state = self.model.state_dict()
@@ -1312,7 +1312,7 @@ class VASAInference:
 # inferencer.visualize_inference_outputs("input.mp4", "vis_output")
 # Example usage
 if __name__ == "__main__":
-    epoch = 202
+    epoch = 6  # Using available checkpoint
     inferencer = VASAInference(
         checkpoint_path=f"./checkpoints/checkpoint_epoch_{epoch}.pt",
         config_path='config_stage2.yaml'
@@ -1326,8 +1326,8 @@ if __name__ == "__main__":
     # )
 
     inferencer.generate_from_video(
-        input_video="./junk/overfit/ovs-GiY_848_1.mp4",
-        output_path=f"vasa-ovs-GiY_848_1-output-{epoch}.mp4",
+        input_video="./junk/10.mp4",
+        output_path=f"vasa-output-epoch-{epoch}.mp4",
         fps=25.0,
         neutral_expression=False
     )

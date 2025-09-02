@@ -1,0 +1,124 @@
+model:
+  model_dim: 512
+  max_seq_len: 60
+  clip_bounds:
+    min: -100.0
+    max: 100.0
+
+dimensions:
+  prev_expression: 64
+  prev_audio: 64
+  audio_features: 128
+
+landmarks:
+  lips:
+    points: 20
+    coords: 3
+  right_eye:
+    points: 8
+    coords: 3
+  left_eye:
+    points: 7
+    coords: 3
+  jaw:
+    points: 10
+    coords: 3
+  nose:
+    points: 4
+    coords: 3
+
+channel_layout:
+  # Previous window context
+  prev_theta:
+    size: 12  # 3x4 matrix flattened
+    description: "Previous frame transformation matrix"
+  
+  prev_rotation:
+    size: 3  # 3D angles
+    description: "Previous frame rotation"
+    
+  prev_translation:
+    size: 3  # 3D translation
+    description: "Previous frame translation"
+    
+  prev_expression:
+    size: ${dimensions.prev_expression}
+    description: "Previous frame expression embedding"
+    
+  prev_audio:
+    size: ${dimensions.prev_audio}
+    description: "Previous frame audio features"
+
+  # Current window conditions  
+  audio_features:
+    size: ${dimensions.audio_features}
+    description: "Current audio features"
+    
+  gaze:
+    size: 2  # pitch and yaw
+    description: "Gaze direction angles"
+    
+  head_distance:
+    size: 1
+    description: "Head distance from camera"
+    
+  emotion:
+    size: 2  # valence and arousal
+    description: "Emotion parameters"
+    
+  speed_bucket:
+    size: 1
+    description: "Motion speed category"
+    
+  # Landmark features
+  lips:
+    size: ${landmarks.lips.points}*${landmarks.lips.coords}
+    description: "Lip landmark coordinates"
+    
+  right_eye:
+    size: ${landmarks.right_eye.points}*${landmarks.right_eye.coords}
+    description: "Right eye landmark coordinates"
+    
+  left_eye:
+    size: ${landmarks.left_eye.points}*${landmarks.left_eye.coords}
+    description: "Left eye landmark coordinates"
+    
+  jaw:
+    size: ${landmarks.jaw.points}*${landmarks.jaw.coords}
+    description: "Jaw landmark coordinates"
+    
+  nose:
+    size: ${landmarks.nose.points}*${landmarks.nose.coords}
+    description: "Nose landmark coordinates"
+    
+  blink_state:
+    size: 32
+    description: "Blink state embedding"
+
+# Audio model dimensions 
+audio_models:
+  wav2vec:
+    input_dim: 768
+    hidden_dim: 256
+    output_dim: ${dimensions.audio_features}
+  whisper:
+    input_dim: 384  
+    hidden_dim: 256  
+    output_dim: ${dimensions.audio_features}
+
+# Reference whichever model you want to use
+projections:
+  audio: ${audio_models.wav2vec}  # Change to wav2vec to use wav2vec features
+  
+  blink:
+    input_dim: 3  
+    hidden_dim: 32
+    output_dim: 32
+    
+  motion_norm_dim: 256  
+  control_norm_dim: 6  
+  landmark_norm_dim: ${sum:${landmarks.lips.points}*${landmarks.lips.coords},
+                          ${landmarks.right_eye.points}*${landmarks.right_eye.coords},
+                          ${landmarks.left_eye.points}*${landmarks.left_eye.coords},
+                          ${landmarks.jaw.points}*${landmarks.jaw.coords},
+                          ${landmarks.nose.points}*${landmarks.nose.coords}}
