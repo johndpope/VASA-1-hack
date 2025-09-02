@@ -253,19 +253,6 @@ git add nemo
 git commit -m "Lock nemo to specific version"
 ```
 
-### Contributing
-
-To contribute fixes back to nemo:
-```bash
-cd nemo
-git add -A
-git commit -m "Your fix description"
-git push origin main
-# Then update the submodule reference in main repo
-cd ..
-git add nemo
-git commit -m "Update nemo submodule reference"
-```
 
 ## 📝 Notes
 
