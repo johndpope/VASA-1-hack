@@ -1,0 +1,378 @@
+num_source_frames: 1
+num_target_frames: 1
+model_checkpoint: ''
+warp_output_size: 64
+gen_latent_texture_size: 64
+
+paths:
+  project_dir: "./"
+  modnet_checkpoint: "repos/MODNet/pretrained/modnet_photographic_portrait_matting.ckpt"
+  folder: "mp_logs"
+  
+random_seed: 42
+check_grads_of_every_loss: False
+barlow: 0.0
+
+
+# Model configuration
+defaults:
+  adversarial_weight: 1.0
+  # Normalization and basic model settings
+  norm_layer_type: bn  # choices: [bn, sync_bn, in, gn, bcn]
+  norm_layer_type_3d: bn_3d
+  eps: 1.0e-8
+
+  # Head pose settings  
+  head_pose:
+    estimate_from_keypoints: true
+    regressor_path: "/media/2TB/EMOPortraits/repos/head_pose_regressor.pth"
+    additive_motion: false
+
+  # Segmentation settings
+  segmentation:
+    use_seg: true
+    use_back: true
+    features_sigm: 1
+    use_mix_mask: false
+    use_ibug_mask: false
+    use_old_fp: false
+    use_masked_aug: false
+
+  # Volume settings
+  volume:
+    resize_depth: false
+    renderer_mode: depth_to_channels
+    rendering: false
+    save_exp_vectors: false
+    aligned_warp:
+      rot_source: false
+      rot_target: false
+    use_right_3d_trans: false
+    use_unet_as_s_nw: false
+    separate_stm: false
+    latent:
+      channels: 64
+      size: 64
+      depth: 16
+    source_num_blocks: 0
+    pred_num_blocks: 0
+    renderer:
+      dec_channels: 1536  # 96*16
+      squeeze_dim: 0
+      coarse_num_sample: 48
+      hidden_dec_dim: 448
+      num_layers_dec: 2
+    losses:
+      l1_rgb: 0.0
+      l1_rgb_mix: 0.0
+      start_rgb: 0
+      l1: 0.0
+      targ_scale: 0.0
+      sep_scale: 0.0
+      predict_target_canon: false
+      type_of_can_loss: l1  # choices: [l1, l2]
+      epoch: 0
+      grad: 0
+
+  # Network initialization
+  init:
+    type: kaiming
+    gain: 0.0
+
+  # Discriminator settings
+  discriminator:
+    num_channels: 64
+    max_channels: 512
+    num_blocks: 4
+    num_scales: 1
+    input_channels: 3
+    init:
+      type: xavier
+      gain: 0.02
+    use_mix: false
+    dis2:
+      num_channels: 64
+      max_channels: 512
+      num_blocks: 4
+      num_scales: 2
+      train_start: 0
+      gen_train_start: 0
+      gen_train_ratio: 0
+    stylegan:
+      use: false
+      lr: 2.0e-4
+      d_reg_every: 16
+      r1: 0.0
+      weight: 1.0
+
+  # Generator settings
+  generator:
+    num_channels: 32
+    max_channels: 512
+    max_channels_unet3d: 512
+    max_channels_loc_enc: 512
+    activation_type: relu  # choices: [relu, lrelu]
+    downsampling_type: avgpool
+    upsampling_type: trilinear
+    pred_flip: false
+    pred_mixing: true
+    less_em: false
+    cat_em: false
+    latent_texture:
+      size: 64
+      depth: 16
+      channels: 64
+    embed_size: 4
+    dummy_input_size: 4
+    adaptive:
+      use_adanorm: false
+      use_adaconv: false
+      conv_type: sum  # choices: [sum, mul]
+      kernel: false
+      annealing:
+        use: false
+        type: cos  # choices: [lin, cos]
+        max_iter: 100000
+
+  # Training losses
+  losses:
+    adversarial_weight: 1.0
+    mix_gen_adversarial: 1.0
+    feature_matching_weight: 60.0
+    vgg19:
+      weight: 20.0
+      neutral: 0.0
+      neu_epoches: 0
+      face: 0.0
+      face_mixing: 0.0
+      fv_mix: 0.0
+      emotions: 0.0
+      num_scales: 4
+    warping_reg_weight: 0.0
+    gaze_weight: 0.0
+    l1:
+      weight: 0.0
+      back: 0.0
+      match_neutral: false
+      detach_lat_vol: -1
+      freeze_proc_nw: -1
+    face:
+      eyes_l1: 0.0
+      mouth_l1: 0.0
+      ears_l1: 0.0
+      resnet: 0.0
+    mix_losses:
+      use: true
+      start: 4
+    contrastive:
+      losses_start: 1
+      exp: 0.0
+      idt: 0.0
+    landmarks: 0.0
+    cycle:
+      idn: 0.0
+      exp: 0.0
+      only_embed: true
+    stm: 1.0
+    pull:
+      idt: 0.0
+      exp: 0.0
+      volumes: 0.0
+    push:
+      idt: 0.0
+      exp: 0.0
+      volumes: 0.0
+    barlow: 0.0
+
+  # Optimization
+  optimizer:
+    generator:
+      type: adam
+      lr: 2.0e-4
+      betas: [0.5, 0.999]
+      weight_decay:
+        value: 1.0e-4
+        layers: conv2d
+        params: weight
+      scheduler:
+        type: cosine
+        max_iters: 250000
+        lr_min: 1.0e-6
+    discriminator:
+      type: adam
+      lr: 2.0e-4
+      betas: [0.5, 0.999]
+      scheduler:
+        type: cosine
+        max_iters: 250000
+        lr_min: 4.0e-6
+
+  # Image dimensions
+  image:
+    size: 256
+    additional_size: null
+    idt_size: 256
+    exp_size: 256
+    face_parts_epoch_start: 10
+
+  # Network configurations
+  networks:
+    spn: >
+      local_encoder_nw, local_encoder_seg_nw, local_encoder_mask_nw, idt_embedder_nw,
+      expression_embedder_nw, xy_generator_nw, uv_generator_nw, warp_embed_head_orig_nw,
+      pose_embed_decode_nw, pose_embed_code_nw, volume_process_nw, volume_source_nw,
+      volume_pred_nw, decoder_nw, backgroung_adding_nw, background_process_nw
+    ws: >
+      local_encoder_nw, local_encoder_seg_nw, local_encoder_mask_nw, idt_embedder_nw,
+      expression_embedder_nw, xy_generator_nw, uv_generator_nw, warp_embed_head_orig_nw,
+      pose_embed_decode_nw, pose_embed_code_nw, volume_process_nw, volume_source_nw,
+      volume_pred_nw, decoder_nw, backgroung_adding_nw, background_process_nw
+    layers: conv2d, conv3d, linear, conv2d_ws, conv3d_ws
+    use_sn: true
+    use_ws: false
+    print_norms: false
+
+  # Encoder settings  
+  encoder:
+    input_size: 3
+    no_channel_increase_3d:
+      source: true
+      pred: true
+    max_channel_res_3d_mul: 4
+    init_num_channels: 512
+    channel_mult: 2.0
+    block_type: res  # choices: [res, conv]
+
+  # Identity encoding
+  identity:
+    separate: false
+    backbone: resnet50
+    lr_mult: 1.0
+    output:
+      channels: 512
+      size: 4
+
+  # Expression encoding
+  expression:
+    head_backbone: resnet18
+    face_backbone: resnet18
+    lr_mult: 1.0
+    final_pooling_type: avg  # choices: [avg, transformer]
+    output:
+      channels: 512
+      channels_expression: 512
+    dropout: 0.0
+    output_size: 4
+    head_transform_sep_scales: false
+    num_b_negs: 1
+
+  # Miscellaneous
+  misc:
+    use_tensor: false
+    old_mix_pose: true
+    green: false
+    random_theta: false
+    emb_v_exp: false
+    smart_scale:
+      use: false
+      max_scale: 0.75
+      max_tol_angle: 0.8
+    reduce_em_ratio: 2
+    grid_sample_padding_mode: zeros
+    sep_test_losses: true
+
+# Training configuration
+training:
+  batch_size: 8
+  num_workers_per_process: 4
+  losses:
+    adversarial_weight: 1.0
+    mix_gen_adversarial: 1.0
+    feature_matching_weight: 60.0
+    vgg19:
+      weight: 20.0
+      neutral: 0.0
+      neu_epoches: 0
+      face: 0.0
+      face_mixing: 0.0
+      fv_mix: 0.0
+    perc_face_pars: 0.0
+    resnet18_fv_mix: 0.0
+    face_resnet: 0.0
+    emotions:
+      vgg19: 0.0
+      resnet18: 0.0
+    landmarks: 0.0
+    l1_weight: 0.0
+    neu_exp_l1: 0.0
+    l1_back: 0.0
+    cycle:
+      idn: 0.0
+      exp: 0.0
+    barlow: 0.0
+    stm: 1.0
+    pull:
+      idt: 0.0
+      exp: 0.0
+      volumes: 0.0
+    push:
+      idt: 0.0
+      exp: 0.0
+      volumes: 0.0
+    contrastive:
+      exp: 0.0
+      idt: 0.0
+  
+  optimization:
+    generator:
+      opt_type: adam
+      lr: 2.0e-4
+      beta1: 0.5
+      beta2: 0.999
+      weight_decay: 1.0e-4
+      weight_decay_layers: conv2d
+      weight_decay_params: weight
+      scheduler:
+        type: cosine
+        max_iters: 250000
+        lr_min: 1.0e-6
+    
+    discriminator:
+      opt_type: adam
+      lr: 2.0e-4
+      beta1: 0.5
+      beta2: 0.999
+      scheduler:
+        type: cosine
+        max_iters: 250000
+        lr_min: 4.0e-6
+
+# Image processing configuration
+image:
+  size: 256
+  additional_size: null
+  idt_size: 256
+  exp_size: 256
+
+# Inference configuration
+inference:
+  use_gpu: true
+  debug: false
+  num_gpus: 1
+  fixed_bounding_box: false
+  momentum: 0.01
+  ref_size: 512
+  pose_momentum: 0.5
+  print_model: false
+  print_params: true
+# Video configuration
+video:
+  fps: 30
+  output_size: [512, 512]
+  max_frames: null
+
+# System configuration
+system:
+  eps: 1.0e-8
+  random_seed: 42
+  grid_sample_padding_mode: zeros
