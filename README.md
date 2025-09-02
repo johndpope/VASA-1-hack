@@ -92,8 +92,6 @@ VASA-1-hack/
 │   └── vasa_lip_normalizer.py   # Lip normalization utilities
 │
 ├── vasa_config.yaml             # Main configuration file
-├── channel_config.yaml          # Channel configuration
-├── expression_normalizer.py     # Expression normalization
 ├── video_tracker.py             # Video tracking utilities
 ├── syncnet.py                   # Sync network implementation
 │

@@ -51,8 +51,6 @@ modules_to_import = [
     'vasa_model',
     'vasa_dataset',
     'vasa_trainer',
-    'vasa_scheduler',
-    'expression_normalizer',
 ]
 
 for module in modules_to_import:
