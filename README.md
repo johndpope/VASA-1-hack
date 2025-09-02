@@ -2,9 +2,9 @@
 
 This repository contains the VASA implementation separated from EMOPortraits, with all components properly configured for standalone training.
 
-## 🚀 Quick Start
 
-### Prerequisites
+
+### BallBreaking Prerequisites
 
 ```bash
 # Create conda environment
@@ -18,9 +18,21 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 pip install omegaconf wandb opencv-python pillow scipy matplotlib tqdm
 pip install transformers diffusers accelerate
 pip install facenet-pytorch insightface hsemotion-onnx
-pip install mediapipe ibug-face-detection ibug-face-parsing
+pip install mediapipe 
 pip install l2cs memory-profiler rich
+
+
+
+
+# EMOPortaits
+cd nemo
+bootstrap.sh
+
 ```
+
+
+
+
 
 ### Setup Instructions
 
