@@ -4,7 +4,25 @@ This repository contains the VASA implementation separated from EMOPortraits, wi
 
 
 
-### BallBreaking Prerequisites
+
+
+
+### Setup Instructions
+
+1. **Clone the repository with submodules:**
+```bash
+# Clone with submodules included
+git clone --recurse-submodules https://github.com/johndpope/VASA-1-hack.git
+cd VASA-1-hack
+
+# Or if you already cloned without submodules:
+git submodule update --init --recursive
+```
+
+
+
+
+###  Prerequisites
 
 ```bash
 # Create conda environment
@@ -22,8 +40,6 @@ pip install mediapipe
 pip install l2cs memory-profiler rich
 
 
-
-
 # EMOPortaits
 cd nemo
 bootstrap.sh
@@ -31,35 +47,6 @@ bootstrap.sh
 ```
 
 
-
-
-
-### Setup Instructions
-
-1. **Clone the repository with submodules:**
-```bash
-# Clone with submodules included
-git clone --recurse-submodules https://github.com/johndpope/VASA-1-hack.git
-cd VASA-1-hack
-
-# Or if you already cloned without submodules:
-git submodule update --init --recursive
-```
-
-2. **Download required model weights:**
-
-You'll need to obtain these files from the EMOPortraits project or train from scratch:
-
-```bash
-# Create necessary directories
-mkdir -p data losses/loss_model_weights
-
-# Required files (obtain from EMOPortraits):
-# - data/aligned_keypoints_3d.npy
-# - losses/loss_model_weights/senet50_ft_dag.pth
-# - channel_config.yaml
-# - syncnet.py
-```
 
 3. **Create necessary symlinks:**
 ```bash
