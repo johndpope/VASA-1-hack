@@ -1,0 +1,336 @@
+# VASA Configuration - FIXED for TDD Training
+# Based on test failure analysis from initial run
+
+defaults:
+  - _self_
+
+# Model architecture (unchanged)
+model:
+  hidden_dim: 512
+  n_heads: 8
+  n_layers: 8
+  dim_feedforward: 2048
+  dropout: 0.1
+  motion_dim: 256
+  condition_embedding_dim: 512
+  use_prev_motion: true
+  max_motion_length: 1000
+  use_relative_position: true
+
+# Diffusion parameters - FIXED
+diffusion:
+  num_steps: 1000
+  beta_start: 1e-4
+  beta_end: 0.02
+  cfg_start_epoch: 30  # Delayed from 5 to 30
+  cfg_ramp_epochs: 10
+  schedule_mode: 'cosine'
+  schedule_s: 0.008
+
+# Motion generation - CURRICULUM LEARNING
+motion:
+  num_speed_buckets: 9
+  # Start with single frames, gradually increase
+  window_size: 1  # Changed from 50 to 1
+  stride: 1  # Changed from 25 to 1
+  context_size: 0  # No context initially
+  overlap_smooth: false  # Disable initially
+  min_window_size: 1
+  max_window_size: 50
+  smooth_window: 5
+  use_motion_prior: false  # Disable initially
+  
+  warmup_steps: 500  # Increased from 100
+  scheduler:
+    type: "cosine"
+    min_lr: 1e-6
+    warmup_ratio: 0.2  # Increased warmup
+  
+  # Progressive training schedule
+  progressive:
+    enabled: true
+    start_sequence_length: 1  # Start with single frames
+    max_sequence_length: 50
+    length_increase_freq: 10  # Increase every 10 epochs
+    
+  amp: true
+  scaler_growth: 2.0
+
+# Training parameters - MAJOR FIXES
+train:
+  resume_from: ""
+  
+  # CRITICAL FIX: Delay control signals significantly
+  control_start_epoch: 30  # Changed from 1750 to 30 (after basics work)
+  
+  # CRITICAL FIX: Higher learning rate
+  lr: 5e-3  # Increased from 1e-3 to 5e-3
+  motion_proj_lr: 2e-3  # Adjusted
+  expression_lr: 2e-3  # Adjusted
+  
+  # CRITICAL FIX: No noise initially
+  turn_off_noise: true  # Changed to true for initial training
+  
+  learning_rates:
+    condition_embedding: 5e-3  # All increased 5x
+    motion_projections: 5e-3
+    transformer_early: 5e-3
+    transformer_late: 2e-3
+    output_projections: 5e-3
+
+  batch_size: 1
+  gradient_accumulation_steps: 1  # Reduced from 4 for faster feedback
+  num_epochs: 100  # Reduced from 4000 for testing
+  
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 0.001  # Reduced from 0.01
+  max_grad_norm: 5.0  # Increased from 1.0
+  save_freq: 5
+  
+  # Dropout - disabled initially
+  dropout_probs:
+    audio: 0.0  # All set to 0 initially
+    gaze: 0.0
+    head_distance: 0.0
+    emotion: 0.0
+
+  # CFG scales - disabled initially
+  cfg_scales:
+    audio: 0.0
+    gaze: 0.0
+    head_distance: 0.0
+    emotion: 0.0
+
+  gradient_monitoring:
+    enabled: true
+    log_freq: 10  # More frequent monitoring
+    save_grad_norms: true
+    save_grad_flows: true
+    num_layers_to_monitor: 8
+
+# Loss weights - STAGE-BASED ADJUSTMENTS
+loss:
+  expression_weighting:
+    enabled: false  # Disable initially
+    min_weight: 0.5
+    
+  use_sync_loss: false  # Disable initially
+  use_verification: false  # Disable initially
+  lambda_verification: 0
+  
+  # CRITICAL: Prioritize reconstruction
+  lambda_reconstruction: 10.0  # Increased from 1
+  
+  # Disable all other losses initially
+  lambda_lips: 0
+  lambda_nonlip: 0
+  lambda_speed: 0
+  lambda_pose: 0
+  lambda_dynamics: 0  # Set to 0 initially
+  lambda_sync: 0
+  lambda_control: 0
+  lambda_lip: 0
+  lambda_gaze_direction: 0
+  lambda_head_distance: 0
+  lambda_emotion: 0
+  lambda_cfg: 0
+  lambda_perceptual: 0
+  lambda_temporal: 0
+  lambda_blink: 0
+  
+  warmup_epochs: 0
+  
+  # Progressive loss schedule
+  schedule:
+    enabled: true
+    stages:
+      # Stage 1: Pure reconstruction (epochs 0-10)
+      stage1:
+        start_epoch: 0
+        lambda_reconstruction: 10.0
+        
+      # Stage 2: Add dynamics (epochs 10-20)
+      stage2:
+        start_epoch: 10
+        lambda_reconstruction: 5.0
+        lambda_dynamics: 2.0
+        lambda_temporal: 1.0
+        
+      # Stage 3: Add control (epochs 20-30)
+      stage3:
+        start_epoch: 20
+        lambda_reconstruction: 2.0
+        lambda_dynamics: 3.0
+        lambda_temporal: 2.0
+        lambda_pose: 1.0
+        
+      # Stage 4: Full training (epochs 30+)
+      stage4:
+        start_epoch: 30
+        lambda_reconstruction: 1.0
+        lambda_dynamics: 2.0
+        lambda_temporal: 2.0
+        lambda_control: 1.0
+        lambda_gaze_direction: 0.5
+        lambda_emotion: 0.5
+
+# Inference parameters
+inference:
+  batch_size: 1
+  cfg_scale: 0.0  # No CFG initially
+  eta: 0.0
+  output_size: [512, 512]
+  num_inference_steps: 50
+  temperature: 1.0
+  top_k: 50
+  top_p: 0.9
+  use_window_cache: true
+
+# Dataset parameters
+dataset:
+  sequence_length: 1  # Start with single frames
+  frame_size: [512, 512]
+  preextract_audio: true
+  cache_audio: true
+  hop_length: 1  # Minimal hop initially
+  max_videos: 5  # Increased from 2 for more data
+  min_sequence_length: 1
+  max_sequence_samples: 100  # Small batches for fast iteration
+  val_split: 0.2
+  
+  # Disable augmentation initially
+  augmentation:
+    enabled: false
+    flip_prob: 0.0
+    temporal_crop_prob: 0.0
+    intensity_scale: 0.0
+    temporal_mask_prob: 0.0
+
+# Paths
+paths:
+  checkpoint_dir: "checkpoints"
+  syncnet_path: "pretrained/syncnet.pth"
+  emotion_model: "pretrained/emonet.pth"
+  volumetric_model: "nemo/logs/Retrain_with_17_V1_New_rand_MM_SEC_4_drop_02_stm_10_CV_05_1_1/checkpoints/328_model.pth"
+  volumetric_config: "nemo/models/stage_1/volumetric_avatar/va.yaml"
+  data_dir: "data"
+  video_folder: "junk"
+  cache_dir: "cache"
+
+# Hardware/environment
+device: "cuda"
+seed: 42
+num_workers: 0
+debug: true  # Enable debug mode
+
+# Wandb
+wandb:
+  project: "vasa"
+  enabled: true
+  name: "vasa_tdd_fixed"
+
+# TDD Configuration - PROGRESSIVE TARGETS
+tdd:
+  enabled: true
+  max_critical_failures: 5  # Reduced for faster iteration
+  regression_tolerance: 3
+  
+  # Progressive targets based on epoch
+  targets:
+    # Initial targets (epochs 0-10) - Focus on reconstruction
+    epoch_0:
+      psnr: 20.0  # Very achievable
+      ssim: 0.6
+      lpips: 0.4
+      static_loss: 0.5  # Achievable target
+      
+    # After reconstruction works (epochs 10-20)
+    epoch_10:
+      psnr: 23.0
+      ssim: 0.7
+      lpips: 0.3
+      static_loss: 0.2
+      dynamics_loss: 0.3
+      
+    # After basic motion (epochs 20-30)
+    epoch_20:
+      psnr: 25.0
+      ssim: 0.75
+      lpips: 0.25
+      static_loss: 0.1
+      dynamics_loss: 0.1
+      flow_consistency: 0.3
+      temporal_coherence: 0.5
+      
+    # Full pipeline (epochs 30+)
+    epoch_30:
+      psnr: 27.0
+      ssim: 0.8
+      lpips: 0.2
+      static_loss: 0.08
+      dynamics_loss: 0.05
+      flow_consistency: 0.6
+      temporal_coherence: 0.7
+      control_response: 0.6
+      
+    # Target goals (epochs 50+)
+    epoch_50:
+      psnr: 28.0
+      ssim: 0.85
+      lpips: 0.15
+      static_loss: 0.05
+      dynamics_loss: 0.03
+      flow_consistency: 0.9
+      temporal_coherence: 0.8
+      motion_smoothness: 0.85
+      control_response: 0.7
+      lip_sync_error: 100.0
+      av_correlation: 0.6
+
+# Additional components
+face_analysis:
+  face_detector: "retinaface"
+  face_parser: "rtnet"
+  emotion_recognizer: "hsemotion"
+  
+audio:
+  sample_rate: 16000
+  feature_type: "wav2vec2"
+  feature_dim: 768
+  normalize_audio: true
+
+# Visualization
+vis:
+  save_videos: true
+  save_frames: true
+  vis_freq: 10  # More frequent visualization
+  num_vis_samples: 2
+
+# Logging
+logging:
+  level: "DEBUG"  # More verbose
+  save_frequency: 10  # More frequent
+  metrics:
+    save_predictions: true
+    compute_fid: false  # Disable expensive metrics initially
+    compute_kid: false
+
+validation:
+  frequency: 5
+  num_samples: 10
+  metrics: ["reconstruction", "psnr", "ssim"]
+
+# Distributed training
+distributed:
+  enabled: false  # Disable for debugging
+  backend: "nccl"
+  find_unused_parameters: false
+  gradient_as_bucket_view: true
+
+# Optimization
+optimization:
+  compile_model: false
+  channels_last: true
+  gradient_checkpointing: false
+  sync_batchnorm: false

@@ -486,6 +486,9 @@ def collate_vasa_batch(batch: List[Dict]) -> Optional[Dict[str, torch.Tensor]]:
                         window['metadata'] = {}
                     window['metadata']['video_path'] = item.get('video_path', '')
                 all_windows.extend(windows)
+            else:
+                # If item doesn't have windows, treat it as a single window
+                all_windows.append(item)
 
         if not all_windows:
             logger.error("No valid windows in batch")

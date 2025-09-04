@@ -1,0 +1,18 @@
+# Failed Videos Report
+
+
+junk/10.mp4:
+  2025-09-04 13:37:55 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 5'}
+  2025-09-04 13:37:55 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 5'}
+  2025-09-04 13:37:55 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 5'}
+  2025-09-04 13:37:55 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 5'}
+  2025-09-04 13:37:56 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 5'}
+  2025-09-04 13:37:56 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 5'}
+  2025-09-04 13:37:56 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 5'}
+  2025-09-04 13:37:56 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 5'}
+  2025-09-04 13:37:56 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 5'}
+  2025-09-04 13:37:56 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 5'}
+  2025-09-04 13:37:56 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 5'}
+  2025-09-04 13:37:56 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 5'}
+  2025-09-04 13:37:56 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 5'}
+  2025-09-04 13:37:56 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 5'}

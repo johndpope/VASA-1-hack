@@ -1,0 +1,44 @@
+{
+  "epoch": 2,
+  "timestamp": "2025-09-04T13:29:01.397175",
+  "results": {
+    "Static Reconstruction": {
+      "name": "Static Reconstruction",
+      "passed": false,
+      "score": 1.0,
+      "target": 0.1,
+      "message": "Reconstruction loss: 1.0000 - Above target of 0.1",
+      "timestamp": "2025-09-04T13:29:01.393802",
+      "metadata": {}
+    },
+    "Short Sequence Generation": {
+      "name": "Short Sequence Generation",
+      "passed": false,
+      "score": 1.0,
+      "target": 0.05,
+      "message": "Dynamics loss: 1.0000 (window=1) - Above target of 0.05",
+      "timestamp": "2025-09-04T13:29:01.395258",
+      "metadata": {
+        "window_size": 1
+      }
+    },
+    "Control Response": {
+      "name": "Control Response",
+      "passed": "True",
+      "score": 1.0,
+      "target": 0.7,
+      "message": "Control response: 1.0000",
+      "timestamp": "2025-09-04T13:29:01.396538",
+      "metadata": {
+        "control_losses": {
+          "gaze": 0.0,
+          "emotion": 0.0,
+          "head_distance": 0.0,
+          "speed": 0.0
+        }
+      }
+    }
+  },
+  "passed_count": 1,
+  "total_count": 3
+}
