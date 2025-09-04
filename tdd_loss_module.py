@@ -327,7 +327,8 @@ class TDDLossModule(nn.Module):
         
         # Pad motion energy to match audio
         if motion_energy.shape[1] < audio_energy.shape[1]:
-            motion_energy = F.pad(motion_energy, (0, 1), value=motion_energy[:, -1])
+            pad_size = audio_energy.shape[1] - motion_energy.shape[1]
+            motion_energy = F.pad(motion_energy, (0, pad_size), mode='replicate')
         
         # Compute correlation
         correlations = []
@@ -515,7 +516,7 @@ class TDDLossModule(nn.Module):
                     else:
                         loss = 0.0
                 
-                losses[name] = torch.tensor(loss, device=self.device) * criteria.weight
+                losses[name] = torch.tensor(loss, device=self.device, requires_grad=True) * criteria.weight
         
         # Special handling for must-pass tests
         for name, passed in test_results.items():

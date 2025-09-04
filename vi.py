@@ -1314,7 +1314,7 @@ class VASAInference:
 if __name__ == "__main__":
     # Use the pose-aware model checkpoint with motion
     inferencer = VASAInference(
-        checkpoint_path="checkpoints/pose_aware/best_pose.pth",
+        checkpoint_path="checkpoints/tdd_wandb/best_model.pth",
         config_path='vasa_config_fixed.yaml'
     )
 
@@ -1325,12 +1325,18 @@ if __name__ == "__main__":
     #     fps=25.0
     # )
 
+    import time
+    output_filename = f"vasa-output-tdd-{int(time.time())}.mp4"
+    print(f"\nGenerating video: {output_filename}")
+    
     inferencer.generate_from_video(
         input_video="./junk/10.mp4",
-        output_path="vasa-output-overfit.mp4",
+        output_path=output_filename,
         fps=25.0,
         neutral_expression=False
     )
+    
+    print(f"\n✅ Video saved as: {output_filename}")
 
     # inferencer.visualize_inference_outputs(
     #     input_video="./junk/ovs-GiY_848_1.mp4",

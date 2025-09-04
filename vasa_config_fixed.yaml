@@ -30,9 +30,9 @@ diffusion:
 # Motion generation - CURRICULUM LEARNING
 motion:
   num_speed_buckets: 9
-  # Start with single frames, gradually increase
-  window_size: 1  # Changed from 50 to 1
-  stride: 1  # Changed from 25 to 1
+  # Process multiple frames at once for efficiency
+  window_size: 50  # Process 50 frames per batch
+  stride: 25  # 50% overlap for smooth transitions
   context_size: 0  # No context initially
   overlap_smooth: false  # Disable initially
   min_window_size: 1

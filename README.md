@@ -39,6 +39,11 @@ pip install facenet-pytorch insightface hsemotion-onnx
 pip install mediapipe 
 pip install l2cs memory-profiler rich
 
+# Audio-visual synchronization requirements
+pip install phonemizer  # For phoneme extraction
+pip install librosa soundfile  # For audio processing
+pip install praat-parselmouth  # For detailed phonetic analysis (optional)
+
 
 # EMOPortaits
 cd nemo
@@ -139,7 +144,12 @@ Expected output:
 ✓ Setup looks good! You can now run vasa_trainer.py
 ```
 
-2. **Start training:**
+2. **Start training with TDD (Test-Driven Development) losses:**
+```bash
+python train_tdd_wandb.py
+```
+
+3. **Or run original training:**
 ```bash
 python vasa_trainer.py
 ```
@@ -149,6 +159,11 @@ The trainer will:
 - Process videos from the configured directory
 - Save checkpoints to `checkpoints/`
 - Log to Weights & Biases (if enabled)
+- Apply TDD losses for:
+  - Expression preservation
+  - Motion quality
+  - Lip synchronization
+  - Phoneme-to-visual mapping
 
 ## 🔧 Troubleshooting
 
@@ -195,12 +210,73 @@ If you're missing files, you'll need these from EMOPortraits:
 - `losses/loss_model_weights/*.pth` - Pre-trained loss models
 - Pre-trained volumetric avatar checkpoint
 
+## 🎯 TDD (Test-Driven Development) Features
+
+### Expression Preservation
+The model includes an expression reconstruction loss that enforces preservation of facial expressions:
+
+```python
+# In tdd_loss_balanced.py
+expression_reconstruction_loss = F.mse_loss(
+    outputs['expression_embed'],
+    targets['expression_embed']
+)
+```
+
+This ensures:
+- Expressions remain consistent with the input video
+- No expression drift during generation
+- Acts like an expression "codebook"
+
+### Phoneme-to-Visual Mapping
+Accurate lip synchronization through:
+- Phoneme extraction from audio
+- Visual feature mapping for each phoneme
+- Curriculum learning stages:
+  1. **Stage 1**: Basic mouth open/close
+  2. **Stage 2**: Phoneme mapping
+  3. **Stage 3**: Fine synchronization
+
+### Audio-Visual Synchronization Tests
+Automated tests ensure quality:
+- Mouth openness correlation with audio amplitude
+- Silence detection (lips closed when quiet)
+- Phoneme-visual consistency
+- Temporal alignment
+
+### Running with TDD Losses
+```bash
+# Train with strong expression preservation (RECOMMENDED)
+python train_expression_preserving.py
+
+# Train with balanced TDD losses
+python train_tdd_wandb.py --expression_weight 2.0
+
+# Test inference with multi-step denoising
+python vi_complete.py --steps 20 --input video.mp4
+
+# Validate audio-visual sync
+python test_complete_system.py
+
+# Test expression preservation
+python tdd_expression_preserving.py
+```
+
+### Expression Preservation Training
+The `train_expression_preserving.py` script uses:
+- **3x stronger** expression reconstruction loss
+- Expression codebook to prevent drift
+- Temporal consistency enforcement
+- Curriculum learning with expression focus
+- Separate learning rates for expression parameters
+
 ## 📊 Monitoring Training
 
 Training progress is logged to:
 - **Console**: Real-time training metrics
 - **Weights & Biases**: Detailed metrics and visualizations (if enabled)
 - **Checkpoints**: Saved every N epochs to `checkpoints/`
+- **TDD Test Results**: Pass/fail rates for quality criteria
 
 Monitor training:
 ```bash
@@ -209,6 +285,9 @@ tail -f project.log
 
 # Check W&B dashboard
 # https://wandb.ai/YOUR_USERNAME/vasa/
+
+# Monitor TDD test results
+grep "TDD:" project.log | tail -20
 ```
 
 ## 🛠️ Development
@@ -229,6 +308,11 @@ tail -f project.log
 4. **Configurable paths** via vasa_config.yaml
 5. **Auto-detection** of project directories in nemo code
 6. **Clean separation** between VASA-specific and base code
+7. **Test-Driven Development (TDD) losses** for measurable quality
+8. **Expression preservation** through reconstruction loss
+9. **Phoneme-to-visual mapping** for accurate lip sync
+10. **Multi-step DDIM inference** for quality improvement
+11. **Audio-visual synchronization** with curriculum learning
 
 ### Working with the Submodule
 
