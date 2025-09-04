@@ -120,14 +120,14 @@ loss:
   lambda_verification: 0
   
   # CRITICAL: Prioritize reconstruction
-  lambda_reconstruction: 10.0  # Increased from 1
+  lambda_reconstruction: 1.0  # Base reconstruction weight
   
-  # Disable all other losses initially
+  # Enable core losses for reconstruction
   lambda_lips: 0
   lambda_nonlip: 0
   lambda_speed: 0
-  lambda_pose: 0
-  lambda_dynamics: 0  # Set to 0 initially
+  lambda_pose: 1.0  # FIXED: Must be non-zero for pose losses to count
+  lambda_dynamics: 1.0  # FIXED: Must be non-zero for expression losses to count
   lambda_sync: 0
   lambda_control: 0
   lambda_lip: 0

@@ -68,8 +68,11 @@ class VASATrainerWithTDD(VASATrainer):
         """Prepare test data from training statistics and model state."""
         test_data = {
             # Loss values for progressive tests
-            'reconstruction_loss': epoch_stats.get('reconstruction', 1.0),
-            'dynamics_loss': epoch_stats.get('dynamics_loss', 1.0),
+            # Check both with and without 'metric_' prefix
+            'reconstruction_loss': epoch_stats.get('metric_reconstruction', 
+                                                   epoch_stats.get('reconstruction', 1.0)),
+            'dynamics_loss': epoch_stats.get('metric_dynamics_loss', 
+                                            epoch_stats.get('dynamics_loss', 1.0)),
             'control_losses': {
                 'gaze': epoch_stats.get('control_gaze', 0.0),
                 'emotion': epoch_stats.get('control_emotion', 0.0),
