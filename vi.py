@@ -1312,9 +1312,9 @@ class VASAInference:
 # inferencer.visualize_inference_outputs("input.mp4", "vis_output")
 # Example usage
 if __name__ == "__main__":
-    # Use the overfitted model checkpoint
+    # Use the pose-aware model checkpoint with motion
     inferencer = VASAInference(
-        checkpoint_path="checkpoints/overfit/model.pth",
+        checkpoint_path="checkpoints/pose_aware/best_pose.pth",
         config_path='vasa_config_fixed.yaml'
     )
 
