@@ -1312,10 +1312,10 @@ class VASAInference:
 # inferencer.visualize_inference_outputs("input.mp4", "vis_output")
 # Example usage
 if __name__ == "__main__":
-    epoch = 6  # Using available checkpoint
+    # Use the overfitted model checkpoint
     inferencer = VASAInference(
-        checkpoint_path=f"./checkpoints/checkpoint_epoch_{epoch}.pt",
-        config_path='config_stage2.yaml'
+        checkpoint_path="checkpoints/overfit/model.pth",
+        config_path='vasa_config_fixed.yaml'
     )
 
     # inferencer.generate_sequence(
@@ -1327,7 +1327,7 @@ if __name__ == "__main__":
 
     inferencer.generate_from_video(
         input_video="./junk/10.mp4",
-        output_path=f"vasa-output-epoch-{epoch}.mp4",
+        output_path="vasa-output-overfit.mp4",
         fps=25.0,
         neutral_expression=False
     )
