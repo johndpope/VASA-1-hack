@@ -1,0 +1,74 @@
+test_audio_motion_correlation (__main__.ModelMotionTests.test_audio_motion_correlation)
+Test that motion correlates with audio features ... ok
+test_head_pose_variation (__main__.ModelMotionTests.test_head_pose_variation)
+Test that head pose parameters change over time ... ok
+test_motion_parameters_vary (__main__.ModelMotionTests.test_motion_parameters_vary)
+Test that generated motion parameters vary over time ... ok
+test_expression_variation (__main__.MotionQualityTests.test_expression_variation)
+Test that facial expressions vary throughout the video ... FAIL
+test_facial_landmarks_motion (__main__.MotionQualityTests.test_facial_landmarks_motion)
+Test that facial landmarks move between frames ... libEGL warning: egl: failed to create dri2 screen
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1756965563.318220 3330467 gl_context_egl.cc:85] Successfully initialized EGL. Major : 1 Minor: 5
+I0000 00:00:1756965563.329448 3330583 gl_context.cc:357] GL version: 3.2 (OpenGL ES 3.2 Mesa 25.0.7-0ubuntu0.25.04.1), renderer: zink Vulkan 1.4(NVIDIA GeForce RTX 5090 (NVIDIA_PROPRIETARY))
+INFO: Created TensorFlow Lite XNNPACK delegate for CPU.
+W0000 00:00:1756965563.331231 3330558 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
+/home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/google/protobuf/symbol_database.py:55: UserWarning: SymbolDatabase.GetPrototype() is deprecated. Please use message_factory.GetMessageClass() instead. SymbolDatabase.GetPrototype() will be removed soon.
+  warnings.warn('SymbolDatabase.GetPrototype() is deprecated. Please '
+FAIL
+test_frame_difference (__main__.MotionQualityTests.test_frame_difference)
+Test that consecutive frames are different ... ok
+test_frames_generated (__main__.MotionQualityTests.test_frames_generated)
+Test that frames were actually generated ... ok
+test_optical_flow_motion (__main__.MotionQualityTests.test_optical_flow_motion)
+Test that there is motion between frames using optical flow ... ok
+test_temporal_consistency (__main__.MotionQualityTests.test_temporal_consistency)
+Test that motion is temporally consistent (not jittery) ... ok
+
+======================================================================
+FAIL: test_expression_variation (__main__.MotionQualityTests.test_expression_variation)
+Test that facial expressions vary throughout the video
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/media/2TB/VASA-1-hack/test_motion_tdd.py", line 178, in test_expression_variation
+    self.assertGreater(
+AssertionError: np.float64(0.2628042432996962) not greater than 1.0 : Expressions don't vary enough: avg difference = 0.26
+
+======================================================================
+FAIL: test_facial_landmarks_motion (__main__.MotionQualityTests.test_facial_landmarks_motion)
+Test that facial landmarks move between frames
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/media/2TB/VASA-1-hack/test_motion_tdd.py", line 139, in test_facial_landmarks_motion
+    self.assertGreater(
+AssertionError: np.float64(0.000493972742752603) not greater than 0.001 : Face barely moves: average motion = 0.000494
+
+----------------------------------------------------------------------
+Ran 9 tests in 16.139s
+
+FAILED (failures=2)
+
+Frame Difference Statistics:
+  Static frames: 311/375 (82.9%)
+  Average difference: 0.0456
+
+Motion Statistics:
+  Average motion: 0.0127
+  Max motion: 0.0974
+  Min motion: 0.0010
+
+============================================================
+TDD Motion Test Summary
+============================================================
+Tests run: 9
+Failures: 2
+Errors: 0
+Skipped: 0
+
+❌ Some tests failed - model needs improvement
+
+Next steps to improve motion:
+1. Increase motion loss weights in training
+2. Add temporal consistency losses
+3. Use larger sequence lengths for training
+4. Add explicit motion augmentation
