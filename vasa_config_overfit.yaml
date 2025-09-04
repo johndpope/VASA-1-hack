@@ -1,0 +1,185 @@
+# VASA Overfitting Configuration - Single Video Training
+# Optimized for overfitting to junk/10.mp4
+
+# Model architecture
+model:
+  type: "VASAModel"
+  model_dim: 512
+  num_layers: 8
+  num_heads: 8
+  max_seq_len: 50
+  dropout: 0.0  # No dropout for overfitting
+  use_positional_encoding: true
+  use_audio_features: true
+  use_gaze_control: true
+  use_distance_control: true
+  use_emotion_control: true
+  
+  # Diffusion settings
+  num_diffusion_steps: 1000
+  ddim_steps: 50
+  beta_schedule: "cosine"
+  
+  # Audio encoding
+  audio_encoder: "wav2vec"
+  audio_dim: 768
+  
+  # Control dimensions
+  gaze_dim: 2
+  distance_dim: 1
+  emotion_dim: 2
+  speed_buckets: 4
+
+# Training configuration
+train:
+  batch_size: 1  # Single batch for overfitting
+  num_epochs: 500  # Many epochs to overfit
+  learning_rate: 0.001  # Higher LR for faster convergence
+  lr_scheduler: "constant"  # No scheduling for overfitting
+  gradient_clip: 1.0
+  
+  # Window and motion settings
+  window_size: 5
+  progressive_windows: false  # No progression for overfitting
+  max_window_size: 5
+  
+  # Data augmentation - DISABLED for overfitting
+  augment_audio: false
+  augment_video: false
+  augment_expression: false
+  
+  # Dropout probabilities - ALL ZERO for overfitting
+  dropout_probs:
+    audio: 0.0
+    gaze: 0.0
+    distance: 0.0
+    emotion: 0.0
+    speed: 0.0
+    
+  # Training stages
+  control_start_epoch: 1000  # Disable control losses
+  sync_start_epoch: 1000  # Disable sync losses
+  
+  # Checkpointing
+  save_freq: 10
+  validate_freq: 5
+  
+  # Overfitting specific
+  num_workers: 0  # Single worker for debugging
+  pin_memory: false
+  persistent_workers: false
+
+# Loss configuration  
+loss:
+  # Main losses with high weights for overfitting
+  lambda_reconstruction: 10.0  # High weight for reconstruction
+  lambda_pose: 5.0  # High weight for pose
+  lambda_dynamics: 5.0  # High weight for dynamics
+  
+  # Additional losses - disabled for simple overfitting
+  lambda_verification: 0.0
+  lambda_control: 0.0
+  lambda_sync: 0.0
+  
+  # Loss components
+  use_pose_loss: true
+  use_dynamics_loss: true
+  use_motion_loss: false
+  use_perceptual_loss: false  # Disable for faster training
+  use_sync_loss: false
+  use_control_loss: false
+  
+  # Component weights
+  theta_weight: 1.0
+  scale_weight: 1.0
+  rotation_weight: 1.0
+  translation_weight: 1.0
+  expression_weight: 1.0
+
+# Motion configuration
+motion:
+  window_size: 5
+  overlap: 2
+  min_frames: 30
+  progressive_training: false
+  
+  # Motion loss settings
+  use_optical_flow: false
+  use_temporal_coherence: false
+  lambda_flow: 0.0
+  lambda_coherence: 0.0
+
+# Data paths
+paths:
+  # Single video for overfitting
+  train_videos: ["junk/10.mp4"]
+  val_videos: ["junk/10.mp4"]  # Same video for validation
+  
+  # Model paths
+  volumetric_model: "models/may_emo_base.pth"
+  volumetric_config: "models/may_emo_base.yaml"
+  
+  # Cache paths
+  audio_cache: "junk/audio_cache"
+  face_cache: "junk/face_cache"
+  
+  # Output
+  output_dir: "checkpoints/overfit_10mp4"
+  
+# Dataset configuration
+dataset:
+  type: "VASADataset"
+  max_frames: 50
+  target_fps: 25
+  require_face_detection: false  # Disable for problematic videos
+  min_face_confidence: 0.0  # Accept all faces
+  audio_sample_rate: 16000
+  
+  # Single video repeated
+  train_repeat: 100  # Repeat the single video many times
+  val_repeat: 1
+  
+  # No filtering for overfitting
+  filter_short_videos: false
+  min_video_duration: 0.0
+  
+# Accelerator configuration
+accelerator:
+  type: "gpu"
+  devices: 1
+  precision: 32  # Full precision for debugging
+  gradient_accumulation_steps: 1
+
+# Logging configuration  
+wandb:
+  enabled: true
+  project: "vasa-overfit"
+  name: "overfit_10mp4"
+  tags: ["overfitting", "single_video", "debugging"]
+  log_freq: 1  # Log every step
+  
+# TDD configuration - simplified for overfitting
+tdd:
+  enabled: true
+  targets:
+    # Relaxed targets for initial overfitting
+    psnr: 20.0  # Lower target
+    ssim: 0.7
+    lpips: 0.3
+  max_critical_failures: 1000  # Don't stop on test failures
+  regression_tolerance: 1000
+
+# Optimizer configuration
+optimizer:
+  type: "AdamW"
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  weight_decay: 0.0  # No weight decay for overfitting
+  
+# Debug settings
+debug:
+  enabled: true
+  log_gradients: true
+  log_weights: true
+  save_generated_samples: true
+  sample_freq: 10

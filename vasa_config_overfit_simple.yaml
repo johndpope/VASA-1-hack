@@ -1,0 +1,141 @@
+# Simple overfitting config - based on working vasa_config_fixed.yaml
+
+# Model configuration
+model:
+  type: "VASAModel"
+  model_dim: 512
+  num_layers: 8
+  num_heads: 8
+  max_seq_len: 50  # Back to 50 frames
+  dropout: 0.0  # No dropout for overfitting
+  use_positional_encoding: true
+  use_audio_features: true
+  use_gaze_control: true
+  use_distance_control: true
+  use_emotion_control: true
+  
+  # Diffusion
+  num_diffusion_steps: 1000
+  ddim_steps: 50
+  beta_schedule: "cosine"
+  
+  # Audio
+  audio_encoder: "wav2vec"
+  audio_dim: 768
+  
+  # Control
+  gaze_dim: 2
+  distance_dim: 1
+  emotion_dim: 2
+  speed_buckets: 4
+
+diffusion:
+  num_steps: 1000
+  beta_schedule: "cosine"
+  ddim_steps: 50
+
+motion:
+  window_size: 5
+  context_size: 2
+  stride: 3
+  overlap: 2
+  min_frames: 30
+  progressive_training: false
+  use_optical_flow: false
+  use_temporal_coherence: false
+
+# Training configuration
+train:
+  batch_size: 1  # Single batch
+  num_epochs: 100
+  learning_rate: 0.005  # High LR for fast overfitting
+  lr_scheduler: "constant"
+  gradient_clip: 1.0
+  window_size: 5
+  progressive_windows: false
+  max_window_size: 5
+  
+  # No augmentation for overfitting
+  augment_audio: false
+  augment_video: false
+  augment_expression: false
+  
+  # No dropout
+  dropout_probs:
+    audio: 0.0
+    gaze: 0.0
+    distance: 0.0
+    emotion: 0.0
+    speed: 0.0
+    
+  # Disable extra losses initially
+  control_start_epoch: 1000
+  sync_start_epoch: 1000
+  
+  save_freq: 5
+  validate_freq: 5
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+
+# Loss configuration
+loss:
+  # High weights for overfitting
+  lambda_reconstruction: 10.0
+  lambda_pose: 5.0
+  lambda_dynamics: 5.0
+  lambda_verification: 0.0
+  lambda_control: 0.0
+  lambda_sync: 0.0
+  
+  use_pose_loss: true
+  use_dynamics_loss: true
+  use_motion_loss: false
+  use_perceptual_loss: false
+  use_sync_loss: false
+  use_control_loss: false
+  
+  theta_weight: 1.0
+  scale_weight: 1.0
+  rotation_weight: 1.0
+  translation_weight: 1.0
+  expression_weight: 1.0
+
+# Paths
+paths:
+  train_list: "single_video_list.txt"
+  val_list: "single_video_list.txt"
+  
+  volumetric_model: "models/may_emo_base.pth"
+  volumetric_config: "models/may_emo_base.yaml"
+  
+  audio_cache: "junk/audio_cache"
+  face_cache: "junk/face_cache"
+  
+  output_dir: "checkpoints/overfit_single"
+
+# Dataset
+dataset:
+  type: "VASAIntegratedDataset"
+  max_frames: 50  # Back to 50 frames
+  target_fps: 25
+  require_face_detection: false
+  min_face_confidence: 0.0
+  audio_sample_rate: 16000
+  filter_short_videos: false
+  min_video_duration: 0.0
+
+# Accelerator
+accelerator:
+  type: "gpu"
+  devices: 1
+  precision: 32
+  gradient_accumulation_steps: 1
+
+# Logging
+wandb:
+  enabled: false  # Disable for simple test
+  
+# TDD - disabled for simple overfitting
+tdd:
+  enabled: false
