@@ -1735,6 +1735,11 @@ if __name__ == "__main__":
     config = OmegaConf.load('vasa_config.yaml')
     model_path = config.paths.volumetric_model
     emo_config = OmegaConf.load(config.paths.volumetric_config)
+    
+    # CRITICAL: Set proper paths and flags for the config
+    emo_config.project_dir = './nemo'  # Set correct project directory
+    emo_config.model_checkpoint = True  # Enable checkpoint loading
+    
     # Add nemo to path if needed
     import sys
     sys.path.insert(0, 'nemo')
@@ -1742,7 +1747,12 @@ if __name__ == "__main__":
 
     # Load model weights
     model_dict = torch.load(model_path, map_location='cuda')
-    volumetric_avatar.load_state_dict(model_dict, strict=False)
+    missing_keys, unexpected_keys = volumetric_avatar.load_state_dict(model_dict, strict=False)
+    if missing_keys:
+        print(f"Warning: Missing {len(missing_keys)} keys when loading volumetric model")
+    if unexpected_keys:
+        print(f"Info: {len(unexpected_keys)} unexpected keys (likely discriminator weights)")
+    
     volumetric_avatar = volumetric_avatar.cuda()
     volumetric_avatar.eval()
     
