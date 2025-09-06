@@ -34,13 +34,13 @@ diffusion:
 # Motion generation parameters
 motion:
   num_speed_buckets: 9
-  window_size: 50
-  stride: 25
+  window_size: 20              # Reduced from 50 to 20 for faster training
+  stride: 10                   # Reduced from 25 to 10 for better overlap
   context_size: 10
   overlap_smooth: true
   # Add these:
-  min_window_size: 15          # Minimum window size for curriculum
-  max_window_size: 30          # Maximum window size
+  min_window_size: 10          # Reduced minimum window size
+  max_window_size: 20          # Reduced maximum window size
   smooth_window: 5             # Temporal smoothing window size
   use_motion_prior: true       # Whether to use motion prior
 

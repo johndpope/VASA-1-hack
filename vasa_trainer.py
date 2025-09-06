@@ -541,11 +541,14 @@ class VASATrainer:
         self.output_dir = Path(output_dir) if output_dir else None
         self.train_loader = train_loader
 
-        # Initialize accelerator with mixed precision 
+        # Initialize accelerator with mixed precision enabled for faster training
         self.accelerator = Accelerator(
             gradient_accumulation_steps=config.train.gradient_accumulation_steps,
-            mixed_precision="fp16" if config.motion.amp else None
+            mixed_precision="fp16"  # Force FP16 for faster convergence
         )
+        
+        logger.info(f"Mixed precision training: ENABLED (fp16)")
+        logger.info(f"Gradient accumulation steps: {config.train.gradient_accumulation_steps}")
 
      
             
@@ -880,14 +883,26 @@ class VASATrainer:
                                 for k, v in metrics.items():
                                     batch_metrics[f"metric_{k}"].append(v)
 
+                            # Check for NaN/Inf in loss before backward pass
+                            if not torch.isfinite(losses['total']):
+                                logger.error(f"NaN/Inf detected in loss at epoch {self.current_epoch}, batch {batch_idx}, window {window_idx}")
+                                logger.error(f"Loss components: {losses}")
+                                # Skip this window
+                                continue
+                            
                             # Backward pass for this window
                             self.accelerator.backward(losses['total'])
                             
                             if self.accelerator.sync_gradients:
-                                self.accelerator.clip_grad_norm_(
+                                # Clip gradients to prevent explosions
+                                grad_norm = self.accelerator.clip_grad_norm_(
                                     self.model.parameters(),
                                     self.config.train.max_grad_norm
                                 )
+                                
+                                # Log gradient norm for monitoring
+                                if grad_norm > 1e6:
+                                    logger.warning(f"Large gradient norm detected: {grad_norm:.2e}")
                                 
                             # Optimizer step after each window
                             self.optimizer.step()
@@ -1826,34 +1841,37 @@ if __name__ == "__main__":
 
 
 
-    # Create data loaders with proper settings
+    # Worker initialization function for consistency
+    def worker_init_fn(worker_id):
+        import numpy as np
+        np.random.seed(worker_id)
+        
+    # Create data loaders with optimized settings for faster training
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=0,  # No workers for testing
-        # pin_memory=True,
+        num_workers=2,  # Enable parallel data loading
+        pin_memory=True,  # Pin memory for faster GPU transfer
         drop_last=True,
         collate_fn=collate_vasa_batch,
         # Add these safety settings
-        persistent_workers=False,
-        prefetch_factor=None,
-        multiprocessing_context=None,  # Use spawn context
-        worker_init_fn=None,  # Add worker initialization here
-
+        persistent_workers=True if batch_size > 1 else False,  # Keep workers alive
+        prefetch_factor=2,  # Prefetch 2 batches per worker
+        multiprocessing_context='spawn',  # Use spawn context for safety
+        worker_init_fn=worker_init_fn  # Ensure worker consistency
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=1,  # Use batch size 1 for testing
         shuffle=False,
-        num_workers=0,  # No multiprocessing initially
-        # pin_memory=True,
+        num_workers=1,  # Single worker for validation
+        pin_memory=True,  # Pin memory for faster GPU transfer
         collate_fn=collate_vasa_batch,
-        multiprocessing_context=None,
+        multiprocessing_context='spawn',
         persistent_workers=False,
-        worker_init_fn=None,  # Add worker initialization here
-
+        worker_init_fn=worker_init_fn  # Ensure worker consistency
     )
 
 
