@@ -1,0 +1,9 @@
+# Failed Videos Report
+
+
+junk/10_50frames.mp4:
+  2025-09-06 12:14:02 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 20'}
+  2025-09-06 12:14:02 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 20'}
+  2025-09-06 12:14:02 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 20'}
+  2025-09-06 12:14:02 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 20'}
+  2025-09-06 12:14:24 - processing_error: {'error': 'Face attribute error: Expected sequence length 50, got 20'}

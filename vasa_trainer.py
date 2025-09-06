@@ -1811,12 +1811,16 @@ if __name__ == "__main__":
         # video_folder="/media/oem/12TB/Downloads/CelebV-HQ/celebvhq/35666/", #ovs-GiY_848_1
         video_folder=config.paths.video_folder,
         emo_model=volumetric_avatar,
+        window_size=config.motion.window_size,  # Use config window_size (20)
+        stride=config.motion.stride,  # Use config stride (10)
+        context_size=config.motion.context_size,  # Use config context_size (10)
         max_videos=1,  # Reduced from 10 to 1 for testing
         frame_size=(512, 512),
-        sequence_length=50,
+        sequence_length=config.motion.window_size,  # Match window_size
         cache_audio=True,
         preextract_audio=True,
-        random_seed=42
+        random_seed=42,
+        cache_dir=config.paths.get('cache_dir', 'cache')  # Use config cache dir
     )
 
     # Print dataset stats

@@ -28,6 +28,16 @@ import h5py
 from tqdm import tqdm
 from typing import *
 from collections import defaultdict
+
+# Import the new chunked window cache
+try:
+    from window_cache import WindowCache as ChunkedWindowCache
+    USE_CHUNKED_CACHE = True
+    logger.info("Using ChunkedWindowCache for flexible window sizes")
+except ImportError:
+    ChunkedWindowCache = None
+    USE_CHUNKED_CACHE = False
+    logger.info("ChunkedWindowCache not available, using built-in cache")
 from torchvision.utils import save_image
 from datetime import datetime
 import hashlib
@@ -492,7 +502,20 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         self.device = device
         self.model_device = next(emo_model.parameters()).device
         
-        self.cache = WindowCache(Path(video_folder) / "window_cache")
+        # Use chunked cache if available for flexible window support
+        if USE_CHUNKED_CACHE and ChunkedWindowCache:
+            cache_path = Path(cache_dir) if cache_dir else Path(video_folder) / "window_cache_chunked"
+            self.cache = ChunkedWindowCache(
+                cache_dir=cache_path,
+                chunk_size=1000,  # 1000 frames per chunk
+                overlap_size=50,  # 50 frame overlap for context
+                max_memory_cache=5  # Keep 5 chunks in memory
+            )
+            logger.info(f"Initialized ChunkedWindowCache at {cache_path}")
+        else:
+            # Fallback to built-in cache
+            self.cache = WindowCache(Path(video_folder) / "window_cache")
+            logger.info("Using built-in WindowCache")
 
         self.blink_handler = BlinkConditionHandler(window_size=sequence_length)
 
