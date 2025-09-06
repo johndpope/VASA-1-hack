@@ -1709,12 +1709,16 @@ class VASAModel(nn.Module):
                     'scale': initial_pose['scale'].expand(-1, T, -1),
                     'rotation': initial_pose['rotation'].expand(-1, T, -1),
                     'translation': initial_pose['translation'].expand(-1, T, -1),
-                    'expression_embed': initial_dynamics.expand(-1, T, -1)
+                    'expression_embed': initial_dynamics.unsqueeze(1).expand(-1, T, -1)
                 }
 
                 # Set up DDIM sampler
                 self.scheduler.set_timesteps(50, device=device)
 
+                # Get eta from config for stochasticity (VASA-1 uses mild randomness)
+                eta = getattr(self.config.inference, 'eta', 0.1)  # Default 0.1 for mild stochasticity
+                logger.info(f"Using eta={eta} for DDIM sampling (0=deterministic, 1=full stochastic)")
+                
                 # Generate frames sequentially
                 for i, t in enumerate(self.scheduler.timesteps):
                     # Get model prediction
@@ -1728,15 +1732,37 @@ class VASAModel(nn.Module):
                     # DDIM step for each motion parameter
                     for key in motion_sequence.keys():
                         if key in model_output:
-                            # Use scheduler step
+                            # Use scheduler step with stochasticity
                             scheduler_output = self.scheduler.step(
                                 model_output=model_output[key],
                                 timestep=t,
                                 sample=motion_sequence[key],
-                                eta=0.0  # No randomness in inference
+                                eta=eta  # Add randomness per VASA-1
                             )
                             motion_sequence[key] = scheduler_output.prev_sample
 
+                # Log variance to detect mode collapse
+                logger.info("=== Motion Variance Analysis ===")
+                for key in ['theta', 'rotation', 'translation', 'expression_embed']:
+                    if key in motion_sequence:
+                        motion = motion_sequence[key]
+                        # Compute variance across time
+                        temporal_var = motion.var(dim=1).mean().item()
+                        # Compute frame-to-frame differences
+                        if motion.shape[1] > 1:
+                            frame_diffs = motion[:, 1:] - motion[:, :-1]
+                            diff_norm = torch.norm(frame_diffs.reshape(B, -1), dim=-1).mean().item()
+                        else:
+                            diff_norm = 0.0
+                        
+                        logger.info(f"  {key}: temporal_var={temporal_var:.6f}, frame_diff_norm={diff_norm:.6f}")
+                        
+                        # WARNING if variance is too low (mode collapse)
+                        if temporal_var < 1e-4:
+                            logger.warning(f"  ⚠️ LOW VARIANCE in {key} - possible mode collapse!")
+                        if diff_norm < 1e-3:
+                            logger.warning(f"  ⚠️ STATIC MOTION in {key} - frames are too similar!")
+                
                 logger.debug("=== Generation Complete ===")
                 for k, v in motion_sequence.items():
                     logger.debug(f"{k} shape: {v.shape}")

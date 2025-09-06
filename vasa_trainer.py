@@ -815,7 +815,8 @@ class VASATrainer:
         if self.config.wandb.enabled and self.accelerator.is_local_main_process:
             self.epoch_table = wandb.Table(columns=[
                 "batch_idx", "window_idx", "total_loss", "reconstruction", 
-                "dynamics_loss", "expression_loss", "pose_loss", "grad_norm"
+                "dynamics_loss", "expression_loss", "pose_loss", "perceptual",
+                "grad_norm", "l_consist", "l_cross_id"
             ])
 
         for batch_idx, batch in enumerate(self.train_loader):
@@ -907,10 +908,8 @@ class VASATrainer:
                                 noise=noise                 # Pass noise for loss computation
                             )
                             
-                            # Tell loss module which window we're on for visualization
-                            self.loss_module._window_count_this_batch = window_idx
-                            
-                            # Compute losses using noise prediction
+                           
+                            # Compute losses including perceptual loss
                             losses, metrics = self.loss_module.compute_losses(
                                 outputs=outputs,
                                 targets=motion_data,  # Original motion data
@@ -918,7 +917,9 @@ class VASATrainer:
                                 noise=outputs['noise'],    
                                 return_metrics=True,
                                 current_epoch=self.current_epoch,
-                                step=self.global_step
+                                step=self.global_step,
+                                generated_frames=generated_frames,
+                                target_frames=target_frames
                             )
 
                             # Update batch metrics - store per-window
@@ -976,24 +977,43 @@ class VASATrainer:
                                     metrics.get('dynamics_loss', 0.0),
                                     metrics.get('expression_loss', 0.0),
                                     metrics.get('pose_loss', 0.0),
-                                    grad_norm_value
+                                    metrics.get('perceptual', 0.0),
+                                    grad_norm_value,
+                                    metrics.get('l_consist', 0.0),
+                                    metrics.get('l_cross_id', 0.0)
                                 )
                             
                             # Log visualizations every 5 batches
                             if batch_idx % 5 == 0 and window_idx == 0:  # Only log first window
                                 self._log_visualizations(outputs, motion_data, self.global_step)
                                 self._log_gradient_stats(self.global_step)
-                                
-                                # Generate sample video every 5 epochs (only on first batch)
-                                if batch_idx == 0 and self.current_epoch % 5 == 0 and self.config.vis.save_videos:
-                                    video_path = self._generate_sample_video(outputs, max_frames=50)
-                                    if video_path and self.config.wandb.enabled:
-                                        # Use mp4 format for consistency with vi.py
-                                        wandb.log({"visuals/generated_sample": wandb.Video(str(video_path), 
-                                                                                         fps=25, 
-                                                                                         format="mp4")}, 
-                                                step=self.global_step)
-                                    logger.info(f"📹 Generated sample video for epoch {self.current_epoch}")
+                            
+                            # Generate thumbnail every epoch (moved outside of batch_idx % 5 condition)
+                            # Only on first batch and last window to avoid too many uploads
+                            if batch_idx == 0 and window_idx == len(windows) - 1 and self.config.wandb.enabled:
+                                try:
+                                    from thumbnail_generator import generate_window_thumbnail
+                                    
+                                    # Simple call - let thumbnail generator handle everything
+                                    thumbnail = generate_window_thumbnail(
+                                        window=window,
+                                        motion_data=motion_data,
+                                        outputs=outputs,
+                                        size=(512, 512)
+                                    )
+                                    
+                                    # Log to wandb
+                                    wandb.log({
+                                        "visuals/training_thumbnail": wandb.Image(
+                                            thumbnail,
+                                            caption=f"Epoch {self.current_epoch}, Batch {batch_idx}, Random frame"
+                                        )
+                                    }, step=self.global_step)
+                                    
+                                    logger.info(f"📸 Generated training thumbnail for epoch {self.current_epoch}")
+                                    
+                                except Exception as e:
+                                    logger.warning(f"Could not generate thumbnail: {e}")
 
                         except Exception as e:
                             logger.error(f"Error processing window {window_idx}: {str(e)}")

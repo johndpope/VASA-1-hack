@@ -125,7 +125,7 @@ loss:
   
   # Foundation losses (always active)
   lambda_reconstruction: 1.0
-  lambda_dynamics: 10.0       # expression variance
+  lambda_dynamics: 20.0       # expression variance (increased to prevent static motion)
   lambda_pose: 1.0
   
   # Progressive losses (unlock based on thresholds)
@@ -181,7 +181,7 @@ loss:
 inference:
   batch_size: 1
   cfg_scale: 3.0
-  eta: 0.0  # DDIM stochastic sampling parameter
+  eta: 0.1  # DDIM stochastic sampling parameter (0.1 for mild randomness, prevents mode collapse)
   output_size: [512, 512]
   num_inference_steps: 50     # Number of DDIM steps during inference
   temperature: 1.0            # Sampling temperature

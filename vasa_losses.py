@@ -543,9 +543,11 @@ class VASALossModule:
         noise: Optional[Dict[str, torch.Tensor]] = None,
         return_metrics: bool = True,
         current_epoch: Optional[int] = None,
-        step: Optional[int] = None
+        step: Optional[int] = None,
+        generated_frames: Optional[torch.Tensor] = None,
+        target_frames: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
-        """Compute all losses including expression verification."""
+        """Compute all losses including expression verification and perceptual loss."""
         try:
             logger.info("\n=== Computing Losses ===")
             losses = {}
@@ -720,10 +722,54 @@ class VASALossModule:
             logger.debug(f"  Sync term: {sync_term.item():.6f}")
             logger.debug(f"  Disentangle term: {disentangle_term.item():.6f}")
             logger.debug(f"  Velocity/smoothness term: {vel_smooth_term.item():.6f}")
+            
+            # Get diversity term
+            diversity_term = losses.get('motion_diversity', torch.tensor(0.0, device=device))
+            logger.debug(f"  Diversity term: {diversity_term.item():.6f}")
+            
+            # Compute LPIPS perceptual loss (VASA paper Section 3.3)
+            perceptual_term = torch.tensor(0.0, device=device)
+            if generated_frames is not None and target_frames is not None:
+                logger.debug("Computing LPIPS perceptual loss...")
+                try:
+                    # Ensure frames are in correct shape [B*T, C, H, W]
+                    if generated_frames.dim() == 5:  # [B, T, C, H, W]
+                        B, T, C, H, W = generated_frames.shape
+                        gen_flat = generated_frames.view(B * T, C, H, W)
+                        tgt_flat = target_frames.view(B * T, C, H, W)
+                    else:
+                        gen_flat = generated_frames
+                        tgt_flat = target_frames
+                    
+                    # Normalize to [-1, 1] for LPIPS (expects this range)
+                    if gen_flat.max() > 1.0:
+                        gen_flat = gen_flat / 127.5 - 1.0
+                        tgt_flat = tgt_flat / 127.5 - 1.0
+                    elif gen_flat.min() >= 0:  # If in [0, 1], convert to [-1, 1]
+                        gen_flat = gen_flat * 2.0 - 1.0
+                        tgt_flat = tgt_flat * 2.0 - 1.0
+                    
+                    # Compute LPIPS loss
+                    perceptual_loss = self.loss_fn_alex(gen_flat, tgt_flat).mean()
+                    
+                    # Apply lambda_perceptual weight
+                    lambda_perceptual = self.config.loss.get('lambda_perceptual', 0.5)
+                    perceptual_term = perceptual_loss * lambda_perceptual
+                    losses['perceptual'] = perceptual_term
+                    
+                    logger.debug(f"  Perceptual loss (LPIPS): {perceptual_loss.item():.6f}")
+                    logger.debug(f"  Weighted perceptual term: {perceptual_term.item():.6f}")
+                    
+                except Exception as e:
+                    logger.warning(f"Could not compute perceptual loss: {e}")
+                    losses['perceptual'] = torch.tensor(0.0, device=device)
+            else:
+                logger.debug("  No frames provided for perceptual loss")
+                losses['perceptual'] = torch.tensor(0.0, device=device)
 
-            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term
+            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + diversity_term + perceptual_term
             losses['total'] = total_loss
-            logger.debug(f"Total loss: {total_loss.item():.6f}")
+            logger.debug(f"Total loss (with perceptual): {total_loss.item():.6f}")
 
             # Return results
             if return_metrics:
@@ -739,6 +785,109 @@ class VASALossModule:
 
         
 
+    def generate_frames_from_motion(
+        self,
+        motion: Dict[str, torch.Tensor],
+        source_image: torch.Tensor,
+        max_frames: Optional[int] = None
+    ) -> torch.Tensor:
+        """
+        Generate frames from motion parameters using volumetric avatar.
+        
+        Args:
+            motion: Dictionary with 'theta', 'expression', etc.
+            source_image: Source identity image [B, C, H, W]
+            max_frames: Maximum number of frames to generate (for memory)
+            
+        Returns:
+            Generated frames [B, T, C, H, W]
+        """
+        try:
+            with torch.no_grad():
+                B = source_image.shape[0]
+                T = motion['theta'].shape[1] if 'theta' in motion else 1
+                
+                # Limit frames for memory
+                if max_frames is not None and T > max_frames:
+                    T = max_frames
+                    motion = {k: v[:, :T] if v.dim() > 1 else v for k, v in motion.items()}
+                
+                device = source_image.device
+                frames = []
+                
+                # Get source identity embeddings
+                source_mask = self.volumetric_avatar.face_idt.forward(source_image)[0]
+                source_mask = (source_mask > 0.6).float()
+                source_masked = source_image * source_mask
+                
+                # Get identity embedding
+                idt_embed = self.volumetric_avatar.idt_embedder_nw(source_masked)
+                
+                # Get canonical volume
+                source_latents = self.volumetric_avatar.local_encoder_nw(source_masked)
+                c = self.volumetric_avatar.args.latent_volume_channels
+                d = self.volumetric_avatar.args.latent_volume_depth
+                s = self.volumetric_avatar.args.latent_volume_size
+                
+                source_volume = source_latents.view(B, c, d, s, s)
+                if hasattr(self.volumetric_avatar, 'volume_source_nw'):
+                    source_volume = self.volumetric_avatar.volume_source_nw(source_volume)
+                canonical_volume = self.volumetric_avatar.volume_process_nw(source_volume)
+                
+                # Generate each frame
+                for t in range(T):
+                    # Extract frame parameters
+                    frame_theta = motion['theta'][:, t] if 'theta' in motion else torch.eye(3, 4).unsqueeze(0).to(device)
+                    frame_expr = motion['expression'][:, t] if 'expression' in motion else torch.zeros(B, 256).to(device)
+                    
+                    # Create data dict for this frame
+                    data_dict = {
+                        'source_img': source_image,
+                        'target_img': source_image,  # Dummy
+                        'source_theta': frame_theta,
+                        'target_theta': frame_theta,
+                        'source_pose_embed': frame_expr.unsqueeze(1),
+                        'target_pose_embed': frame_expr.unsqueeze(1),
+                    }
+                    
+                    # Generate frame through decoder
+                    try:
+                        # Get embeddings
+                        source_warp_embed_dict, target_warp_embed_dict, _, embed_dict = \
+                            self.volumetric_avatar.predict_embed(data_dict)
+                        
+                        # Apply motion warping
+                        grid = self.volumetric_avatar.identity_grid_3d.repeat_interleave(B, dim=0)
+                        target_rotation_warp = grid.bmm(frame_theta[:, :3].transpose(1, 2)).view(B, d, s, s, 3)
+                        
+                        # Warp canonical volume
+                        warped_volume = self.volumetric_avatar.grid_sample(canonical_volume, target_rotation_warp)
+                        target_latent_feats = warped_volume.view(B, c * d, s, s)
+                        
+                        # Generate frame
+                        frame, _, _, _ = self.volumetric_avatar.decoder_nw(
+                            data_dict,
+                            embed_dict,
+                            target_latent_feats,
+                            None
+                        )
+                        frames.append(frame)
+                        
+                    except Exception as e:
+                        logger.warning(f"Error generating frame {t}: {e}")
+                        # Use source image as fallback
+                        frames.append(source_image)
+                
+                # Stack frames [B, T, C, H, W]
+                if frames:
+                    return torch.stack(frames, dim=1)
+                else:
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"Error in generate_frames_from_motion: {e}")
+            return None
+    
     def _generate_verification_frame(self, data_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Helper method to generate verification frame through EMO pipeline with memory optimizations."""
         try:
