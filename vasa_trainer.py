@@ -19,6 +19,7 @@ from typing import Dict, Optional, List
 from collections import defaultdict
 from omegaconf import OmegaConf
 from vasa_model import VASAModel,VASALossModule,MotionSequenceHandler
+from tdd_progressive_loss import TDDProgressiveLoss
 import importlib
 import sys
 if 'nemo' not in sys.path:
@@ -537,10 +538,12 @@ class VASATrainer:
         config: dict,
         train_loader: DataLoader,
         val_loader: Optional[DataLoader] = None,
-        output_dir: Optional[str] = None
+        output_dir: Optional[str] = None,
+        config_path: Optional[str] = None
     ):
         self.model = model
         self.config = config
+        self.config_path = config_path or 'vasa_config.yaml'
         self.output_dir = Path(output_dir) if output_dir else None
         self.train_loader = train_loader
 
@@ -561,6 +564,16 @@ class VASATrainer:
             config=config,
             device=self.accelerator.device
         )
+        
+        # Initialize TDD progressive loss if enabled
+        self.tdd_loss_module = None
+        if config.loss.get('use_tdd_progressive', False):
+            self.tdd_loss_module = TDDProgressiveLoss(
+                config=config,
+                device=self.accelerator.device
+            )
+            logger.info("🎯 TDD Progressive Loss System Enabled")
+            logger.info("   Losses will unlock progressively based on training milestones")
         
 
         # Initialize MotionSequenceHandler
@@ -765,6 +778,24 @@ class VASATrainer:
         logger.info(f"Batch size: {self.config.train.batch_size}")
         logger.info(f"Total batches: {num_batches}")
         
+        # Update TDD progressive loss module if enabled
+        if self.tdd_loss_module is not None:
+            # Get metrics from last epoch (if available)
+            metrics = {}
+            if hasattr(self, 'last_epoch_metrics'):
+                metrics = self.last_epoch_metrics
+            
+            self.tdd_loss_module.update_epoch(self.current_epoch, metrics)
+            
+            # Log TDD status
+            tdd_status = self.tdd_loss_module.get_status()
+            logger.info(f"🎯 TDD Loss Status:")
+            logger.info(f"   Stage: {tdd_status['current_stage']}")
+            logger.info(f"   Active losses: {', '.join(tdd_status['active_losses'])}")
+            if tdd_status['pending_losses']:
+                next_loss = tdd_status['pending_losses'][0]
+                logger.info(f"   Next unlock: {next_loss['name']} at epoch {next_loss['min_epoch']}")
+        
         # Initialize progress bar
         self.progress_bar = tqdm(
             total=num_batches,
@@ -928,6 +959,14 @@ class VASATrainer:
                             
                             # Add row to metrics table
                             if self.config.wandb.enabled and self.accelerator.is_local_main_process:
+                                # Convert grad_norm to scalar if it's a tensor
+                                grad_norm_value = 0.0
+                                if 'grad_norm' in locals():
+                                    if isinstance(grad_norm, torch.Tensor):
+                                        grad_norm_value = grad_norm.item()
+                                    else:
+                                        grad_norm_value = float(grad_norm)
+                                
                                 self.epoch_table.add_data(
                                     batch_idx,
                                     window_idx,
@@ -936,7 +975,7 @@ class VASATrainer:
                                     metrics.get('dynamics_loss', 0.0),
                                     metrics.get('expression_loss', 0.0),
                                     metrics.get('pose_loss', 0.0),
-                                    grad_norm if 'grad_norm' in locals() else 0.0
+                                    grad_norm_value
                                 )
                             
                             # Log visualizations every 5 batches
@@ -944,8 +983,8 @@ class VASATrainer:
                                 self._log_visualizations(outputs, motion_data, self.global_step)
                                 self._log_gradient_stats(self.global_step)
                                 
-                                # Generate sample video every 10 batches
-                                if batch_idx % 10 == 0 and self.config.vis.save_videos:
+                                # Generate sample video every 5 epochs (only on first batch)
+                                if batch_idx == 0 and self.current_epoch % 5 == 0 and self.config.vis.save_videos:
                                     video_path = self._generate_sample_video(outputs, max_frames=50)
                                     if video_path and self.config.wandb.enabled:
                                         # Use mp4 format for consistency with vi.py
@@ -953,6 +992,7 @@ class VASATrainer:
                                                                                          fps=25, 
                                                                                          format="mp4")}, 
                                                 step=self.global_step)
+                                    logger.info(f"📹 Generated sample video for epoch {self.current_epoch}")
 
                         except Exception as e:
                             logger.error(f"Error processing window {window_idx}: {str(e)}")
@@ -996,6 +1036,9 @@ class VASATrainer:
         epoch_averages = {
             k: sum(v) / len(v) for k, v in epoch_metrics.items()
         }
+        
+        # Store for TDD progressive loss
+        self.last_epoch_metrics = epoch_averages
         
         # Log epoch metrics
         if self.config.wandb.enabled and self.accelerator.is_local_main_process:
@@ -1871,14 +1914,73 @@ class VASATrainer:
             logger.warning(f"Error in visualization logging: {str(e)}")
 
     def _generate_sample_video(self, outputs: Dict[str, torch.Tensor], max_frames: int = 50):
-        """Generate a sample video for visualization (max 50 frames)."""
+        """Generate a sample video for visualization using VASAInference."""
         try:
+            # Try to use VASAInference to generate actual avatar video
+            from vi import VASAInference
+            import random
+            import os
+            
+            # Get list of available videos
+            video_folder = self.config.paths.video_folder
+            video_files = [f for f in os.listdir(video_folder) if f.endswith('.mp4')]
+            
+            if video_files:
+                # Select a random video for generation
+                sample_video = os.path.join(video_folder, random.choice(video_files))
+                
+                # Determine checkpoint path based on config
+                if 'overfit' in str(self.config_path):
+                    checkpoint_dir = "./checkpoints_overfit"
+                    config_file = 'overfit_config.yaml'
+                else:
+                    checkpoint_dir = "./checkpoints"
+                    config_file = 'vasa_config.yaml'
+                
+                # Check if we have a saved checkpoint
+                checkpoint_path = None
+                if os.path.exists(f"{checkpoint_dir}/best_checkpoint.pt"):
+                    checkpoint_path = f"{checkpoint_dir}/best_checkpoint.pt"
+                elif self.current_epoch > 0:
+                    # Try to find latest checkpoint
+                    epoch_checkpoint = f"{checkpoint_dir}/checkpoint_epoch_{self.current_epoch}.pt"
+                    if os.path.exists(epoch_checkpoint):
+                        checkpoint_path = epoch_checkpoint
+                
+                if checkpoint_path and os.path.exists(checkpoint_path):
+                    try:
+                        logger.info(f"Generating sample video using checkpoint: {checkpoint_path}")
+                        
+                        # Initialize inference model
+                        inferencer = VASAInference(
+                            checkpoint_path=checkpoint_path,
+                            config_path=config_file
+                        )
+                        
+                        # Generate output video
+                        video_path = self.output_dir / f"vasa_epoch_{self.current_epoch}_step_{self.global_step}.mp4"
+                        video_path.parent.mkdir(parents=True, exist_ok=True)
+                        
+                        inferencer.generate_from_video(
+                            input_video=sample_video,
+                            output_path=str(video_path),
+                            fps=25.0,
+                            neutral_expression=False
+                        )
+                        
+                        logger.info(f"Generated VASA video: {video_path}")
+                        return video_path
+                        
+                    except Exception as e:
+                        logger.warning(f"Failed to generate VASA video: {str(e)}")
+                        # Fall back to gradient visualization
+                        pass
+            
+            # Fallback: gradient visualization if VASA generation fails
             with torch.no_grad():
                 # Limit to max_frames
                 actual_frames = min(outputs['theta'].shape[1], max_frames) if 'theta' in outputs else 20
                 
-                # For now, just create gradient visualization to test video upload
-                # TODO: Implement actual volumetric avatar generation
                 frames = []
                 
                 # Get motion parameters for visualization
@@ -1914,10 +2016,10 @@ class VASATrainer:
                 
                 frames = torch.stack(frames)  # [T, C, H, W]
                 
-                # Save as MP4 video using same approach as vi.py
+                # Save as MP4 video
                 import cv2
                 
-                video_path = self.output_dir / f"sample_epoch_{self.current_epoch}_step_{self.global_step}.mp4"
+                video_path = self.output_dir / f"gradient_epoch_{self.current_epoch}_step_{self.global_step}.mp4"
                 video_path.parent.mkdir(parents=True, exist_ok=True)
                 
                 # Convert to numpy and ensure proper format
@@ -2094,7 +2196,7 @@ if __name__ == "__main__":
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=2,  # Enable parallel data loading
+        num_workers=config.get('num_workers', 8),  # Use config num_workers for parallel loading
         pin_memory=True,  # Pin memory for faster GPU transfer
         drop_last=True,
         collate_fn=collate_vasa_batch,
@@ -2129,7 +2231,8 @@ if __name__ == "__main__":
         config=config,
         train_loader=train_loader,
         val_loader=val_loader,
-        output_dir=output_dir
+        output_dir=output_dir,
+        config_path=args.config
     )
 
 

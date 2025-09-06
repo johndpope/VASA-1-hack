@@ -59,7 +59,7 @@ motion:
 
 # Training parameters - OVERFITTING FOCUSED
 train:
-  resume_from: "" # Resume from checkpoint if needed
+  resume_from: "./checkpoints_overfit/best_checkpoint.pt" # Resume from checkpoint if needed
   # when to add conditional signals
   control_start_epoch: 0      # Start control immediately for overfitting
 
@@ -75,8 +75,8 @@ train:
     transformer_late: 5e-5
     output_projections: 2e-4
 
-  batch_size: 16                # Increased for better GPU utilization
-  gradient_accumulation_steps: 2  # Reduced since we have larger batch
+  batch_size: 28                # Increased from 16 to maximize 32GB VRAM utilization
+  gradient_accumulation_steps: 1  # Reduced to 1 since we have much larger batch
   num_epochs: 1000            # Reduced for quick testing
 
   beta1: 0.9
@@ -107,8 +107,11 @@ train:
     save_grad_flows: true
     num_layers_to_monitor: 2  # Monitor all 2 layers
 
-# Loss weights - SIMPLIFIED for overfitting
+# Loss weights - TDD PROGRESSIVE SYSTEM
 loss:
+  # Use TDD progressive loss system
+  use_tdd_progressive: true
+  
   expression_weighting:
     enabled: true
     min_weight: 0.5  # Minimum weight for least important dimensions
@@ -117,30 +120,37 @@ loss:
   use_verification: false     # Disabled for faster training
   lambda_verification: 0
   
-  lambda_lips: 0              # Weight for lip motion loss
+  # Foundation losses (always active)
+  lambda_reconstruction: 1.0
+  lambda_dynamics: 10.0       # expression variance
+  lambda_pose: 1.0
+  
+  # Progressive losses (unlock based on thresholds)
+  # Stage 2: Blinking (unlocks at epoch 5 if reconstruction < 0.1)
+  lambda_blink: 0.0           # Will ramp to 2.0
+  
+  # Stage 3: Eye Gaze (unlocks at epoch 15 if blink < 0.15)  
+  lambda_gaze_direction: 0.0  # Will ramp to 1.5
+  
+  # Stage 4: Head Pose (unlocks at epoch 25 if gaze < 0.2)
+  lambda_head_distance: 0.0   # Will ramp to 1.0
+  
+  # Stage 5: Emotion (unlocks at epoch 35 if head pose < 0.25)
+  lambda_emotion: 0.0         # Will ramp to 0.8
+  
+  # Stage 6: Lip Sync (unlocks at epoch 45 if emotion < 0.3)
+  lambda_lips: 0.0            # Will ramp to 2.0
+  lambda_sync: 0.0            # Will ramp to 2.0
+  
+  # Other losses
   lambda_nonlip: 0.0          # Weight for non-lip facial landmarks
   lambda_speed: 0
-  lambda_pose: 1
-  lambda_dynamics: 10.0       # expression
-  lambda_reconstruction: 1
-  # Audio-visual sync loss
-  lambda_sync: 0.0            # Disabled for overfitting test
-
-  # Control signal adherence loss
-  lambda_control: 0.0         # Disabled initially for overfitting
+  lambda_control: 0.0         # Overall control weight
   lambda_lip: 0.0
-
-  lambda_gaze_direction: 0.0
-  lambda_head_distance: 0.0
-  lambda_emotion: 0.0
-
   lambda_cfg: 0.5
   lambda_perceptual: 0.1      # Perceptual loss weight
   lambda_temporal: 0.8        # Temporal consistency loss
   warmup_epochs: 0            # No warmup for overfitting
-  
-  # Blink control loss
-  lambda_blink: 0.0           # Disabled for overfitting
   
   # Loss scheduling
   schedule:
