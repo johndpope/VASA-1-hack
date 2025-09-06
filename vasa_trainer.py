@@ -912,6 +912,7 @@ class VASATrainer:
                             target_frames = window.get('frames', None)  # Get frames from dataset
                             
                             # Generate frames if we have disentanglement losses enabled
+                            # OPTIMIZATION: Only generate the 2 frames needed for disentanglement loss
                             generated_frames = None
                             if (self.config.loss.lambda_consist > 0 or self.config.loss.lambda_cross_id > 0) and target_frames is not None:
                                 try:
@@ -923,13 +924,28 @@ class VASATrainer:
                                         'source_img': source_img
                                     }
                                     
-                                    # Generate frames using volumetric avatar
+                                    # Only generate first and last frame for disentanglement loss
+                                    # This saves significant memory compared to generating all T frames
                                     with torch.no_grad():
+                                        T = outputs['theta'].shape[1]
+                                        
+                                        # Create a subset of outputs with only first and last frame
+                                        sparse_outputs = {}
+                                        for key, value in outputs.items():
+                                            if isinstance(value, torch.Tensor) and value.dim() > 2 and value.shape[1] == T:
+                                                # Extract only first and last frame [B, 2, ...]
+                                                sparse_outputs[key] = torch.stack([value[:, 0], value[:, -1]], dim=1)
+                                            else:
+                                                sparse_outputs[key] = value
+                                        
+                                        # Generate only 2 frames instead of T frames
                                         generated_frames = self.model.volumetric_avatar.generate_frames_from_motion(
-                                            motion_outputs=outputs,
+                                            motion_outputs=sparse_outputs,
                                             source_params=source_params
                                         )
-                                    logger.info(f"Generated frames shape: {generated_frames.shape}")
+                                        # Detach immediately to prevent gradient tracking
+                                        generated_frames = generated_frames.detach()
+                                    logger.info(f"Generated frames shape (sparse): {generated_frames.shape}")
                                 except Exception as e:
                                     logger.error(f"Failed to generate frames for disentanglement loss: {str(e)}")
                                     generated_frames = None
@@ -946,6 +962,11 @@ class VASATrainer:
                                 generated_frames=generated_frames,
                                 target_frames=target_frames
                             )
+                            
+                            # Clean up generated frames immediately after loss computation
+                            if generated_frames is not None:
+                                del generated_frames
+                                torch.cuda.empty_cache()
 
                             # Update batch metrics - store per-window
                             for k, v in losses.items():
@@ -1019,25 +1040,64 @@ class VASATrainer:
                                 self._log_visualizations(outputs, motion_data, self.global_step)
                                 self._log_gradient_stats(self.global_step)
                             
-                            # Generate thumbnail with random frame selection
+                            # Generate thumbnail with single frame only to save memory
                             # Generate more frequently: every 10 batches or on first batch
                             if (batch_idx % 10 == 0 or batch_idx == 0) and window_idx == 0 and self.config.wandb.enabled:
                                 try:
                                     from thumbnail_generator import generate_window_thumbnail
+                                    import random
                                     
-                                    # Pass the actual generated frames from disentanglement loss
-                                    # Create side-by-side thumbnail (1024x512 for two 512x512 images)
+                                    # Generate just ONE frame for thumbnail to save memory
+                                    single_frame_generated = None
+                                    single_frame_target = None
+                                    frame_idx = 0  # Default frame index
+                                    
+                                    if target_frames is not None:
+                                        # Pick a random frame index
+                                        T = target_frames.shape[1] if target_frames.dim() > 4 else 1
+                                        frame_idx = random.randint(T//3, T-1) if T > 3 else 0
+                                        
+                                        # Extract single target frame
+                                        single_frame_target = target_frames[:, frame_idx:frame_idx+1] if T > 1 else target_frames[:, 0:1]
+                                        
+                                        # Generate just this one frame
+                                        with torch.no_grad():
+                                            try:
+                                                source_img = target_frames[:, 0]  # [B, C, H, W]
+                                                
+                                                # Extract single frame motion params
+                                                single_motion = {}
+                                                for key in outputs:
+                                                    if isinstance(outputs[key], torch.Tensor) and outputs[key].dim() > 2:
+                                                        single_motion[key] = outputs[key][:, frame_idx:frame_idx+1]
+                                                    else:
+                                                        single_motion[key] = outputs[key]
+                                                
+                                                # Generate single frame only
+                                                single_frame_generated = self.model.volumetric_avatar.generate_frames_from_motion(
+                                                    motion_outputs=single_motion,
+                                                    source_params={'source_img': source_img}
+                                                ).detach()
+                                                
+                                                # Clear memory immediately
+                                                del single_motion
+                                                torch.cuda.empty_cache()
+                                                
+                                            except Exception as e:
+                                                logger.warning(f"Could not generate single frame for thumbnail: {e}")
+                                                single_frame_generated = None
+                                    
+                                    # Pass single frames to thumbnail generator
                                     thumbnail = generate_window_thumbnail(
-                                        generated_frames=generated_frames,  # From disentanglement loss
-                                        target_frames=target_frames,        # Ground truth frames
-                                        motion_outputs=outputs,              # For motion stats overlay
+                                        generated_frames=single_frame_generated,  # Just one frame
+                                        target_frames=single_frame_target,        # Just one frame
+                                        motion_outputs=outputs,                   # For motion stats overlay
                                         size=(1024, 512)  # Wide format for side-by-side comparison
                                     )
                                     
                                     # Log to wandb with more descriptive caption
-                                    import random
-                                    if generated_frames is not None:
-                                        frame_info = f"Generated vs Target (random frame from T={outputs['theta'].shape[1]})"
+                                    if single_frame_generated is not None:
+                                        frame_info = f"Generated vs Target (frame {frame_idx} of T={outputs['theta'].shape[1]})"
                                     else:
                                         frame_info = f"Random frame from window (T={outputs['theta'].shape[1]} frames)"
                                     wandb.log({

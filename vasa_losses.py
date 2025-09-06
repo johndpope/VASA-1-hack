@@ -549,7 +549,7 @@ class VASALossModule:
     ) -> Dict[str, torch.Tensor]:
         """Compute all losses including expression verification and perceptual loss."""
         try:
-            logger.info("\n=== Computing Losses ===")
+            logger.debug("\n=== Computing Losses ===")
             losses = {}
             metrics = {}
             device = outputs['theta'].device
@@ -699,7 +699,7 @@ class VASALossModule:
                 )
             else:
                 # Missing required outputs for disentanglement
-                logger.info(f"DISENTANGLE: Missing required outputs (pose={has_pose}, dynamics={has_dynamics})")
+                logger.debug(f"DISENTANGLE: Missing required outputs (pose={has_pose}, dynamics={has_dynamics})")
                 disentangle_loss = torch.tensor(0.0, device=device)
                 l_consist = torch.tensor(0.0, device=device)
                 l_cross_id = torch.tensor(0.0, device=device)
@@ -709,7 +709,7 @@ class VASALossModule:
             logger.debug(f"Disentanglement loss: {disentangle_loss.item():.6f}")
             logger.debug(f"  L_consist: {l_consist.item():.6f}")
             logger.debug(f"  L_cross_id: {l_cross_id.item():.6f}")
-            logger.info(f"DISENTANGLE METRICS - l_consist: {l_consist.item():.6f}, l_cross_id: {l_cross_id.item():.6f}")
+            logger.debug(f"DISENTANGLE METRICS - l_consist: {l_consist.item():.6f}, l_cross_id: {l_cross_id.item():.6f}")
             
             # 6. Velocity and smoothness regularization
             logger.debug("\nComputing velocity/smoothness losses:")
@@ -1615,7 +1615,7 @@ class VASALossModule:
         
         # Handle sequence vs single frame
         if len(pred_np.shape) > 1 and pred_np.shape[0] > 1:
-            logger.info(f"Got sequence of shape {pred_np.shape}, extracting first frame")
+            logger.debug(f"Got sequence of shape {pred_np.shape}, extracting first frame")
             pred_np = pred_np[0]
             target_np = target_np[0]
         
@@ -2372,13 +2372,13 @@ class VASALossModule:
             
             # Check if we have the required outputs
             if 'theta' not in motion_outputs:
-                logger.info("DISENTANGLE: No theta (pose) in outputs, skipping")
+                logger.debug("DISENTANGLE: No theta (pose) in outputs, skipping")
                 return l_consist, l_consist, l_consist
             
             B, T = motion_outputs['theta'].shape[:2]
             
             if T < 2:
-                logger.info(f"DISENTANGLE: Sequence too short (T={T}), need at least 2 frames")
+                logger.debug(f"DISENTANGLE: Sequence too short (T={T}), need at least 2 frames")
                 return l_consist, l_consist, l_consist
             
             # 1. L_consist: Pairwise transfer loss (VASA Section 3.1)
@@ -2408,19 +2408,20 @@ class VASALossModule:
                 dyn_diff = F.mse_loss(dyn_i, dyn_j.detach())
                 
                 l_consist = (pose_diff + dyn_diff) * self.lambda_consist
-                logger.info(f"DISENTANGLE: l_consist computed = {l_consist.item():.6f} (pose_diff={pose_diff.item():.4f}, dyn_diff={dyn_diff.item():.4f})")
+                logger.debug(f"DISENTANGLE: l_consist computed = {l_consist.item():.6f} (pose_diff={pose_diff.item():.4f}, dyn_diff={dyn_diff.item():.4f})")
             else:
-                logger.info("DISENTANGLE: No dynamics (expression) found, l_consist = 0")
-            
+                logger.debug("DISENTANGLE: No dynamics (expression) found, l_consist = 0")
+
             # 2. L_cross_id: Identity preservation loss (VASA Section 3.1)
             # Ensures identity is preserved when transferring motion
             if self.id_extractor is not None and target_frames is not None:
                 try:
                     # For cross-identity transfer, we need frames from different time points
                     # In VASA, this ensures identity is preserved during motion transfer
+                    # Handle both sparse (2 frames) and full (T frames) cases
                     if target_frames.shape[1] >= 2:
-                        frames_i = target_frames[:, 0]   # Frame at time i
-                        frames_j = target_frames[:, -1]  # Frame at time j
+                        frames_i = target_frames[:, 0]   # Frame at time i (first)
+                        frames_j = target_frames[:, -1] if target_frames.shape[1] > 2 else target_frames[:, 1]  # Frame at time j (last or second)
                         
                         # Resize frames for identity extractor (expects 160x160)
                         frames_i_resized = F.interpolate(
@@ -2450,13 +2451,13 @@ class VASALossModule:
                     logger.debug(f"Cross-id loss computation skipped: {e}")
                     l_cross_id = torch.tensor(0.0, device=device)
             else:
-                logger.info(f"DISENTANGLE: id_extractor={self.id_extractor is not None}, target_frames={target_frames is not None}")
+                logger.debug(f"DISENTANGLE: id_extractor={self.id_extractor is not None}, target_frames={target_frames is not None}")
             
             # Return both the total and individual components
             total_disentangle = l_consist + l_cross_id
             
             logger.info(
-                f"VASA Disentanglement - l_consist: {l_consist.item():.6f}, "
+                f"VASA  - l_consist: {l_consist.item():.6f}, "
                 f"l_cross_id: {l_cross_id.item():.6f}, "
                 f"total: {total_disentangle.item():.6f}"
             )
