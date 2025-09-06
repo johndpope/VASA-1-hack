@@ -791,6 +791,10 @@ class VASATrainer:
                     continue
                     
                 logger.info(f"Batch {batch_idx} has data, processing windows...")
+                
+                # Store current batch data for video generation
+                self.current_batch_data = batch
+                
                 # Process batch into windows
                 windows = self.motion_handler.process_batch(
                     batch, 
@@ -1872,15 +1876,55 @@ class VASATrainer:
                 # Limit to max_frames
                 actual_frames = min(outputs['theta'].shape[1], max_frames)
                 
-                # Create dummy frames for visualization (you can replace with actual generation)
+                # Generate actual frames using volumetric avatar
                 frames = []
+                
+                # Get the first batch item for visualization
+                theta = outputs['theta'][0:1, :actual_frames]  # [1, T, 3]
+                rotation = outputs['rotation'][0:1, :actual_frames]  # [1, T, 3]  
+                translation = outputs['translation'][0:1, :actual_frames]  # [1, T, 3]
+                scale = outputs.get('scale', torch.ones(1, actual_frames, 1).to(theta.device))  # [1, T, 1]
+                expression = outputs['expression'][0:1, :actual_frames]  # [1, T, 256]
+                
+                # Get source image (use first frame from batch if available)
+                if hasattr(self, 'current_batch_data') and 'frames' in self.current_batch_data:
+                    source_img = self.current_batch_data['frames'][0, 0]  # First frame
+                else:
+                    # Create a dummy source image if not available
+                    source_img = torch.ones(3, 512, 512).to(theta.device)
+                
+                # Generate each frame through volumetric avatar
                 for i in range(actual_frames):
-                    # For now, create gradient frames as placeholder
-                    # Replace this with actual volumetric avatar generation
-                    frame = torch.zeros(3, 512, 512)
-                    frame[0] = i / actual_frames  # Red channel gradient
-                    frame[1] = 1.0 - (i / actual_frames)  # Green channel inverse gradient
-                    frames.append(frame)
+                    try:
+                        # Prepare motion data for frame i
+                        motion_data = {
+                            'theta': theta[:, i:i+1],  # [1, 1, 3]
+                            'rotation': rotation[:, i:i+1],  # [1, 1, 3]
+                            'translation': translation[:, i:i+1],  # [1, 1, 3]
+                            'scale': scale[:, i:i+1] if scale.shape[1] > 1 else scale,  # [1, 1, 1]
+                            'expression': expression[:, i:i+1]  # [1, 1, 256]
+                        }
+                        
+                        # Generate frame through volumetric model
+                        generated = self.model.volumetric_avatar.forward_single_frame(
+                            source_img.unsqueeze(0),  # Add batch dimension
+                            motion_data
+                        )
+                        
+                        if isinstance(generated, dict):
+                            frame = generated.get('image', generated.get('output', source_img))
+                        else:
+                            frame = generated
+                            
+                        frames.append(frame.squeeze(0).cpu())  # Remove batch dim and move to CPU
+                        
+                    except Exception as e:
+                        logger.debug(f"Error generating frame {i}: {str(e)}")
+                        # Fallback to gradient if generation fails
+                        frame = torch.zeros(3, 512, 512)
+                        frame[0] = i / actual_frames
+                        frame[1] = 1.0 - (i / actual_frames)
+                        frames.append(frame)
                 
                 frames = torch.stack(frames)  # [T, C, H, W]
                 
