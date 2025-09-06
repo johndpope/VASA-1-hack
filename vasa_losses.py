@@ -57,7 +57,7 @@ class SpeedLossHandler:
             theta_diff = pred_motion['theta'][:, 1:] - pred_motion['theta'][:, :-1]
             
             # Compute Frobenius norm of the difference
-            motion_speed = torch.norm(theta_diff.view(theta_diff.shape[0], theta_diff.shape[1], -1), dim=-1)
+            motion_speed = torch.norm(theta_diff.reshape(theta_diff.shape[0], theta_diff.shape[1], -1), dim=-1)
             
             # Normalize to [0, 1] range
             motion_speed = motion_speed / (motion_speed.max() + 1e-8)
@@ -66,7 +66,16 @@ class SpeedLossHandler:
             B, T_minus_1 = motion_speed.shape
             pred_buckets = torch.zeros(B, T_minus_1, device=device, dtype=torch.long)
             
+            # Create logits for cross_entropy (distance to each bucket center)
+            # Shape: [B, T_minus_1, num_buckets]
+            logits = torch.zeros(B, T_minus_1, self.num_buckets, device=device)
+            
             for i in range(self.num_buckets):
+                # Use negative distance as logit (closer = higher score)
+                bucket_center = self.speed_buckets[i] if i < len(self.speed_buckets) else 1.0
+                logits[:, :, i] = -torch.abs(motion_speed - bucket_center)
+                
+                # Also assign discrete buckets for accuracy calculation
                 if i == 0:
                     mask = motion_speed <= self.speed_buckets[i]
                 elif i == self.num_buckets - 1:
@@ -80,10 +89,10 @@ class SpeedLossHandler:
             if target_buckets.shape[1] > T_minus_1:
                 target_buckets = target_buckets[:, :T_minus_1]
             
-            # Classification loss
+            # Classification loss using logits
             speed_loss = F.cross_entropy(
-                pred_buckets.view(-1),
-                target_buckets.long().view(-1)
+                logits.reshape(-1, self.num_buckets),  # [B*T, num_buckets]
+                target_buckets.long().reshape(-1)       # [B*T]
             )
             
             # Compute accuracy
