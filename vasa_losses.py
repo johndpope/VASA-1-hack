@@ -30,7 +30,7 @@ class SpeedLossHandler:
     def compute_speed_loss(
         self,
         pred_motion: Dict[str, torch.Tensor],
-        target_speed: torch.Tensor,
+        target_buckets: torch.Tensor,
         lambda_speed: float,
         device: torch.device
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
@@ -39,7 +39,7 @@ class SpeedLossHandler:
         
         Args:
             pred_motion: Predicted motion parameters
-            target_speed: Target speed bucket indices [B, T, 1]
+            target_buckets: Target speed bucket indices [B, T, 1]
             lambda_speed: Weight for speed loss
             device: Computation device
             
@@ -75,19 +75,19 @@ class SpeedLossHandler:
                     mask = (motion_speed > self.speed_buckets[i-1]) & (motion_speed <= self.speed_buckets[i])
                 pred_buckets[mask] = i
             
-            # Ensure target_speed has the right shape
-            target_speed = target_speed.squeeze(-1)  # Remove last dimension if present
-            if target_speed.shape[1] > T_minus_1:
-                target_speed = target_speed[:, :T_minus_1]
+            # Ensure target_buckets has the right shape
+            target_buckets = target_buckets.squeeze(-1)  # Remove last dimension if present
+            if target_buckets.shape[1] > T_minus_1:
+                target_buckets = target_buckets[:, :T_minus_1]
             
             # Classification loss
             speed_loss = F.cross_entropy(
                 pred_buckets.view(-1),
-                target_speed.long().view(-1)
+                target_buckets.long().view(-1)
             )
             
             # Compute accuracy
-            accuracy = (pred_buckets == target_speed).float().mean()
+            accuracy = (pred_buckets == target_buckets).float().mean()
             
             # Store metrics
             metrics['speed_loss'] = speed_loss.item()
