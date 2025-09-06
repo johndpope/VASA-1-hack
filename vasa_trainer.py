@@ -941,7 +941,11 @@ class VASATrainer:
                                 if batch_idx % 10 == 0 and self.config.vis.save_videos:
                                     video_path = self._generate_sample_video(outputs, max_frames=50)
                                     if video_path and self.config.wandb.enabled:
-                                        wandb.log({"visuals/generated_sample": wandb.Video(str(video_path))}, 
+                                        # Specify format based on file extension
+                                        format = "webm" if str(video_path).endswith('.webm') else "mp4"
+                                        wandb.log({"visuals/generated_sample": wandb.Video(str(video_path), 
+                                                                                         fps=25, 
+                                                                                         format=format)}, 
                                                 step=self.global_step)
 
                         except Exception as e:
@@ -1880,15 +1884,28 @@ class VASATrainer:
                 
                 frames = torch.stack(frames)  # [T, C, H, W]
                 
-                # Save as video
+                # Save as WebM video for better browser compatibility
                 import cv2
-                video_path = self.output_dir / f"sample_epoch_{self.current_epoch}_step_{self.global_step}.mp4"
+                import tempfile
+                
+                # First save as temporary file then convert to WebM
+                temp_path = self.output_dir / f"temp_epoch_{self.current_epoch}_step_{self.global_step}.mp4"
+                video_path = self.output_dir / f"sample_epoch_{self.current_epoch}_step_{self.global_step}.webm"
                 video_path.parent.mkdir(parents=True, exist_ok=True)
                 
                 # Convert to numpy and write video
                 frames_np = (frames.permute(0, 2, 3, 1).cpu().numpy() * 255).astype(np.uint8)
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                
+                # Try WebM directly with VP8/VP9 codec
+                fourcc = cv2.VideoWriter_fourcc(*'VP80')  # VP8 codec for WebM
                 out = cv2.VideoWriter(str(video_path), fourcc, 25.0, (512, 512))
+                
+                if not out.isOpened():
+                    # Fallback to MP4 if WebM not supported
+                    logger.warning("WebM codec not available, falling back to MP4")
+                    video_path = self.output_dir / f"sample_epoch_{self.current_epoch}_step_{self.global_step}.mp4"
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    out = cv2.VideoWriter(str(video_path), fourcc, 25.0, (512, 512))
                 
                 for frame in frames_np:
                     out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
