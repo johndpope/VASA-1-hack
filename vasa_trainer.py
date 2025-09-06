@@ -1875,57 +1875,42 @@ class VASATrainer:
         try:
             with torch.no_grad():
                 # Limit to max_frames
-                actual_frames = min(outputs['theta'].shape[1], max_frames)
+                actual_frames = min(outputs['theta'].shape[1], max_frames) if 'theta' in outputs else 20
                 
-                # Generate actual frames using volumetric avatar
+                # For now, just create gradient visualization to test video upload
+                # TODO: Implement actual volumetric avatar generation
                 frames = []
                 
-                # Get the first batch item for visualization
-                theta = outputs['theta'][0:1, :actual_frames]  # [1, T, 3]
-                rotation = outputs['rotation'][0:1, :actual_frames]  # [1, T, 3]  
-                translation = outputs['translation'][0:1, :actual_frames]  # [1, T, 3]
-                scale = outputs.get('scale', torch.ones(1, actual_frames, 1).to(theta.device))  # [1, T, 1]
-                expression = outputs['expression'][0:1, :actual_frames]  # [1, T, 256]
-                
-                # Get source image (use first frame from batch if available)
-                if hasattr(self, 'current_batch_data') and 'frames' in self.current_batch_data:
-                    source_img = self.current_batch_data['frames'][0, 0]  # First frame
+                # Get motion parameters for visualization
+                if 'expression' in outputs:
+                    expression = outputs['expression'][0, :actual_frames]  # [T, 256]
+                    # Normalize expression to [0, 1] for visualization
+                    expr_min = expression.min()
+                    expr_max = expression.max()
+                    if expr_max > expr_min:
+                        expression = (expression - expr_min) / (expr_max - expr_min)
                 else:
-                    # Create a dummy source image if not available
-                    source_img = torch.ones(3, 512, 512).to(theta.device)
+                    expression = None
                 
-                # Generate each frame through volumetric avatar
                 for i in range(actual_frames):
-                    try:
-                        # Prepare motion data for frame i
-                        motion_data = {
-                            'theta': theta[:, i:i+1],  # [1, 1, 3]
-                            'rotation': rotation[:, i:i+1],  # [1, 1, 3]
-                            'translation': translation[:, i:i+1],  # [1, 1, 3]
-                            'scale': scale[:, i:i+1] if scale.shape[1] > 1 else scale,  # [1, 1, 1]
-                            'expression': expression[:, i:i+1]  # [1, 1, 256]
-                        }
-                        
-                        # Generate frame through volumetric model
-                        generated = self.model.volumetric_avatar.forward_single_frame(
-                            source_img.unsqueeze(0),  # Add batch dimension
-                            motion_data
-                        )
-                        
-                        if isinstance(generated, dict):
-                            frame = generated.get('image', generated.get('output', source_img))
-                        else:
-                            frame = generated
-                            
-                        frames.append(frame.squeeze(0).cpu())  # Remove batch dim and move to CPU
-                        
-                    except Exception as e:
-                        logger.debug(f"Error generating frame {i}: {str(e)}")
-                        # Fallback to gradient if generation fails
-                        frame = torch.zeros(3, 512, 512)
-                        frame[0] = i / actual_frames
-                        frame[1] = 1.0 - (i / actual_frames)
-                        frames.append(frame)
+                    # Create visualization frame showing motion parameters
+                    frame = torch.zeros(3, 512, 512)
+                    
+                    # Red channel: time progress
+                    frame[0] = i / actual_frames
+                    
+                    # Green channel: expression magnitude if available
+                    if expression is not None:
+                        # Average expression values for this frame
+                        expr_mag = expression[i].mean().item()
+                        frame[1] = expr_mag
+                    else:
+                        frame[1] = 0.5
+                    
+                    # Blue channel: inverse time
+                    frame[2] = 1.0 - (i / actual_frames)
+                    
+                    frames.append(frame)
                 
                 frames = torch.stack(frames)  # [T, C, H, W]
                 
@@ -1959,7 +1944,9 @@ class VASATrainer:
                 return video_path
                 
         except Exception as e:
-            logger.warning(f"Error generating sample video: {str(e)}")
+            logger.error(f"Error generating sample video: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
 
     def _log_gradient_stats(self, step: int):
