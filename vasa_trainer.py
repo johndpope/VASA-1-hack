@@ -1731,7 +1731,8 @@ class VASATrainer:
         """Load training state from checkpoint with diffusion schedule handling"""
         try:
             logger.info(f"Loading checkpoint from {checkpoint_path}")
-            checkpoint = torch.load(checkpoint_path, map_location=self.accelerator.device)
+            # PyTorch 2.6 requires weights_only=False for checkpoints with configs
+            checkpoint = torch.load(checkpoint_path, map_location=self.accelerator.device, weights_only=False)
             
             # Get original diffusion schedule configuration
             old_steps = checkpoint['config'].diffusion.num_steps
