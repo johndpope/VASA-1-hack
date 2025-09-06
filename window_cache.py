@@ -70,8 +70,9 @@ class WindowCache:
     
     def has_cache(self, video_path: str) -> bool:
         """Check if any cache exists for the video."""
-        metadata_path = self._get_metadata_path(video_path)
-        return metadata_path.exists()
+        # Check if chunk 0 exists (which contains all windows for now)
+        cache_path = self._get_cache_path(video_path, 0)
+        return cache_path.exists()
     
     def _manage_memory_cache(self):
         """Manage in-memory cache size using LRU eviction."""
@@ -428,6 +429,69 @@ class WindowCache:
             windows.append(window_data)
         
         return windows
+    
+    def load_windows(self, video_path: str) -> List[Dict[str, torch.Tensor]]:
+        """Load all windows for a video from cache."""
+        cache_path = self._get_cache_path(video_path, 0)  # Use chunk 0 for now
+        
+        if not cache_path.exists():
+            logger.debug(f"No cache found for {video_path}")
+            return []
+        
+        try:
+            windows_data = []
+            with h5py.File(cache_path, 'r') as f:
+                # Check metadata
+                if 'video_path' not in f.attrs:
+                    logger.warning(f"Invalid cache file: {cache_path}")
+                    return []
+                
+                num_windows = f.attrs.get('num_windows', 0)
+                logger.info(f"Loading {num_windows} windows from cache for {video_path}")
+                
+                # Load each window
+                for i in range(num_windows):
+                    window_key = f'window_{i}'
+                    if window_key not in f:
+                        logger.warning(f"Missing window {i} in cache")
+                        continue
+                    
+                    window_group = f[window_key]
+                    window_data = {}
+                    
+                    # Load tensors
+                    for key in window_group.keys():
+                        if key == 'metadata':
+                            # Load metadata separately
+                            metadata = {}
+                            meta_group = window_group['metadata']
+                            for k in meta_group.attrs:
+                                metadata[k] = meta_group.attrs[k]
+                            window_data['metadata'] = metadata
+                        else:
+                            # Load tensor data
+                            dataset = window_group[key]
+                            data = dataset[()]
+                            tensor = torch.from_numpy(data)
+                            
+                            # Restore dtype if saved
+                            if 'dtype' in dataset.attrs:
+                                dtype_str = dataset.attrs['dtype']
+                                if 'float32' in dtype_str:
+                                    tensor = tensor.float()
+                                elif 'float16' in dtype_str:
+                                    tensor = tensor.half()
+                            
+                            window_data[key] = tensor
+                    
+                    windows_data.append(window_data)
+            
+            logger.info(f"Successfully loaded {len(windows_data)} windows from cache")
+            return windows_data
+            
+        except Exception as e:
+            logger.error(f"Error loading windows from cache: {str(e)}")
+            return []
     
     def save_windows(self, video_path: str, windows_data: List[Dict[str, torch.Tensor]]):
         """Save window data with proper metadata handling."""
