@@ -59,7 +59,7 @@ motion:
 
 # Training parameters - OVERFITTING FOCUSED
 train:
-  resume_from: "checkpoints_overfit/checkpoint_epoch_30.pt" # Resume from checkpoint if needed
+  resume_from: "" # Resume from checkpoint if needed
   # when to add conditional signals
   control_start_epoch: 0      # Start control immediately for overfitting
 
@@ -75,9 +75,9 @@ train:
     transformer_late: 5e-5
     output_projections: 2e-4
 
-  batch_size: 4                # Increased for better GPU utilization
+  batch_size: 16                # Increased for better GPU utilization
   gradient_accumulation_steps: 2  # Reduced since we have larger batch
-  num_epochs: 100             # Reduced for quick testing
+  num_epochs: 1000            # Reduced for quick testing
 
   beta1: 0.9
   beta2: 0.999
@@ -171,7 +171,7 @@ dataset:
   preextract_audio: true
   cache_audio: true
   hop_length: 10
-  max_videos: 100             # Use more videos from CelebV-HQ
+  max_videos: null             # Use all available videos in junk folder
   min_sequence_length: 15    # Minimum sequence length
   max_sequence_samples: 1000 # Maximum samples per epoch
   augmentation:

@@ -402,23 +402,26 @@ def save_video_frames(
     output_path: Path,
     fps: int = 25
 ):
-    """Save tensor of frames as video"""
+    """Save tensor of frames as video using same approach as vi.py"""
     # Convert to numpy and correct format
     frames = frames.cpu().numpy()
-    if frames.shape[0] == 3:  # CHW -> HWC
+    if frames.ndim == 3:  # Single frame CHW -> HWC
         frames = frames.transpose(1, 2, 0)
+        frames = np.expand_dims(frames, 0)  # Add batch dimension
+    elif frames.ndim == 4 and frames.shape[1] == 3:  # NCHW -> NHWC
+        frames = frames.transpose(0, 2, 3, 1)
     
     # Scale to uint8 range
     if frames.max() <= 1.0:
         frames = (frames * 255).astype(np.uint8)
         
-    # Setup video writer
+    # Setup video writer with mp4v codec
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(
         str(output_path),
         fourcc,
         fps,
-        (frames.shape[1], frames.shape[0])
+        (frames.shape[2], frames.shape[1])
     )
     
     # Write frames
@@ -742,14 +745,14 @@ class VASATrainer:
             # Validation phase
             val_stats = self.validate() if self.val_loader else None
             
-            # # Save checkpoint if best model
-            # if val_stats and val_stats['total'] < self.best_val_loss:
-            #     self.best_val_loss = val_stats['total']
-            #     self.save_checkpoint(is_best=True)
-
-            # Regular checkpoint saving
-            if epoch % self.config.train.save_freq == 0:
-                self.save_checkpoint(is_best=False)
+            # Check if this is the best model based on training or validation loss
+            current_loss = val_stats['total'] if val_stats else train_stats.get('total', float('inf'))
+            
+            # Save checkpoint only if it's the best model
+            if current_loss < self.best_val_loss:
+                self.best_val_loss = current_loss
+                self.save_checkpoint(is_best=True)
+                logger.info(f"New best model saved with loss: {current_loss:.4f}")
 
 
     def train_epoch(self) -> Dict[str, float]:
@@ -945,11 +948,10 @@ class VASATrainer:
                                 if batch_idx % 10 == 0 and self.config.vis.save_videos:
                                     video_path = self._generate_sample_video(outputs, max_frames=50)
                                     if video_path and self.config.wandb.enabled:
-                                        # Specify format based on file extension
-                                        format = "webm" if str(video_path).endswith('.webm') else "mp4"
+                                        # Use mp4 format for consistency with vi.py
                                         wandb.log({"visuals/generated_sample": wandb.Video(str(video_path), 
                                                                                          fps=25, 
-                                                                                         format=format)}, 
+                                                                                         format="mp4")}, 
                                                 step=self.global_step)
 
                         except Exception as e:
@@ -1704,10 +1706,8 @@ class VASATrainer:
                 'config': self.config
             }
 
-            if is_best:
-                save_path = self.output_dir / 'model_best.pt'
-            else:
-                save_path = self.output_dir / f'checkpoint_epoch_{self.current_epoch}.pt'
+            # Always save as best_checkpoint.pt
+            save_path = self.output_dir / 'best_checkpoint.pt'
 
             save_path.parent.mkdir(parents=True, exist_ok=True)
             
@@ -1914,28 +1914,26 @@ class VASATrainer:
                 
                 frames = torch.stack(frames)  # [T, C, H, W]
                 
-                # Save as WebM video for better browser compatibility
+                # Save as MP4 video using same approach as vi.py
                 import cv2
-                import tempfile
                 
-                # First save as temporary file then convert to WebM
-                temp_path = self.output_dir / f"temp_epoch_{self.current_epoch}_step_{self.global_step}.mp4"
-                video_path = self.output_dir / f"sample_epoch_{self.current_epoch}_step_{self.global_step}.webm"
+                video_path = self.output_dir / f"sample_epoch_{self.current_epoch}_step_{self.global_step}.mp4"
                 video_path.parent.mkdir(parents=True, exist_ok=True)
                 
-                # Convert to numpy and write video
-                frames_np = (frames.permute(0, 2, 3, 1).cpu().numpy() * 255).astype(np.uint8)
+                # Convert to numpy and ensure proper format
+                frames_np = frames.permute(0, 2, 3, 1).cpu().numpy()
                 
-                # Try WebM directly with VP8/VP9 codec
-                fourcc = cv2.VideoWriter_fourcc(*'VP80')  # VP8 codec for WebM
-                out = cv2.VideoWriter(str(video_path), fourcc, 25.0, (512, 512))
+                if frames_np.max() <= 1.0:
+                    frames_np = (frames_np * 255).astype(np.uint8)
                 
-                if not out.isOpened():
-                    # Fallback to MP4 if WebM not supported
-                    logger.warning("WebM codec not available, falling back to MP4")
-                    video_path = self.output_dir / f"sample_epoch_{self.current_epoch}_step_{self.global_step}.mp4"
-                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                    out = cv2.VideoWriter(str(video_path), fourcc, 25.0, (512, 512))
+                # Use mp4v codec for better compatibility
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                out = cv2.VideoWriter(
+                    str(video_path),
+                    fourcc,
+                    25.0,
+                    (frames_np.shape[2], frames_np.shape[1])
+                )
                 
                 for frame in frames_np:
                     out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
@@ -2055,7 +2053,7 @@ if __name__ == "__main__":
         window_size=config.motion.window_size,  # Use config window_size (20)
         stride=config.motion.stride,  # Use config stride (10)
         context_size=config.motion.context_size,  # Use config context_size (10)
-        max_videos=1,  # Reduced from 10 to 1 for testing
+        max_videos=config.dataset.get('max_videos', None),  # Use config value or all videos if not specified
         frame_size=(512, 512),
         sequence_length=config.motion.window_size,  # Match window_size
         cache_audio=True,
