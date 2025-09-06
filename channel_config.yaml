@@ -94,6 +94,10 @@ channel_layout:
   blink_state:
     size: 32
     description: "Blink state embedding"
+    
+  padding:
+    size: 53
+    description: "Padding to match model_dim (512 - 459 = 53)"
 
 # Audio model dimensions 
 audio_models:
