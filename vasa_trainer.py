@@ -908,6 +908,9 @@ class VASATrainer:
                                 noise=noise                 # Pass noise for loss computation
                             )
                             
+                            # Initialize frames variables (they may be generated for LPIPS)
+                            generated_frames = None
+                            target_frames = None
                            
                             # Compute losses including perceptual loss
                             losses, metrics = self.loss_module.compute_losses(
@@ -968,6 +971,12 @@ class VASATrainer:
                                         grad_norm_value = grad_norm.item()
                                     else:
                                         grad_norm_value = float(grad_norm)
+                                
+                                # Debug: Log what's in metrics
+                                if batch_idx == 0 and window_idx == 0:
+                                    logger.info(f"DEBUG: Metrics keys: {list(metrics.keys())}")
+                                    logger.info(f"DEBUG: l_consist value: {metrics.get('l_consist', 'NOT FOUND')}")
+                                    logger.info(f"DEBUG: l_cross_id value: {metrics.get('l_cross_id', 'NOT FOUND')}")
                                 
                                 self.epoch_table.add_data(
                                     batch_idx,
