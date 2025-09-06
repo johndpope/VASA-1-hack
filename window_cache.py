@@ -429,6 +429,60 @@ class WindowCache:
         
         return windows
     
+    def save_windows(self, video_path: str, windows_data: List[Dict[str, torch.Tensor]]):
+        """Save window data with proper metadata handling."""
+        cache_path = self._get_cache_path(video_path, 0)  # Use chunk 0 for now
+        temp_path = cache_path.with_suffix('.tmp')
+        
+        try:
+            with h5py.File(temp_path, 'w') as f:
+                # Save metadata
+                f.attrs['video_path'] = video_path
+                f.attrs['num_windows'] = len(windows_data)
+                
+                # Save each window
+                for i, window in enumerate(windows_data):
+                    window_group = f.create_group(f'window_{i}')
+                    
+                    # Save tensors
+                    for key, tensor in window.items():
+                        if key == 'metadata':
+                            continue
+                            
+                        if isinstance(tensor, torch.Tensor):
+                            # Convert to numpy and save
+                            data = tensor.cpu().numpy()
+                            ds = window_group.create_dataset(
+                                key,
+                                data=data,
+                                compression='gzip'
+                            )
+                            # Save tensor metadata as string
+                            ds.attrs['dtype'] = str(tensor.dtype)
+                            ds.attrs['shape'] = tensor.shape
+                    
+                    # Save metadata dict if present
+                    if 'metadata' in window:
+                        meta_group = window_group.create_group('metadata')
+                        for k, v in window['metadata'].items():
+                            # Convert any non-string values to strings
+                            if not isinstance(v, (str, bytes)):
+                                v = str(v)
+                            meta_group.attrs[k] = v
+
+            # Only after successful save, replace old cache
+            if temp_path.exists():
+                if cache_path.exists():
+                    cache_path.unlink()
+                temp_path.rename(cache_path)
+                logger.info(f"Successfully saved cache to {cache_path}")
+
+        except Exception as e:
+            logger.error(f"Error saving cache file: {str(e)}")
+            # Clean up temp file
+            if temp_path.exists():
+                temp_path.unlink()
+    
     def clear_cache(self, video_path: Optional[str] = None):
         """
         Clear cache for a specific video or all videos.

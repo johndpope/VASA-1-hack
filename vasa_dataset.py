@@ -1090,7 +1090,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 assert frames.shape[1] == 3, f"Expected 3 channels, got {frames.shape[1]}"
                 
                 T = frames.shape[0]
-                assert T == 50, f"Expected sequence length 50, got {T}"
+                # Accept variable window sizes, not just 50
+                logger.debug(f"Processing sequence of length {T}")
 
                 # Add batch dimension and move to device
                 frames = frames.unsqueeze(0)  # [1,T,C,H,W] 
@@ -1151,9 +1152,9 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     outputs['translation'].append(translation)
                     outputs['expression_embed'].append(expression_embed)
 
-                # Stack along time dimension 
+                # Stack along time dimension and move to CPU
                 outputs = {
-                    k: torch.stack(v, dim=1)  # [B=1, T=50, ...]
+                    k: torch.stack(v, dim=1).cpu()  # [B=1, T=50, ...] moved to CPU
                     for k, v in outputs.items()
                 }
 
