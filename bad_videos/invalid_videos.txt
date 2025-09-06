@@ -1,0 +1,5 @@
+# Failed Videos Report
+
+
+junk/10_50frames.mp4:
+  2025-09-06 13:55:05 - video_too_short: {'total_frames': 50, 'min_frames': 85}

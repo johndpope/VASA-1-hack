@@ -28,6 +28,16 @@ import h5py
 from tqdm import tqdm
 from typing import *
 from collections import defaultdict
+
+# Import the new chunked window cache
+try:
+    from window_cache import WindowCache as ChunkedWindowCache
+    USE_CHUNKED_CACHE = True
+    logger.info("Using ChunkedWindowCache for flexible window sizes")
+except ImportError:
+    ChunkedWindowCache = None
+    USE_CHUNKED_CACHE = False
+    logger.info("ChunkedWindowCache not available, using built-in cache")
 from torchvision.utils import save_image
 from datetime import datetime
 import hashlib
@@ -492,7 +502,20 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         self.device = device
         self.model_device = next(emo_model.parameters()).device
         
-        self.cache = WindowCache(Path(video_folder) / "window_cache")
+        # Use chunked cache if available for flexible window support
+        if USE_CHUNKED_CACHE and ChunkedWindowCache:
+            cache_path = Path(cache_dir) if cache_dir else Path(video_folder) / "window_cache_chunked"
+            self.cache = ChunkedWindowCache(
+                cache_dir=cache_path,
+                chunk_size=1000,  # 1000 frames per chunk
+                overlap_size=50,  # 50 frame overlap for context
+                max_memory_cache=5  # Keep 5 chunks in memory
+            )
+            logger.info(f"Initialized ChunkedWindowCache at {cache_path}")
+        else:
+            # Fallback to built-in cache
+            self.cache = WindowCache(Path(video_folder) / "window_cache")
+            logger.info("Using built-in WindowCache")
 
         self.blink_handler = BlinkConditionHandler(window_size=sequence_length)
 
@@ -1067,7 +1090,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 assert frames.shape[1] == 3, f"Expected 3 channels, got {frames.shape[1]}"
                 
                 T = frames.shape[0]
-                assert T == 50, f"Expected sequence length 50, got {T}"
+                # Accept variable window sizes, not just 50
+                logger.debug(f"Processing sequence of length {T}")
 
                 # Add batch dimension and move to device
                 frames = frames.unsqueeze(0)  # [1,T,C,H,W] 
@@ -1128,9 +1152,9 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     outputs['translation'].append(translation)
                     outputs['expression_embed'].append(expression_embed)
 
-                # Stack along time dimension 
+                # Stack along time dimension and move to CPU
                 outputs = {
-                    k: torch.stack(v, dim=1)  # [B=1, T=50, ...]
+                    k: torch.stack(v, dim=1).cpu()  # [B=1, T=50, ...] moved to CPU
                     for k, v in outputs.items()
                 }
 

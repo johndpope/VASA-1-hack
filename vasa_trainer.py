@@ -541,11 +541,14 @@ class VASATrainer:
         self.output_dir = Path(output_dir) if output_dir else None
         self.train_loader = train_loader
 
-        # Initialize accelerator with mixed precision 
+        # Initialize accelerator with mixed precision enabled for faster training
         self.accelerator = Accelerator(
             gradient_accumulation_steps=config.train.gradient_accumulation_steps,
-            mixed_precision="fp16" if config.motion.amp else None
+            mixed_precision="fp16"  # Force FP16 for faster convergence
         )
+        
+        logger.info(f"Mixed precision training: ENABLED (fp16)")
+        logger.info(f"Gradient accumulation steps: {config.train.gradient_accumulation_steps}")
 
      
             
@@ -772,6 +775,13 @@ class VASATrainer:
         # Initialize epoch metrics
         epoch_metrics = defaultdict(list)
         grad_norms = defaultdict(list)
+        
+        # Initialize WandB metrics table for this epoch
+        if self.config.wandb.enabled and self.accelerator.is_local_main_process:
+            self.epoch_table = wandb.Table(columns=[
+                "batch_idx", "window_idx", "total_loss", "reconstruction", 
+                "dynamics_loss", "expression_loss", "pose_loss", "grad_norm"
+            ])
 
         for batch_idx, batch in enumerate(self.train_loader):
             try:
@@ -880,14 +890,26 @@ class VASATrainer:
                                 for k, v in metrics.items():
                                     batch_metrics[f"metric_{k}"].append(v)
 
+                            # Check for NaN/Inf in loss before backward pass
+                            if not torch.isfinite(losses['total']):
+                                logger.error(f"NaN/Inf detected in loss at epoch {self.current_epoch}, batch {batch_idx}, window {window_idx}")
+                                logger.error(f"Loss components: {losses}")
+                                # Skip this window
+                                continue
+                            
                             # Backward pass for this window
                             self.accelerator.backward(losses['total'])
                             
                             if self.accelerator.sync_gradients:
-                                self.accelerator.clip_grad_norm_(
+                                # Clip gradients to prevent explosions
+                                grad_norm = self.accelerator.clip_grad_norm_(
                                     self.model.parameters(),
                                     self.config.train.max_grad_norm
                                 )
+                                
+                                # Log gradient norm for monitoring
+                                if grad_norm > 1e6:
+                                    logger.warning(f"Large gradient norm detected: {grad_norm:.2e}")
                                 
                             # Optimizer step after each window
                             self.optimizer.step()
@@ -896,6 +918,35 @@ class VASATrainer:
                             
                             batch_total_loss += losses['total'].item()
                             logger.info(f"  Window {window_idx} completed - loss: {losses['total'].item():.4f}")
+                            
+                            # Add row to metrics table
+                            if self.config.wandb.enabled and self.accelerator.is_local_main_process:
+                                self.epoch_table.add_data(
+                                    batch_idx,
+                                    window_idx,
+                                    losses['total'].item(),
+                                    metrics.get('reconstruction', 0.0),
+                                    metrics.get('dynamics_loss', 0.0),
+                                    metrics.get('expression_loss', 0.0),
+                                    metrics.get('pose_loss', 0.0),
+                                    grad_norm if 'grad_norm' in locals() else 0.0
+                                )
+                            
+                            # Log visualizations every 5 batches
+                            if batch_idx % 5 == 0 and window_idx == 0:  # Only log first window
+                                self._log_visualizations(outputs, motion_data, self.global_step)
+                                self._log_gradient_stats(self.global_step)
+                                
+                                # Generate sample video every 10 batches
+                                if batch_idx % 10 == 0 and self.config.vis.save_videos:
+                                    video_path = self._generate_sample_video(outputs, max_frames=50)
+                                    if video_path and self.config.wandb.enabled:
+                                        # Specify format based on file extension
+                                        format = "webm" if str(video_path).endswith('.webm') else "mp4"
+                                        wandb.log({"visuals/generated_sample": wandb.Video(str(video_path), 
+                                                                                         fps=25, 
+                                                                                         format=format)}, 
+                                                step=self.global_step)
 
                         except Exception as e:
                             logger.error(f"Error processing window {window_idx}: {str(e)}")
@@ -946,6 +997,17 @@ class VASATrainer:
                 {f"epoch/{k}": v for k, v in epoch_averages.items()},
                 step=self.global_step
             )
+            
+            # Log the metrics table for this epoch
+            wandb.log({"epoch_metrics_table": self.epoch_table}, step=self.global_step)
+            
+            # Add alert if loss is too high (for overfit detection)
+            if epoch_averages.get('total', 0) > 50.0:
+                wandb.alert(
+                    title="High Training Loss",
+                    text=f"Total loss is {epoch_averages.get('total', 0):.2f} at epoch {self.current_epoch}",
+                    level=wandb.AlertLevel.WARN
+                )
 
         # Log learning rates
         self._log_learning_rates(self.global_step)
@@ -1726,13 +1788,173 @@ class VASATrainer:
             logger.error(traceback.format_exc())
             raise
 
+    def _log_visualizations(self, outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], step: int):
+        """Log visualizations to WandB for training inspection."""
+        if not self.config.wandb.enabled or not self.accelerator.is_local_main_process:
+            return
+        
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            # Create expression embedding comparison plot
+            if 'expression_embed' in outputs and 'expression_embed' in targets:
+                fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+                
+                # Plot predicted expression embedding (first 50 dims)
+                pred_expr = outputs['expression_embed'][0, 0, :50]
+                if isinstance(pred_expr, torch.Tensor):
+                    pred_expr = pred_expr.detach().cpu().numpy()
+                elif not isinstance(pred_expr, np.ndarray):
+                    pred_expr = np.array(pred_expr)
+                axes[0].bar(range(len(pred_expr)), pred_expr)
+                axes[0].set_title(f'Predicted Expression (Step {step})')
+                axes[0].set_xlabel('Dimension')
+                axes[0].set_ylabel('Value')
+                
+                # Plot target expression embedding
+                target_expr = targets['expression_embed'][0, 0, :50]
+                if isinstance(target_expr, torch.Tensor):
+                    target_expr = target_expr.detach().cpu().numpy()
+                elif not isinstance(target_expr, np.ndarray):
+                    target_expr = np.array(target_expr)
+                axes[1].bar(range(len(target_expr)), target_expr)
+                axes[1].set_title('Target Expression')
+                axes[1].set_xlabel('Dimension')
+                axes[1].set_ylabel('Value')
+                
+                plt.tight_layout()
+                wandb.log({"visuals/expression_comparison": wandb.Image(fig)}, step=step)
+                plt.close(fig)
+            
+            # Log motion parameter comparison
+            motion_params = ['theta', 'rotation', 'translation', 'scale']
+            for param in motion_params:
+                if param in outputs and param in targets:
+                    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+                    
+                    # Get first frame of first batch item
+                    pred_val = outputs[param][0, 0]
+                    if isinstance(pred_val, torch.Tensor):
+                        pred_val = pred_val.detach().cpu().numpy().flatten()[:10]
+                    else:
+                        pred_val = np.array(pred_val).flatten()[:10]
+                    
+                    target_val = targets[param][0, 0]
+                    if isinstance(target_val, torch.Tensor):
+                        target_val = target_val.detach().cpu().numpy().flatten()[:10]
+                    else:
+                        target_val = np.array(target_val).flatten()[:10]
+                    
+                    axes[0].plot(pred_val, 'b-', label='Predicted')
+                    axes[0].plot(target_val, 'r--', label='Target')
+                    axes[0].set_title(f'{param.capitalize()} Comparison')
+                    axes[0].legend()
+                    axes[0].grid(True)
+                    
+                    # Plot difference
+                    diff = pred_val - target_val
+                    axes[1].bar(range(len(diff)), diff)
+                    axes[1].set_title(f'{param.capitalize()} Difference')
+                    axes[1].grid(True)
+                    
+                    plt.tight_layout()
+                    wandb.log({f"visuals/{param}_comparison": wandb.Image(fig)}, step=step)
+                    plt.close(fig)
+                    
+        except Exception as e:
+            logger.warning(f"Error in visualization logging: {str(e)}")
+
+    def _generate_sample_video(self, outputs: Dict[str, torch.Tensor], max_frames: int = 50):
+        """Generate a sample video for visualization (max 50 frames)."""
+        try:
+            with torch.no_grad():
+                # Limit to max_frames
+                actual_frames = min(outputs['theta'].shape[1], max_frames)
+                
+                # Create dummy frames for visualization (you can replace with actual generation)
+                frames = []
+                for i in range(actual_frames):
+                    # For now, create gradient frames as placeholder
+                    # Replace this with actual volumetric avatar generation
+                    frame = torch.zeros(3, 512, 512)
+                    frame[0] = i / actual_frames  # Red channel gradient
+                    frame[1] = 1.0 - (i / actual_frames)  # Green channel inverse gradient
+                    frames.append(frame)
+                
+                frames = torch.stack(frames)  # [T, C, H, W]
+                
+                # Save as WebM video for better browser compatibility
+                import cv2
+                import tempfile
+                
+                # First save as temporary file then convert to WebM
+                temp_path = self.output_dir / f"temp_epoch_{self.current_epoch}_step_{self.global_step}.mp4"
+                video_path = self.output_dir / f"sample_epoch_{self.current_epoch}_step_{self.global_step}.webm"
+                video_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Convert to numpy and write video
+                frames_np = (frames.permute(0, 2, 3, 1).cpu().numpy() * 255).astype(np.uint8)
+                
+                # Try WebM directly with VP8/VP9 codec
+                fourcc = cv2.VideoWriter_fourcc(*'VP80')  # VP8 codec for WebM
+                out = cv2.VideoWriter(str(video_path), fourcc, 25.0, (512, 512))
+                
+                if not out.isOpened():
+                    # Fallback to MP4 if WebM not supported
+                    logger.warning("WebM codec not available, falling back to MP4")
+                    video_path = self.output_dir / f"sample_epoch_{self.current_epoch}_step_{self.global_step}.mp4"
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    out = cv2.VideoWriter(str(video_path), fourcc, 25.0, (512, 512))
+                
+                for frame in frames_np:
+                    out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                out.release()
+                
+                return video_path
+                
+        except Exception as e:
+            logger.warning(f"Error generating sample video: {str(e)}")
+            return None
+
+    def _log_gradient_stats(self, step: int):
+        """Log gradient statistics to WandB."""
+        if not self.config.wandb.enabled or not self.accelerator.is_local_main_process:
+            return
+            
+        try:
+            grad_stats = {}
+            for name, param in self.model.named_parameters():
+                if param.grad is not None:
+                    grad_norm = param.grad.norm().item()
+                    grad_stats[f"gradients/{name}_norm"] = grad_norm
+                    
+                    # Log histogram for important layers
+                    if any(key in name for key in ['motion_proj', 'transformer', 'output']):
+                        wandb.log({f"grad_hist/{name}": wandb.Histogram(param.grad.cpu().numpy())}, step=step)
+            
+            # Log aggregated stats
+            if grad_stats:
+                wandb.log(grad_stats, step=step)
+                
+        except Exception as e:
+            logger.warning(f"Error logging gradient stats: {str(e)}")
+
 
 if __name__ == "__main__":
+    import argparse
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='VASA Training')
+    parser.add_argument('--config', type=str, default='vasa_config.yaml',
+                        help='Path to config file (default: vasa_config.yaml)')
+    args = parser.parse_args()
 
     mp.set_start_method('spawn', force=True)
 
     # Load volumetric model 
-    config = OmegaConf.load('vasa_config.yaml')
+    config = OmegaConf.load(args.config)
+    print(f"Loaded config from: {args.config}")
     model_path = config.paths.volumetric_model
     emo_config = OmegaConf.load(config.paths.volumetric_config)
     
@@ -1760,13 +1982,15 @@ if __name__ == "__main__":
 
     # Config already loaded above
 
-    # Initialize wandb
+    # Initialize wandb with enhanced configuration
     if config.wandb.enabled:
         wandb.init(
             project=config.wandb.project,
-            # entity=config.wandb.entity,
-            # name=config.wandb.name,
-            config=OmegaConf.to_container(config, resolve=True)
+            config=OmegaConf.to_container(config, resolve=True),
+            group="overfit-experiments" if "overfit" in args.config else "main",
+            notes=f"Config: {args.config}, Videos: {config.dataset.max_videos}, Window: {config.motion.window_size}",
+            save_code=True,  # Save code for reproducibility
+            tags=["overfit", "fast-convergence"] if "overfit" in args.config else ["training"]
         )
 
     model = VASAModel(
@@ -1796,12 +2020,16 @@ if __name__ == "__main__":
         # video_folder="/media/oem/12TB/Downloads/CelebV-HQ/celebvhq/35666/", #ovs-GiY_848_1
         video_folder=config.paths.video_folder,
         emo_model=volumetric_avatar,
+        window_size=config.motion.window_size,  # Use config window_size (20)
+        stride=config.motion.stride,  # Use config stride (10)
+        context_size=config.motion.context_size,  # Use config context_size (10)
         max_videos=1,  # Reduced from 10 to 1 for testing
         frame_size=(512, 512),
-        sequence_length=50,
+        sequence_length=config.motion.window_size,  # Match window_size
         cache_audio=True,
         preextract_audio=True,
-        random_seed=42
+        random_seed=42,
+        cache_dir=config.paths.get('cache_dir', 'cache')  # Use config cache dir
     )
 
     # Print dataset stats
@@ -1826,34 +2054,37 @@ if __name__ == "__main__":
 
 
 
-    # Create data loaders with proper settings
+    # Worker initialization function for consistency
+    def worker_init_fn(worker_id):
+        import numpy as np
+        np.random.seed(worker_id)
+        
+    # Create data loaders with optimized settings for faster training
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=0,  # No workers for testing
-        # pin_memory=True,
+        num_workers=2,  # Enable parallel data loading
+        pin_memory=True,  # Pin memory for faster GPU transfer
         drop_last=True,
         collate_fn=collate_vasa_batch,
         # Add these safety settings
-        persistent_workers=False,
-        prefetch_factor=None,
-        multiprocessing_context=None,  # Use spawn context
-        worker_init_fn=None,  # Add worker initialization here
-
+        persistent_workers=True if batch_size > 1 else False,  # Keep workers alive
+        prefetch_factor=2,  # Prefetch 2 batches per worker
+        multiprocessing_context='spawn',  # Use spawn context for safety
+        worker_init_fn=worker_init_fn  # Ensure worker consistency
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=1,  # Use batch size 1 for testing
         shuffle=False,
-        num_workers=0,  # No multiprocessing initially
-        # pin_memory=True,
+        num_workers=1,  # Single worker for validation
+        pin_memory=True,  # Pin memory for faster GPU transfer
         collate_fn=collate_vasa_batch,
-        multiprocessing_context=None,
+        multiprocessing_context='spawn',
         persistent_workers=False,
-        worker_init_fn=None,  # Add worker initialization here
-
+        worker_init_fn=worker_init_fn  # Ensure worker consistency
     )
 
 
