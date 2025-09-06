@@ -109,8 +109,8 @@ class TDDProgressiveLoss(nn.Module):
                 name='blink_control',
                 stage=LossStage.BLINKING,
                 prerequisite_loss='reconstruction',
-                activation_threshold=0.1,  # Reconstruction loss must be < 0.1
-                min_epoch=5,
+                activation_threshold=5.0,  # More realistic threshold for early activation
+                min_epoch=3,
                 weight_start=0.1,
                 weight_target=2.0,
                 ramp_epochs=10,
@@ -140,8 +140,8 @@ class TDDProgressiveLoss(nn.Module):
                 name='eye_gaze_direction',
                 stage=LossStage.EYE_GAZE,
                 prerequisite_loss='blink_control',
-                activation_threshold=0.15,
-                min_epoch=15,
+                activation_threshold=0.5,
+                min_epoch=8,
                 weight_start=0.1,
                 weight_target=1.5,
                 ramp_epochs=10,

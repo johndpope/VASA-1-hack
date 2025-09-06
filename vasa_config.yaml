@@ -44,11 +44,11 @@ motion:
   smooth_window: 5             # Temporal smoothing window size
   use_motion_prior: true       # Whether to use motion prior
 
-  warmup_steps: 100          # Number of warmup steps
+  warmup_steps: 500          # Extended warmup for VASA-1 alignment
   scheduler:
     type: "cosine"            # Learning rate scheduler type
-    min_lr: 1e-6              # Minimum learning rate
-    warmup_ratio: 0.1         # Warmup ratio
+    min_lr: 5e-5              # Increased minimum LR to prevent decay too low
+    warmup_ratio: 0.1         # Extended warmup ratio for stability
   
   # Progressive training
   progressive:
@@ -80,8 +80,8 @@ train:
     transformer_late: 5e-5
     output_projections: 2e-4
 
-  batch_size: 1
-  gradient_accumulation_steps: 4
+  batch_size: 28                # Increased from 1 to maximize GPU utilization
+  gradient_accumulation_steps: 2  # Reduced since batch size is larger
   num_epochs: 4000
 
   beta1: 0.9
@@ -90,12 +90,12 @@ train:
   max_grad_norm: 1.0
   save_freq: 2 # checkpoint saving for 35000 youre gonna want it to be 0
   
-  # Dropout probabilities for CFG
+  # Dropout probabilities for CFG - VASA-1 uses 0.2 drop rate
   dropout_probs:
-    audio: 0.1
-    gaze: 0.1
-    head_distance: 0.1
-    emotion: 0.1
+    audio: 0.2                # VASA-1 paper value: 20% drop rate
+    gaze: 0.2
+    head_distance: 0.2
+    emotion: 0.2
 
   # CFG scales schedule
   cfg_scales:
@@ -116,11 +116,17 @@ train:
     
     
 
-# Loss weights
+# Loss weights - TDD PROGRESSIVE SYSTEM
 loss:
+  # Use TDD progressive loss system
+  use_tdd_progressive: true
+  
   expression_weighting:
     enabled: true
-    min_weight: 0.5  # Minimum weight for least important dimensions
+    min_weight: 0.5
+  # Adaptive loss weighting
+  use_adaptive_weighting: true
+  adaptive_update_freq: 100   # Update weights every N steps  # Minimum weight for least important dimensions
     
   use_sync_loss: false
   use_verification: true
@@ -145,8 +151,20 @@ loss:
   lambda_emotion: 0.3
 
   lambda_cfg: 0.5
-  lambda_perceptual: 0.1      # Perceptual loss weight
-  lambda_temporal: 0.8        # Temporal consistency loss
+  lambda_perceptual: 0.5      # Increased perceptual loss for better quality
+  lambda_temporal: 0.8        # Temporal consistency
+  use_consistency: true       # Enable VASA consistency loss
+  use_identity: true          # Enable face identity preservation
+  lambda_consistency: 0.5     # Weight for consistency loss
+  lambda_identity: 0.3        # Weight for identity loss
+  
+  # NEW VASA-1 inspired losses
+  use_score_matching: true    # Use VASA-1 style clean signal prediction (not noise)
+  lambda_consist: 1.0         # Pairwise transfer loss for disentanglement
+  lambda_cross_id: 0.1        # Cross-identity similarity loss
+  lambda_velocity: 0.0001     # Velocity matching regularization
+  lambda_smoothness: 0.0001   # Acceleration smoothness regularization
+  
   warmup_epochs: 0            # Loss warmup epochs - for many videos dont worry
   
     # Blink control loss
@@ -203,9 +221,9 @@ paths:
 
 
 # Hardware/environment settings
-device: "cpu"
+device: "cuda"
 seed: 42
-num_workers: 0
+num_workers: 8                # Multi-threading for data loading
 debug: false
 wandb:
   project: "vasa"
