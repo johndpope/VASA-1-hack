@@ -229,6 +229,48 @@ The trainer will:
 | Epoch Time (RTX 5090) | ~5 min | ~1.5 min | 3.3x |
 | Convergence | 1000+ epochs | 10-20 epochs | 50x+ |
 
+## 📝 Logging Configuration
+
+### Logging Levels (nemo/logger.py)
+
+The project uses Python's logging module with three configurable levels defined in `nemo/logger.py:28-30`:
+
+```python
+# log_level = logging.WARNING    # Minimal output - only warnings and errors
+log_level = logging.INFO         # Standard output - informational messages (default)
+# log_level = logging.DEBUG       # Verbose output - detailed debugging information
+```
+
+**Logging Levels Explained:**
+
+1. **WARNING** (`logging.WARNING`)
+   - Shows only warnings, errors, and critical messages
+   - Use when you want minimal console output during training
+   - Best for production runs where you only need to know about issues
+
+2. **INFO** (`logging.INFO`) - **Currently Active**
+   - Shows informational messages, warnings, and errors
+   - Provides training progress, epoch updates, and key metrics
+   - Default and recommended level for normal training runs
+   - Balances visibility with readability
+
+3. **DEBUG** (`logging.DEBUG`)
+   - Shows all messages including detailed debugging information
+   - Includes tensor shapes, gradient information, and internal state
+   - Use when troubleshooting model issues or understanding data flow
+   - Can be verbose - recommended only for debugging sessions
+
+**To change the logging level:**
+1. Edit `nemo/logger.py` line 29
+2. Uncomment the desired level and comment out the others
+3. The change takes effect on next run
+
+**Additional Features:**
+- Logs are saved to `project.log` file for later review
+- Rich formatting with color-coded output and timestamps
+- Third-party library logging is suppressed to reduce noise
+- TorchDebugger class available for advanced PyTorch debugging
+
 ## 🔧 Troubleshooting
 
 ### Common Issues and Solutions

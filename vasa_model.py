@@ -1211,12 +1211,10 @@ class VASAModel(nn.Module):
         """Initialize diffusion schedule parameters"""
         # Initialize DDIM scheduler with reduced steps for faster convergence
         from diffusers import DDIMScheduler
-        
-        # Use 100 steps instead of 1000 for faster training
-        reduced_steps = 100  # Reduced from default 1000
+
         
         self.scheduler = DDIMScheduler(
-            num_train_timesteps=reduced_steps,  # Reduced for speed
+            num_train_timesteps=num_steps,  # Reduced for speed
             beta_start=beta_start,
             beta_end=beta_end,
             clip_sample=True,
@@ -1225,11 +1223,8 @@ class VASAModel(nn.Module):
             timestep_spacing="leading"  # Important for proper timestep spacing
         )
         # Set default inference steps
-        self.scheduler.set_timesteps(reduced_steps)
-        
-        # Log the change for debugging
-        logger.info(f"Diffusion steps reduced from {num_steps} to {reduced_steps} for faster convergence")
-        
+        self.scheduler.set_timesteps(num_steps)
+
     def forward(
         self,
         motion_data: Dict[str, torch.Tensor],
