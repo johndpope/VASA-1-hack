@@ -1313,20 +1313,19 @@ class VASAInference:
 # Example usage
 if __name__ == "__main__":
     epoch = 6  # Using available checkpoint
-    inferencer = VASAInference(
-        checkpoint_path=f"./checkpoints/checkpoint_epoch_{epoch}.pt",
-        config_path='config_stage2.yaml'
-    )
-
-    # inferencer.generate_sequence(
-    #     source_image_path="./data/source.png",
-    #     audio_path="./data/audio.wav", 
-    #     output_path="./output.mp4",
-    #     fps=25.0
+    # inferencer = VASAInference(
+    #     checkpoint_path=f"./checkpoints/checkpoint_epoch_{epoch}.pt",
+    #     config_path='config_stage2.yaml'
     # )
 
+    inferencer = VASAInference(
+        checkpoint_path=f"./checkpoints_overfit/best_checkpoint.pt",
+        config_path='overfit_config.yaml'
+    )
+
+
     inferencer.generate_from_video(
-        input_video="./junk/10.mp4",
+        input_video="./junk/11.mp4",
         output_path=f"vasa-output-epoch-{epoch}.mp4",
         fps=25.0,
         neutral_expression=False

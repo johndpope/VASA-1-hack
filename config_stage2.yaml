@@ -65,7 +65,7 @@ motion:
 train:
   resume_from: "" # "./checkpoints/checkpoint_epoch_1330.pt" #  # "./checkpoints/checkpoint_epoch_600.pt"  # or specify a path to checkpoint
   # when to add conditional signals
-  control_start_epoch: 1750 # 👹 this should be 1 or 0 for large video datasets with smaller epochs
+  control_start_epoch: 0 # 👹 this should be 1 or 0 for large video datasets with smaller epochs
 
 
   lr: 1e-3 # Base learning rate
