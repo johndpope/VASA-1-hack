@@ -18,7 +18,8 @@ import cv2
 from typing import Dict, Optional, List
 from collections import defaultdict
 from omegaconf import OmegaConf
-from vasa_model import VASAModel,VASALossModule,MotionSequenceHandler
+from vasa_model import VASAModel, MotionSequenceHandler
+from vasa_losses import VASALossModule
 from tdd_progressive_loss import TDDProgressiveLoss
 import importlib
 import sys
