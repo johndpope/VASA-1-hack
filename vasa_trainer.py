@@ -908,9 +908,31 @@ class VASATrainer:
                                 noise=noise                 # Pass noise for loss computation
                             )
                             
-                            # Initialize frames variables (they may be generated for LPIPS)
+                            # Get actual frames from the window data for disentanglement loss
+                            target_frames = window.get('frames', None)  # Get frames from dataset
+                            
+                            # Generate frames if we have disentanglement losses enabled
                             generated_frames = None
-                            target_frames = None
+                            if (self.config.loss.lambda_consist > 0 or self.config.loss.lambda_cross_id > 0) and target_frames is not None:
+                                try:
+                                    # Get source images (first frame of each video in the batch)
+                                    source_img = target_frames[:, 0]  # [B, C, H, W]
+                                    
+                                    # Prepare source params for frame generation
+                                    source_params = {
+                                        'source_img': source_img
+                                    }
+                                    
+                                    # Generate frames using volumetric avatar
+                                    with torch.no_grad():
+                                        generated_frames = self.model.volumetric_avatar.generate_frames_from_motion(
+                                            motion_outputs=outputs,
+                                            source_params=source_params
+                                        )
+                                    logger.info(f"Generated frames shape: {generated_frames.shape}")
+                                except Exception as e:
+                                    logger.error(f"Failed to generate frames for disentanglement loss: {str(e)}")
+                                    generated_frames = None
                            
                             # Compute losses including perceptual loss
                             losses, metrics = self.loss_module.compute_losses(
@@ -997,25 +1019,31 @@ class VASATrainer:
                                 self._log_visualizations(outputs, motion_data, self.global_step)
                                 self._log_gradient_stats(self.global_step)
                             
-                            # Generate thumbnail every epoch (moved outside of batch_idx % 5 condition)
-                            # Only on first batch and last window to avoid too many uploads
-                            if batch_idx == 0 and window_idx == len(windows) - 1 and self.config.wandb.enabled:
+                            # Generate thumbnail with random frame selection
+                            # Generate more frequently: every 10 batches or on first batch
+                            if (batch_idx % 10 == 0 or batch_idx == 0) and window_idx == 0 and self.config.wandb.enabled:
                                 try:
                                     from thumbnail_generator import generate_window_thumbnail
                                     
-                                    # Simple call - let thumbnail generator handle everything
+                                    # Pass the actual generated frames from disentanglement loss
+                                    # Create side-by-side thumbnail (1024x512 for two 512x512 images)
                                     thumbnail = generate_window_thumbnail(
-                                        window=window,
-                                        motion_data=motion_data,
-                                        outputs=outputs,
-                                        size=(512, 512)
+                                        generated_frames=generated_frames,  # From disentanglement loss
+                                        target_frames=target_frames,        # Ground truth frames
+                                        motion_outputs=outputs,              # For motion stats overlay
+                                        size=(1024, 512)  # Wide format for side-by-side comparison
                                     )
                                     
-                                    # Log to wandb
+                                    # Log to wandb with more descriptive caption
+                                    import random
+                                    if generated_frames is not None:
+                                        frame_info = f"Generated vs Target (random frame from T={outputs['theta'].shape[1]})"
+                                    else:
+                                        frame_info = f"Random frame from window (T={outputs['theta'].shape[1]} frames)"
                                     wandb.log({
                                         "visuals/training_thumbnail": wandb.Image(
                                             thumbnail,
-                                            caption=f"Epoch {self.current_epoch}, Batch {batch_idx}, Random frame"
+                                            caption=f"Epoch {self.current_epoch}, Batch {batch_idx}, {frame_info}"
                                         )
                                     }, step=self.global_step)
                                     

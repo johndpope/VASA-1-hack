@@ -63,14 +63,16 @@ def create_debug_thumbnail(
         if source_frame.min() < 0:
             source_frame = (source_frame - source_frame.min()) / (source_frame.max() - source_frame.min())
         
-        # Show source
+        # Show target/ground truth
         axes[0].imshow(source_frame)
-        axes[0].set_title("Source Identity", fontsize=10 * fig_scale)
+        axes[0].set_title("Target Frame (Ground Truth)", fontsize=10 * fig_scale)
         axes[0].axis('off')
         
-        # Show generated
+        # Show generated with frame index if available
+        frame_idx = motion_params.get('_frame_idx', -1) if motion_params else -1
+        title = f"Generated Frame (t={frame_idx})" if frame_idx >= 0 else "Generated Frame"
         axes[1].imshow(generated_frame)
-        axes[1].set_title("Generated Frame", fontsize=10 * fig_scale)
+        axes[1].set_title(title, fontsize=10 * fig_scale)
         axes[1].axis('off')
         
         ax = axes[1]
@@ -83,6 +85,10 @@ def create_debug_thumbnail(
     if add_overlay and motion_params is not None:
         # Calculate motion indicators
         indicators = []
+        
+        # Add frame index if available
+        if '_frame_idx' in motion_params:
+            indicators.append(f"Frame: {motion_params['_frame_idx']}")
         
         if 'rotation' in motion_params:
             rot = motion_params['rotation']
@@ -434,18 +440,24 @@ def generate_training_thumbnail(
     return thumbnail
 
 def generate_window_thumbnail(
-    window: Dict,
-    motion_data: Dict,
-    outputs: Dict,
+    generated_frames: Optional[torch.Tensor] = None,
+    target_frames: Optional[torch.Tensor] = None,
+    motion_outputs: Optional[Dict] = None,
+    window: Optional[Dict] = None,
+    motion_data: Optional[Dict] = None,
+    outputs: Optional[Dict] = None,
     size: Tuple[int, int] = (512, 512)
 ) -> np.ndarray:
     """
-    Generate thumbnail from window data with automatic frame extraction.
+    Generate thumbnail from generated and target frames.
     
     Args:
-        window: Window data dictionary
-        motion_data: Motion data from prepare_motion_data
-        outputs: Model outputs
+        generated_frames: Generated frames from volumetric avatar [B, T, C, H, W]
+        target_frames: Target/ground truth frames [B, T, C, H, W]
+        motion_outputs: Motion outputs for overlay stats
+        window: (Optional, for backward compatibility) Window data dictionary
+        motion_data: (Optional, for backward compatibility) Motion data from prepare_motion_data
+        outputs: (Optional, for backward compatibility) Model outputs
         size: Target thumbnail size
         
     Returns:
@@ -453,38 +465,83 @@ def generate_window_thumbnail(
     """
     import random
     
-    # Try to extract frames from various sources
-    selected_frame = None
-    source_frame = None
+    # Handle backward compatibility
+    if generated_frames is None and outputs is not None:
+        outputs = outputs
+    elif motion_outputs is not None:
+        outputs = motion_outputs
     
-    # Check window for frames
-    if 'frames' in window and isinstance(window['frames'], torch.Tensor):
+    # Try to extract frames from various sources
+    selected_generated = None
+    selected_target = None
+    selected_idx = 0
+    
+    # Use generated frames if provided (from disentanglement loss)
+    if generated_frames is not None and isinstance(generated_frames, torch.Tensor):
+        if generated_frames.numel() > 0:
+            # Handle shape [B, T, C, H, W]
+            if generated_frames.dim() == 5:
+                B, T, C, H, W = generated_frames.shape
+                # Select a random frame, biased towards later frames
+                if T > 5:
+                    min_idx = T // 3
+                    selected_idx = random.randint(min_idx, T - 1)
+                else:
+                    selected_idx = random.randint(0, max(0, T - 1))
+                selected_generated = generated_frames[0, selected_idx]  # [C, H, W]
+            elif generated_frames.dim() == 4:  # [B, C, H, W]
+                selected_idx = 0
+                selected_generated = generated_frames[0]
+            elif generated_frames.dim() == 3:  # [C, H, W]
+                selected_generated = generated_frames
+    
+    # Use target frames for comparison
+    if target_frames is not None and isinstance(target_frames, torch.Tensor):
+        if target_frames.numel() > 0:
+            if target_frames.dim() == 5:  # [B, T, C, H, W]
+                selected_target = target_frames[0, selected_idx] if selected_idx < target_frames.shape[1] else target_frames[0, 0]
+            elif target_frames.dim() == 4:  # [B, C, H, W]
+                selected_target = target_frames[0]
+            elif target_frames.dim() == 3:  # [C, H, W]
+                selected_target = target_frames
+    
+    # Fallback to window frames if no generated frames
+    if selected_generated is None and window is not None and 'frames' in window:
         frames = window['frames']
-        if frames.numel() > 0:
+        if isinstance(frames, torch.Tensor) and frames.numel() > 0:
             num_frames = frames.shape[0] if frames.dim() >= 3 else 1
             if num_frames > 0:
-                random_idx = random.randint(0, max(0, num_frames - 1))
-                selected_frame = frames[random_idx] if frames.dim() >= 3 else frames
-                source_frame = frames[0] if frames.dim() >= 3 else frames
+                # Select a random frame, biased towards later frames to see more motion
+                if num_frames > 5:
+                    # For longer sequences, prefer middle to end frames
+                    min_idx = num_frames // 3
+                    selected_idx = random.randint(min_idx, num_frames - 1)
+                else:
+                    selected_idx = random.randint(0, max(0, num_frames - 1))
+                selected_generated = frames[selected_idx] if frames.dim() >= 3 else frames
+                selected_target = frames[0] if frames.dim() >= 3 else frames
     
     # Fallback to motion_data
-    if selected_frame is None and 'frames' in motion_data:
+    if selected_generated is None and motion_data is not None and 'frames' in motion_data:
         frames = motion_data['frames']
         if isinstance(frames, torch.Tensor) and frames.numel() > 0:
             if frames.dim() > 3:  # [B, T, C, H, W]
                 num_frames = frames.shape[1]
                 random_idx = random.randint(0, max(0, num_frames - 1))
-                selected_frame = frames[0, random_idx]
-                source_frame = frames[0, 0]
+                selected_generated = frames[0, random_idx]
+                selected_target = frames[0, 0]
             elif frames.dim() == 3:  # [C, H, W]
-                selected_frame = frames
-                source_frame = frames
+                selected_generated = frames
+                selected_target = frames
     
-    # Extract random motion parameters
+    # Extract random motion parameters (use same index as frame if possible)
     random_motion_params = {}
+    motion_frame_idx = selected_idx
     if outputs and 'theta' in outputs:
         if isinstance(outputs['theta'], torch.Tensor) and outputs['theta'].shape[1] > 1:
-            motion_frame_idx = random.randint(0, outputs['theta'].shape[1] - 1)
+            # Use the same index as the selected frame, or random if out of bounds
+            if motion_frame_idx >= outputs['theta'].shape[1]:
+                motion_frame_idx = random.randint(0, outputs['theta'].shape[1] - 1)
             for key in outputs:
                 if isinstance(outputs[key], torch.Tensor) and outputs[key].dim() > 1:
                     random_motion_params[key] = outputs[key][:, motion_frame_idx:motion_frame_idx+1]
@@ -493,12 +550,15 @@ def generate_window_thumbnail(
         else:
             random_motion_params = outputs
     
+    # Add frame index to motion params for display
+    random_motion_params['_frame_idx'] = motion_frame_idx
+    
     # Generate appropriate thumbnail
-    if selected_frame is not None:
-        # Use debug thumbnail with overlay
+    if selected_generated is not None:
+        # Use debug thumbnail with overlay showing generated vs target
         return create_debug_thumbnail(
-            selected_frame,
-            source_frame=source_frame,
+            selected_generated,
+            source_frame=selected_target,  # Show target frame for comparison
             motion_params=random_motion_params,
             size=size,
             add_overlay=True
@@ -507,6 +567,6 @@ def generate_window_thumbnail(
         # Fallback to simple stats thumbnail
         return generate_simple_thumbnail(
             random_motion_params,
-            ground_truth=None,
+            ground_truth=selected_target,
             size=size
         )
