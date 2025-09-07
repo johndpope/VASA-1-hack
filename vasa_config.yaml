@@ -80,8 +80,8 @@ train:
     transformer_late: 2.5e-4   # 5x increase
     output_projections: 1e-3   # 5x increase
 
-  batch_size: 4                # Reduced for stability with full dataset
-  gradient_accumulation_steps: 4  # Increase effective batch size to 16
+  batch_size: 2                # Further reduced to prevent crashes
+  gradient_accumulation_steps: 8  # Increase effective batch size to 16
   num_epochs: 1000            # Reduced for quick testing
 
   beta1: 0.9
@@ -210,7 +210,7 @@ dataset:
   preextract_audio: true
   cache_audio: true
   hop_length: 10
-  max_videos: 50               # Start with fewer videos
+  max_videos: 20               # Further reduced to prevent crashes
   min_sequence_length: 15     # Minimum sequence length
   max_sequence_samples: 500   # Limit samples per epoch
   augmentation:
