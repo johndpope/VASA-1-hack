@@ -1034,6 +1034,12 @@ class VASATrainer:
                             batch_total_loss += window_loss
                             logger.info(f"  Window {window_idx} completed - loss: {window_loss:.4f}")
                             
+                            # Log visualizations before cleanup (every 5 batches)
+                            if batch_idx % 5 == 0 and window_idx == 0:  # Only log first window
+                                if 'outputs' in locals():
+                                    self._log_visualizations(outputs, motion_data, self.global_step)
+                                    self._log_gradient_stats(self.global_step)
+                            
                             # Clear intermediate tensors to prevent memory buildup
                             del losses
                             if 'outputs' in locals():
@@ -1062,7 +1068,7 @@ class VASATrainer:
                                 self.epoch_table.add_data(
                                     batch_idx,
                                     window_idx,
-                                    losses['total'].item(),
+                                    window_loss,  # Use the stored value
                                     metrics.get('reconstruction', 0.0),
                                     metrics.get('dynamics_loss', 0.0),
                                     metrics.get('expression_loss', 0.0),
@@ -1072,11 +1078,6 @@ class VASATrainer:
                                     metrics.get('l_consist', 0.0),
                                     metrics.get('l_cross_id', 0.0)
                                 )
-                            
-                            # Log visualizations every 5 batches
-                            if batch_idx % 5 == 0 and window_idx == 0:  # Only log first window
-                                self._log_visualizations(outputs, motion_data, self.global_step)
-                                self._log_gradient_stats(self.global_step)
                             
                             # Generate thumbnail with single frame only to save memory
                             # Generate more frequently: every 10 batches or on first batch
