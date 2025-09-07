@@ -34,14 +34,14 @@ diffusion:
 # Motion generation parameters
 motion:
   num_speed_buckets: 9
-  window_size: 50
-  stride: 25
-  context_size: 10
+  window_size: 20              # Reduced window size to match sequence length
+  stride: 10                   # Smaller stride for more overlap
+  context_size: 5              # Smaller context for memory
   overlap_smooth: true
   # Add these:
-  min_window_size: 15          # Minimum window size for curriculum
-  max_window_size: 30          # Maximum window size
-  smooth_window: 5             # Temporal smoothing window size
+  min_window_size: 10          # Minimum window size for curriculum
+  max_window_size: 20          # Maximum window size
+  smooth_window: 3             # Temporal smoothing window size
   use_motion_prior: true       # Whether to use motion prior
 
   warmup_steps: 500          # Extended warmup for VASA-1 alignment
@@ -80,8 +80,8 @@ train:
     transformer_late: 2.5e-4   # 5x increase
     output_projections: 1e-3   # 5x increase
 
-  batch_size: 28                # Increased from 16 to maximize 32GB VRAM utilization
-  gradient_accumulation_steps: 2  # Increase effective batch size to break plateau
+  batch_size: 4                # Reduced for stability with full dataset
+  gradient_accumulation_steps: 4  # Increase effective batch size to 16
   num_epochs: 1000            # Reduced for quick testing
 
   beta1: 0.9
@@ -129,17 +129,17 @@ loss:
   adaptive_update_freq: 100   # Update weights every N steps  # Minimum weight for least important dimensions
     
   use_sync_loss: false
-  use_verification: true
-  lambda_verification: 10
+  use_verification: false      # Disable verification to save memory
+  lambda_verification: 0       # Disable verification to save memory
   
-  lambda_lips: 0     # Weight for lip motion loss
-  lambda_nonlip: 0.0    # Weight for non-lip facial landmarks
-  lambda_speed: 0
-  lambda_pose: 1
-  lambda_dynamics: 10.0 # expression
-  lambda_reconstruction: 1
+  lambda_lips: 0.5    # Weight for lip motion loss
+  lambda_nonlip: 0.1   # Weight for non-lip facial landmarks
+  lambda_speed: 0.1
+  lambda_pose: 1.0
+  lambda_dynamics: 5.0  # Reduced expression weight for stability
+  lambda_reconstruction: 1.0
   # Audio-visual sync loss
-  lambda_sync: 1.0 
+  lambda_sync: 0.0     # Disabled - SyncNet for evaluation only 
 
   
   # Control signal adherence loss
@@ -164,6 +164,17 @@ loss:
   lambda_cross_id: 0.1        # Cross-identity similarity loss
   lambda_velocity: 0.0001     # Velocity matching regularization
   lambda_smoothness: 0.0001   # Acceleration smoothness regularization
+  
+  # Disentanglement loss configuration
+  disentangle_num_pairs: 2           # Reduced pairs to save computation
+  disentangle_sampling: 'extremes'   # Use first and last only
+  disentangle_compute_freq: 10       # Compute less frequently
+  disentangle_vis_freq: 500          # Visualize less frequently
+  cross_id_num_frames: 2             # Fewer frames for identity
+  cross_id_normalize: true           # Normalize frames before identity extraction
+  
+  # Frame generation for disentanglement losses
+  use_sparse_frames: true     # Generate only sparse frames to save memory
   
   warmup_epochs: 0            # Loss warmup epochs - for many videos dont worry
   
@@ -194,16 +205,16 @@ inference:
 
 # Dataset parameters
 dataset:
-  sequence_length: 25
+  sequence_length: 20          # Reduced sequence length for memory
   frame_size: [512, 512]
   preextract_audio: true
   cache_audio: true
   hop_length: 10
-  max_videos: null
-  min_sequence_length: 15    # Minimum sequence length
-  max_sequence_samples: 1000 # Maximum samples per epoch
+  max_videos: 50               # Start with fewer videos
+  min_sequence_length: 10     # Lower minimum for more samples
+  max_sequence_samples: 500   # Limit samples per epoch
   augmentation:
-    enabled: true
+    enabled: false             # Disable augmentation initially for stability
     flip_prob: 0.5
     temporal_crop_prob: 0.3
     intensity_scale: 0.2
@@ -223,7 +234,7 @@ paths:
 # Hardware/environment settings
 device: "cuda"
 seed: 42
-num_workers: 8                # Multi-threading for data loading
+num_workers: 4                # Reduced to prevent memory issues
 debug: false
 wandb:
   project: "vasa"
@@ -275,5 +286,5 @@ distributed:
 optimization:
   compile_model: false      # Whether to use torch.compile
   channels_last: true       # Use channels_last memory format
-  gradient_checkpointing: false
+  gradient_checkpointing: true  # Enable to save memory
   sync_batchnorm: true 
