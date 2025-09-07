@@ -1063,12 +1063,16 @@ class VASALossModule:
         Returns a loss that should be minimized (lower is better).
         """
         try:
-            # Get audio features
-            if 'audio_features' not in targets:
-                logger.warning("No audio features in targets, returning zero sync loss")
+            # Get audio features - prefer MFCC for SyncNet, fallback to audio_features
+            if 'mfcc' in targets:
+                audio_features = targets['mfcc']
+                logger.debug("Using MFCC features for sync loss")
+            elif 'audio_features' in targets:
+                audio_features = targets['audio_features']
+                logger.debug("Using audio_features for sync loss")
+            else:
+                logger.warning("No audio features (mfcc or audio_features) in targets, returning zero sync loss")
                 return torch.tensor(0.0, device=generated_frames.device)
-            
-            audio_features = targets['audio_features']
             
             # Ensure proper shapes
             B, T = generated_frames.shape[:2]
