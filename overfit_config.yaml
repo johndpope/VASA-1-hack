@@ -165,6 +165,9 @@ loss:
   lambda_velocity: 0.0001     # Velocity matching regularization
   lambda_smoothness: 0.0001   # Acceleration smoothness regularization
   
+  # Frame generation for disentanglement losses
+  use_sparse_frames: false    # If true, only generate first and last frame (saves 90% memory)
+  
   warmup_epochs: 0            # No warmup for overfitting
   
   # Loss scheduling
