@@ -711,7 +711,12 @@ class VASALossModule:
                 l_cross_id = torch.tensor(0.0, device=device)
 
 
-            # Add disentanglement losses to metrics
+            # Add disentanglement losses to both losses dict and metrics
+            losses['l_consist'] = l_consist
+            losses['l_cross_id'] = l_cross_id
+            losses['disentangle_total'] = disentangle_loss
+            
+            # Also add to metrics for logging
             metrics['l_consist'] = l_consist.item() if torch.is_tensor(l_consist) else l_consist
             metrics['l_cross_id'] = l_cross_id.item() if torch.is_tensor(l_cross_id) else l_cross_id
             
@@ -739,7 +744,7 @@ class VASALossModule:
             verify_term = losses['verification']  # Already scaled in computation
             control_term = self.config.loss.lambda_control * losses.get('control_total', torch.tensor(0.0, device=device))
             sync_term = self.lambda_sync * losses.get('sync_loss', torch.tensor(0.0, device=device))
-            disentangle_term = losses.get('disentangle', torch.tensor(0.0, device=device))
+            disentangle_term = losses.get('disentangle_total', torch.tensor(0.0, device=device))
             vel_smooth_term = losses.get('velocity_smoothness', torch.tensor(0.0, device=device))
 
             logger.debug(f"  Reconstruction term: {recon_term.item():.6f}")
