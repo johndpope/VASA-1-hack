@@ -59,7 +59,7 @@ motion:
 
 # Training parameters - OVERFITTING FOCUSED
 train:
-  resume_from: null # Start fresh training
+  resume_from: "checkpoints_overfit/best_checkpoint.pt" # Resume from best checkpoint
   # when to add conditional signals
   control_start_epoch: 0      # Start control immediately for overfitting
 
@@ -119,13 +119,13 @@ loss:
   use_adaptive_weighting: true
   adaptive_update_freq: 100   # Update weights every N steps  # Minimum weight for least important dimensions
     
-  use_sync_loss: false
+  use_sync_loss: false  # SyncNet is for evaluation only (per VASA-1 paper)
   use_verification: false     # Disabled for faster training
   lambda_verification: 0
   
   # Foundation losses (always active)
   lambda_reconstruction: 1.0
-  lambda_dynamics: 10.0       # expression variance
+  lambda_dynamics: 20.0       # expression variance (increased to prevent static motion)
   lambda_pose: 1.0
   
   # Progressive losses (unlock based on thresholds)
@@ -143,7 +143,7 @@ loss:
   
   # Stage 6: Lip Sync (unlocks at epoch 45 if emotion < 0.3)
   lambda_lips: 0.0            # Will ramp to 2.0
-  lambda_sync: 0.0            # Will ramp to 2.0
+  lambda_sync: 0.0            # SyncNet for evaluation only, audio conditioning handles training
   
   # Other losses
   lambda_nonlip: 0.0          # Weight for non-lip facial landmarks
@@ -181,7 +181,7 @@ loss:
 inference:
   batch_size: 1
   cfg_scale: 3.0
-  eta: 0.0  # DDIM stochastic sampling parameter
+  eta: 0.1  # DDIM stochastic sampling parameter (0.1 for mild randomness, prevents mode collapse)
   output_size: [512, 512]
   num_inference_steps: 50     # Number of DDIM steps during inference
   temperature: 1.0            # Sampling temperature

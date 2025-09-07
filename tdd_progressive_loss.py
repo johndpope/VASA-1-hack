@@ -213,6 +213,37 @@ class TDDProgressiveLoss(nn.Module):
                 is_active=False,
                 current_weight=0.0
             ),
+            
+            # Disentanglement losses (always active for VASA-1)
+            'l_consist': LossThreshold(
+                name='l_consist',
+                stage=LossStage.FOUNDATION,  # Active from start
+                prerequisite_loss=None,
+                activation_threshold=0.0,
+                min_epoch=0,
+                weight_start=1.0,  # From config
+                weight_target=1.0,
+                ramp_epochs=0,
+                test_metric='consistency',
+                test_threshold=0.0,
+                is_active=True,
+                current_weight=1.0
+            ),
+            
+            'l_cross_id': LossThreshold(
+                name='l_cross_id',
+                stage=LossStage.FOUNDATION,  # Active from start
+                prerequisite_loss=None,
+                activation_threshold=0.0,
+                min_epoch=0,
+                weight_start=0.1,  # From config
+                weight_target=0.1,
+                ramp_epochs=0,
+                test_metric='identity_preservation',
+                test_threshold=0.0,
+                is_active=True,
+                current_weight=0.1
+            ),
         }
     
     def update_epoch(self, epoch: int, metrics: Dict[str, float]):

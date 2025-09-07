@@ -18,6 +18,7 @@ import cv2
 from typing import Dict, Optional, List
 from collections import defaultdict
 from omegaconf import OmegaConf
+from datetime import datetime
 from vasa_model import VASAModel, MotionSequenceHandler
 from vasa_losses import VASALossModule
 from tdd_progressive_loss import TDDProgressiveLoss
@@ -767,6 +768,14 @@ class VASATrainer:
                 self.best_val_loss = current_loss
                 self.save_checkpoint(is_best=True)
                 logger.info(f"New best model saved with loss: {current_loss:.4f}")
+            
+            # ALWAYS save a checkpoint every epoch (in addition to best model)
+            # This prevents losing hours of training if memory crashes
+            epoch_checkpoint_path = self.output_dir / f'checkpoint_epoch_{epoch:04d}.pt'
+            self.save_epoch_checkpoint(epoch_checkpoint_path)
+            
+            # Keep only last 3 epoch checkpoints to save disk space
+            self.cleanup_old_epoch_checkpoints(keep_last=3)
 
 
     def train_epoch(self) -> Dict[str, float]:
@@ -815,7 +824,8 @@ class VASATrainer:
         if self.config.wandb.enabled and self.accelerator.is_local_main_process:
             self.epoch_table = wandb.Table(columns=[
                 "batch_idx", "window_idx", "total_loss", "reconstruction", 
-                "dynamics_loss", "expression_loss", "pose_loss", "grad_norm"
+                "dynamics_loss", "expression_loss", "pose_loss", "perceptual",
+                "grad_norm", "l_consist", "l_cross_id"
             ])
 
         for batch_idx, batch in enumerate(self.train_loader):
@@ -847,14 +857,14 @@ class VASATrainer:
 
                 # Process each window
                 for window_idx, window in enumerate(windows):
-                    logger.info(f"  Processing window {window_idx}/{len(windows)}")
+                    logger.debug(f"  Processing window {window_idx}/{len(windows)}")
                     if not window:
                         logger.warning(f"  Window {window_idx} is None")
                         continue
                     # Use accumulate per window instead of per batch
                     with self.accelerator.accumulate(self.model):
                         try:
-                            logger.info(f"  Preparing motion data for window {window_idx}")
+                            logger.debug(f"  Preparing motion data for window {window_idx}")
                             # Extract target motion parameters
                             motion_data = self.motion_handler.prepare_motion_data(window)
                             B = motion_data['theta'].shape[0]
@@ -907,10 +917,67 @@ class VASATrainer:
                                 noise=noise                 # Pass noise for loss computation
                             )
                             
-                            # Tell loss module which window we're on for visualization
-                            self.loss_module._window_count_this_batch = window_idx
+                            # Get actual frames from the window data for disentanglement loss
+                            target_frames = window.get('frames', None)  # Get frames from dataset
                             
-                            # Compute losses using noise prediction
+                            # Generate frames if we have disentanglement losses enabled
+                            # OPTIMIZATION: Only generate the 2 frames needed for disentanglement loss
+                            # Note: VASA paper doesn't specify needing all frames for these losses,
+                            # and mathematically only 2 frames are used (first and last)
+                            generated_frames = None
+                            use_sparse_frames = False  # Set to False to generate all frames (more memory intensive)
+                            if (self.config.loss.lambda_consist > 0 or self.config.loss.lambda_cross_id > 0) and target_frames is not None:
+                                try:
+                                    # Get source images (first frame of each video in the batch)
+                                    source_img = target_frames[:, 0]  # [B, C, H, W]
+                                    
+                                    # Prepare source params for frame generation
+                                    source_params = {
+                                        'source_img': source_img
+                                    }
+                                    
+                                    # Generate frames using volumetric avatar
+                                    with torch.no_grad():
+                                        T = outputs['theta'].shape[1]
+                                        
+                                        if use_sparse_frames:
+                                            # OPTIMIZATION: Only generate first and last frame (90% memory savings)
+                                            # This is sufficient for disentanglement losses which only use these 2 frames
+                                            sparse_outputs = {}
+                                            for key, value in outputs.items():
+                                                if isinstance(value, torch.Tensor) and value.dim() > 2 and value.shape[1] == T:
+                                                    # Extract only first and last frame [B, 2, ...]
+                                                    sparse_outputs[key] = torch.stack([value[:, 0], value[:, -1]], dim=1)
+                                                else:
+                                                    sparse_outputs[key] = value
+                                            
+                                            # Generate only 2 frames instead of T frames
+                                            generated_frames = self.model.volumetric_avatar.generate_frames_from_motion(
+                                                motion_outputs=sparse_outputs,
+                                                source_params=source_params,
+                                                use_black_background=True  # Use black background for training
+                                            )
+                                            generated_frames = generated_frames.detach()
+                                            
+                                            # Also make target frames sparse to match
+                                            sparse_target_frames = torch.stack([target_frames[:, 0], target_frames[:, -1]], dim=1)
+                                            target_frames = sparse_target_frames
+                                        else:
+                                            # Generate all frames (more faithful to paper but memory intensive)
+                                            generated_frames = self.model.volumetric_avatar.generate_frames_from_motion(
+                                                motion_outputs=outputs,
+                                                source_params=source_params,
+                                                use_black_background=True  # Use black background for training
+                                            )
+                                            generated_frames = generated_frames.detach()
+                                        
+                                    logger.info(f"📲. Generated frames shape (sparse): {generated_frames.shape}")
+                                    logger.debug(f"Target frames shape (sparse): {target_frames.shape}")
+                                except Exception as e:
+                                    logger.error(f"Failed to generate frames for disentanglement loss: {str(e)}")
+                                    generated_frames = None
+                           
+                            # Compute losses including perceptual loss
                             losses, metrics = self.loss_module.compute_losses(
                                 outputs=outputs,
                                 targets=motion_data,  # Original motion data
@@ -918,8 +985,15 @@ class VASATrainer:
                                 noise=outputs['noise'],    
                                 return_metrics=True,
                                 current_epoch=self.current_epoch,
-                                step=self.global_step
+                                step=self.global_step,
+                                generated_frames=generated_frames,
+                                target_frames=target_frames
                             )
+                            
+                            # Clean up generated frames immediately after loss computation
+                            if generated_frames is not None:
+                                del generated_frames
+                                torch.cuda.empty_cache()
 
                             # Update batch metrics - store per-window
                             for k, v in losses.items():
@@ -955,8 +1029,32 @@ class VASATrainer:
                             self.scheduler.step()
                             self.optimizer.zero_grad()
                             
-                            batch_total_loss += losses['total'].item()
-                            logger.info(f"  Window {window_idx} completed - loss: {losses['total'].item():.4f}")
+                            # Store loss value before cleanup
+                            window_loss = losses['total'].item()
+                            batch_total_loss += window_loss
+                            logger.info(f"  Window {window_idx} completed - loss: {window_loss:.4f}")
+                            
+                            # Log visualizations before cleanup (every 5 batches)
+                            if batch_idx % 5 == 0 and window_idx == 0:  # Only log first window
+                                if 'outputs' in locals():
+                                    self._log_visualizations(outputs, motion_data, self.global_step)
+                                    # Gradient stats disabled for performance
+                                    # self._log_gradient_stats(self.global_step)
+                            
+                            # Store outputs needed for thumbnail before cleanup (every batch for first window)
+                            stored_outputs = None
+                            if 'outputs' in locals() and window_idx == 0:  # Generate thumbnail for every batch's first window
+                                stored_outputs = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v 
+                                                for k, v in outputs.items()}
+                            
+                            # Clear intermediate tensors to prevent memory buildup
+                            del losses
+                            if 'outputs' in locals():
+                                del outputs
+                            if 'noise' in locals():
+                                del noise
+                            if 'noised_motion' in locals():
+                                del noised_motion
                             
                             # Add row to metrics table
                             if self.config.wandb.enabled and self.accelerator.is_local_main_process:
@@ -968,45 +1066,125 @@ class VASATrainer:
                                     else:
                                         grad_norm_value = float(grad_norm)
                                 
+                                # Debug: Log what's in metrics
+                                if batch_idx == 0 and window_idx == 0:
+                                    logger.info(f"DEBUG: Metrics keys: {list(metrics.keys())}")
+                                    logger.info(f"DEBUG: l_consist value: {metrics.get('l_consist', 'NOT FOUND')}")
+                                    logger.info(f"DEBUG: l_cross_id value: {metrics.get('l_cross_id', 'NOT FOUND')}")
+                                
                                 self.epoch_table.add_data(
                                     batch_idx,
                                     window_idx,
-                                    losses['total'].item(),
+                                    window_loss,  # Use the stored value
                                     metrics.get('reconstruction', 0.0),
                                     metrics.get('dynamics_loss', 0.0),
                                     metrics.get('expression_loss', 0.0),
                                     metrics.get('pose_loss', 0.0),
-                                    grad_norm_value
+                                    metrics.get('perceptual', 0.0),
+                                    grad_norm_value,
+                                    metrics.get('l_consist', 0.0),
+                                    metrics.get('l_cross_id', 0.0)
                                 )
                             
-                            # Log visualizations every 5 batches
-                            if batch_idx % 5 == 0 and window_idx == 0:  # Only log first window
-                                self._log_visualizations(outputs, motion_data, self.global_step)
-                                self._log_gradient_stats(self.global_step)
-                                
-                                # Generate sample video every 5 epochs (only on first batch)
-                                if batch_idx == 0 and self.current_epoch % 5 == 0 and self.config.vis.save_videos:
-                                    video_path = self._generate_sample_video(outputs, max_frames=50)
-                                    if video_path and self.config.wandb.enabled:
-                                        # Use mp4 format for consistency with vi.py
-                                        wandb.log({"visuals/generated_sample": wandb.Video(str(video_path), 
-                                                                                         fps=25, 
-                                                                                         format="mp4")}, 
-                                                step=self.global_step)
-                                    logger.info(f"📹 Generated sample video for epoch {self.current_epoch}")
+                            # Generate thumbnail with single frame only to save memory
+                            # Generate for every batch to ensure we get thumbnails every epoch
+                            if window_idx == 0 and self.config.wandb.enabled and stored_outputs is not None:
+                                try:
+                                    from thumbnail_generator import generate_window_thumbnail
+                                    import random
+                                    
+                                    # Generate just ONE frame for thumbnail to save memory
+                                    single_frame_generated = None
+                                    single_frame_target = None
+                                    frame_idx = 0  # Default frame index
+                                    
+                                    if target_frames is not None:
+                                        # Pick a random frame index
+                                        T = target_frames.shape[1] if target_frames.dim() > 4 else 1
+                                        frame_idx = random.randint(T//3, T-1) if T > 3 else 0
+                                        
+                                        # Extract single target frame
+                                        single_frame_target = target_frames[:, frame_idx:frame_idx+1] if T > 1 else target_frames[:, 0:1]
+                                        
+                                        # Generate just this one frame
+                                        with torch.no_grad():
+                                            try:
+                                                source_img = target_frames[:, 0]  # [B, C, H, W]
+                                                
+                                                # Extract single frame motion params
+                                                single_motion = {}
+                                                if stored_outputs is not None:
+                                                    device = self.accelerator.device
+                                                    for key in stored_outputs:
+                                                        if isinstance(stored_outputs[key], torch.Tensor) and stored_outputs[key].dim() > 2:
+                                                            single_motion[key] = stored_outputs[key][:, frame_idx:frame_idx+1].to(device)
+                                                        else:
+                                                            single_motion[key] = stored_outputs[key] if not isinstance(stored_outputs[key], torch.Tensor) else stored_outputs[key].to(device)
+                                                
+                                                # Generate single frame only
+                                                # Access the actual model (unwrap from accelerator if needed)
+                                                actual_model = self.accelerator.unwrap_model(self.model) if hasattr(self, 'accelerator') else self.model
+                                                single_frame_generated = actual_model.volumetric_avatar.generate_frames_from_motion(
+                                                    motion_outputs=single_motion,
+                                                    source_params={'source_img': source_img},
+                                                    use_black_background=True  # Use black background for thumbnails
+                                                ).detach()
+                                                
+                                                # Clear memory immediately
+                                                del single_motion
+                                                torch.cuda.empty_cache()
+                                                
+                                            except Exception as e:
+                                                logger.warning(f"Could not generate single frame for thumbnail: {e}")
+                                                single_frame_generated = None
+                                    
+                                    # Pass single frames to thumbnail generator
+                                    thumbnail = generate_window_thumbnail(
+                                        generated_frames=single_frame_generated,  # Just one frame
+                                        target_frames=single_frame_target,        # Just one frame
+                                        motion_outputs=stored_outputs,            # For motion stats overlay (using stored)
+                                        size=(1024, 512)  # Wide format for side-by-side comparison
+                                    )
+                                    
+                                    # Log to wandb with more descriptive caption
+                                    if thumbnail is not None:
+                                        if single_frame_generated is not None:
+                                            frame_info = f"Generated vs Target (frame {frame_idx} of T={stored_outputs['theta'].shape[1] if 'theta' in stored_outputs else 'unknown'})"
+                                        else:
+                                            frame_info = f"Target frame only (frame {frame_idx}, generation failed)"
+                                        
+                                        wandb.log({
+                                            "visuals/training_thumbnail": wandb.Image(
+                                                thumbnail,
+                                                caption=f"Epoch {self.current_epoch}, Batch {batch_idx}, {frame_info}"
+                                            )
+                                        }, step=self.global_step)
+                                        logger.info(f"📸 Generated and logged training thumbnail for epoch {self.current_epoch}")
+                                    else:
+                                        logger.warning("Thumbnail generation returned None")
+                                    
+                                except Exception as e:
+                                    logger.warning(f"Could not generate thumbnail: {e}")
 
                         except Exception as e:
                             logger.error(f"Error processing window {window_idx}: {str(e)}")
                             logger.error(traceback.format_exc())
                             continue
 
-                # Average metrics across windows
-                avg_metrics = {
-                    k: torch.stack(v).mean().item() if isinstance(v[0], torch.Tensor)
-                    else sum(v) / len(v)
-                    for k, v in batch_metrics.items()
-                }
+                # Average metrics across windows and immediately convert to scalars
+                avg_metrics = {}
+                for k, v in batch_metrics.items():
+                    if isinstance(v[0], torch.Tensor):
+                        # Stack, compute mean, and immediately convert to scalar
+                        stacked = torch.stack(v)
+                        avg_metrics[k] = stacked.mean().item()
+                        del stacked  # Free memory immediately
+                    else:
+                        avg_metrics[k] = sum(v) / len(v)
                 avg_metrics['total'] = batch_total_loss / len(windows)
+                
+                # Clear batch_metrics to free memory
+                del batch_metrics
                 
                 # Update metrics
                 self.train_metrics.update(avg_metrics)
@@ -1023,6 +1201,16 @@ class VASATrainer:
                         avg_metrics,
                         grad_norms
                     )
+                
+                # Periodic CUDA cache clearing to prevent memory fragmentation
+                if batch_idx % 10 == 0:
+                    torch.cuda.empty_cache()
+                    if batch_idx % 50 == 0:
+                        # Log memory stats every 50 batches
+                        if torch.cuda.is_available():
+                            allocated = torch.cuda.memory_allocated() / 1024**3
+                            reserved = torch.cuda.memory_reserved() / 1024**3
+                            logger.info(f"GPU Memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
                 
                 # Update progress bar
                 self.progress_bar.update(1)
@@ -1769,6 +1957,61 @@ class VASATrainer:
         except Exception as e:
             logger.error(f"Error saving checkpoint: {str(e)}")
             logger.error(traceback.format_exc())
+    
+    def save_epoch_checkpoint(self, save_path: Path):
+        """Save checkpoint for current epoch (called every epoch).
+        
+        Args:
+            save_path: Path to save the checkpoint
+        """
+        if self.output_dir is None:
+            return
+            
+        try:
+            # Get unwrapped model state dict
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+            state_dict = unwrapped_model.state_dict()
+            
+            checkpoint = {
+                'epoch': self.current_epoch,
+                'global_step': self.global_step,
+                'model_state_dict': state_dict,
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+                'loss': self.best_val_loss,
+                'config': self.config,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(checkpoint, save_path)
+            logger.info(f"💾 Saved epoch checkpoint to {save_path}")
+            
+        except Exception as e:
+            logger.error(f"Error saving epoch checkpoint: {str(e)}")
+            logger.error(traceback.format_exc())
+    
+    def cleanup_old_epoch_checkpoints(self, keep_last: int = 3):
+        """Remove old epoch checkpoints to save disk space.
+        
+        Args:
+            keep_last: Number of recent epoch checkpoints to keep
+        """
+        if self.output_dir is None:
+            return
+            
+        try:
+            # Find all epoch checkpoint files
+            epoch_checkpoints = sorted(self.output_dir.glob('checkpoint_epoch_*.pt'))
+            
+            if len(epoch_checkpoints) > keep_last:
+                # Remove old checkpoints
+                for checkpoint_path in epoch_checkpoints[:-keep_last]:
+                    checkpoint_path.unlink()
+                    logger.info(f"Removed old checkpoint: {checkpoint_path}")
+                    
+        except Exception as e:
+            logger.error(f"Error cleaning up old checkpoints: {str(e)}")
             
 
     def load_checkpoint(self, checkpoint_path: str):
@@ -2051,27 +2294,29 @@ class VASATrainer:
             return None
 
     def _log_gradient_stats(self, step: int):
-        """Log gradient statistics to WandB."""
-        if not self.config.wandb.enabled or not self.accelerator.is_local_main_process:
-            return
-            
-        try:
-            grad_stats = {}
-            for name, param in self.model.named_parameters():
-                if param.grad is not None:
-                    grad_norm = param.grad.norm().item()
-                    grad_stats[f"gradients/{name}_norm"] = grad_norm
-                    
-                    # Log histogram for important layers
-                    if any(key in name for key in ['motion_proj', 'transformer', 'output']):
-                        wandb.log({f"grad_hist/{name}": wandb.Histogram(param.grad.cpu().numpy())}, step=step)
-            
-            # Log aggregated stats
-            if grad_stats:
-                wandb.log(grad_stats, step=step)
-                
-        except Exception as e:
-            logger.warning(f"Error logging gradient stats: {str(e)}")
+        """Log gradient statistics to WandB - DISABLED for performance."""
+        return  # Disabled for performance
+        
+        # Original code kept for reference:
+        # if not self.config.wandb.enabled or not self.accelerator.is_local_main_process:
+        #     return
+        #     
+        # try:
+        #     grad_stats = {}
+        #     for name, param in self.model.named_parameters():
+        #         if param.grad is not None:
+        #             grad_norm = param.grad.norm().item()
+        #             grad_stats[f"gradients/{name}_norm"] = grad_norm
+        #             
+        #             # Log histogram for important layers - DISABLED
+        #             # if any(key in name for key in ['motion_proj', 'transformer', 'output']):
+        #             #     wandb.log({f"grad_hist/{name}": wandb.Histogram(param.grad.cpu().numpy())}, step=step)
+        #     
+        #     # Log aggregated stats
+        #     if grad_stats:
+        #         wandb.log(grad_stats, step=step)
+        # except Exception as e:
+        #     logger.warning(f"Error logging gradient stats: {str(e)}")
 
 
 if __name__ == "__main__":

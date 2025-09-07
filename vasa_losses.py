@@ -543,11 +543,13 @@ class VASALossModule:
         noise: Optional[Dict[str, torch.Tensor]] = None,
         return_metrics: bool = True,
         current_epoch: Optional[int] = None,
-        step: Optional[int] = None
+        step: Optional[int] = None,
+        generated_frames: Optional[torch.Tensor] = None,
+        target_frames: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
-        """Compute all losses including expression verification."""
+        """Compute all losses including expression verification and perceptual loss."""
         try:
-            logger.info("\n=== Computing Losses ===")
+            logger.debug("\n=== Computing Losses ===")
             losses = {}
             metrics = {}
             device = outputs['theta'].device
@@ -672,20 +674,46 @@ class VASALossModule:
             logger.debug("\nChecking sync loss conditions:")
             logger.debug(f"Use sync loss: {self.config.loss.use_sync_loss}")
             
-            if self.config.loss.use_sync_loss:
+            if self.config.loss.use_sync_loss and generated_frames is not None:
                 logger.debug("Computing sync loss...")
-                sync_loss = self._compute_sync_loss(outputs, targets)
+                sync_loss = self._compute_sync_loss(generated_frames, targets)
                 losses['sync_loss'] = sync_loss * self.lambda_sync
                 logger.debug(f"Sync loss: {losses['sync_loss'].item():.6f}")
             else:
                 logger.debug("Skipping sync loss")
                 losses['sync_loss'] = torch.tensor(0.0, device=device)
 
-            # 5. VASA-1 Disentanglement losses
-            logger.debug("\nComputing disentanglement losses:")
-            disentangle_loss = self.compute_disentanglement_loss(targets, outputs, outputs)
-            losses['disentangle'] = disentangle_loss
-            logger.debug(f"Disentanglement loss: {disentangle_loss.item():.6f}")
+            # 5. VASA-1 Disentanglement losses (Section 3.1)
+            logger.debug("\nComputing VASA disentanglement losses:")
+            
+            # For VASA disentanglement, we need motion outputs with pose and dynamics
+            # Check if we have the required outputs
+            has_pose = 'theta' in outputs
+            has_dynamics = 'expression' in outputs or 'expression_embed' in outputs
+            
+            # 5. VASA-1 Disentanglement losses (Section 3.1)
+            if has_pose and has_dynamics:
+                # Get source identity from target frames (first frame)
+                source_identity = target_frames[:, 0] if target_frames is not None else None
+                
+                # Pass the correct parameters
+                disentangle_loss, l_consist, l_cross_id = self.compute_disentanglement_loss(
+                    motion_outputs=outputs,
+                    target_frames=target_frames,
+                    generated_frames=generated_frames,  # This should be the actual generated frames
+                    source_identity=source_identity     # Pass the source identity explicitly
+                )
+            else:
+                # Missing required outputs for disentanglement
+                logger.error(f"DISENTANGLE: Missing required outputs (pose={has_pose}, dynamics={has_dynamics})")
+                disentangle_loss = torch.tensor(0.0, device=device)
+                l_consist = torch.tensor(0.0, device=device)
+                l_cross_id = torch.tensor(0.0, device=device)
+
+
+            # Add disentanglement losses to metrics
+            metrics['l_consist'] = l_consist.item() if torch.is_tensor(l_consist) else l_consist
+            metrics['l_cross_id'] = l_cross_id.item() if torch.is_tensor(l_cross_id) else l_cross_id
             
             # 6. Velocity and smoothness regularization
             logger.debug("\nComputing velocity/smoothness losses:")
@@ -720,10 +748,54 @@ class VASALossModule:
             logger.debug(f"  Sync term: {sync_term.item():.6f}")
             logger.debug(f"  Disentangle term: {disentangle_term.item():.6f}")
             logger.debug(f"  Velocity/smoothness term: {vel_smooth_term.item():.6f}")
+            
+            # Get diversity term
+            diversity_term = losses.get('motion_diversity', torch.tensor(0.0, device=device))
+            logger.debug(f"  Diversity term: {diversity_term.item():.6f}")
+            
+            # Compute LPIPS perceptual loss (VASA paper Section 3.3)
+            perceptual_term = torch.tensor(0.0, device=device)
+            if generated_frames is not None and target_frames is not None:
+                logger.debug("Computing LPIPS perceptual loss...")
+                try:
+                    # Ensure frames are in correct shape [B*T, C, H, W]
+                    if generated_frames.dim() == 5:  # [B, T, C, H, W]
+                        B, T, C, H, W = generated_frames.shape
+                        gen_flat = generated_frames.view(B * T, C, H, W)
+                        tgt_flat = target_frames.view(B * T, C, H, W)
+                    else:
+                        gen_flat = generated_frames
+                        tgt_flat = target_frames
+                    
+                    # Normalize to [-1, 1] for LPIPS (expects this range)
+                    if gen_flat.max() > 1.0:
+                        gen_flat = gen_flat / 127.5 - 1.0
+                        tgt_flat = tgt_flat / 127.5 - 1.0
+                    elif gen_flat.min() >= 0:  # If in [0, 1], convert to [-1, 1]
+                        gen_flat = gen_flat * 2.0 - 1.0
+                        tgt_flat = tgt_flat * 2.0 - 1.0
+                    
+                    # Compute LPIPS loss
+                    perceptual_loss = self.loss_fn_alex(gen_flat, tgt_flat).mean()
+                    
+                    # Apply lambda_perceptual weight
+                    lambda_perceptual = self.config.loss.get('lambda_perceptual', 0.5)
+                    perceptual_term = perceptual_loss * lambda_perceptual
+                    losses['perceptual'] = perceptual_term
+                    
+                    logger.debug(f"  Perceptual loss (LPIPS): {perceptual_loss.item():.6f}")
+                    logger.debug(f"  Weighted perceptual term: {perceptual_term.item():.6f}")
+                    
+                except Exception as e:
+                    logger.warning(f"Could not compute perceptual loss: {e}")
+                    losses['perceptual'] = torch.tensor(0.0, device=device)
+            else:
+                logger.debug("  No frames provided for perceptual loss")
+                losses['perceptual'] = torch.tensor(0.0, device=device)
 
-            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term
+            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + diversity_term + perceptual_term
             losses['total'] = total_loss
-            logger.debug(f"Total loss: {total_loss.item():.6f}")
+            logger.debug(f"Total loss (with perceptual): {total_loss.item():.6f}")
 
             # Return results
             if return_metrics:
@@ -739,6 +811,109 @@ class VASALossModule:
 
         
 
+    def generate_frames_from_motion(
+        self,
+        motion: Dict[str, torch.Tensor],
+        source_image: torch.Tensor,
+        max_frames: Optional[int] = None
+    ) -> torch.Tensor:
+        """
+        Generate frames from motion parameters using volumetric avatar.
+        
+        Args:
+            motion: Dictionary with 'theta', 'expression', etc.
+            source_image: Source identity image [B, C, H, W]
+            max_frames: Maximum number of frames to generate (for memory)
+            
+        Returns:
+            Generated frames [B, T, C, H, W]
+        """
+        try:
+            with torch.no_grad():
+                B = source_image.shape[0]
+                T = motion['theta'].shape[1] if 'theta' in motion else 1
+                
+                # Limit frames for memory
+                if max_frames is not None and T > max_frames:
+                    T = max_frames
+                    motion = {k: v[:, :T] if v.dim() > 1 else v for k, v in motion.items()}
+                
+                device = source_image.device
+                frames = []
+                
+                # Get source identity embeddings
+                source_mask = self.volumetric_avatar.face_idt.forward(source_image)[0]
+                source_mask = (source_mask > 0.6).float()
+                source_masked = source_image * source_mask
+                
+                # Get identity embedding
+                idt_embed = self.volumetric_avatar.idt_embedder_nw(source_masked)
+                
+                # Get canonical volume
+                source_latents = self.volumetric_avatar.local_encoder_nw(source_masked)
+                c = self.volumetric_avatar.args.latent_volume_channels
+                d = self.volumetric_avatar.args.latent_volume_depth
+                s = self.volumetric_avatar.args.latent_volume_size
+                
+                source_volume = source_latents.view(B, c, d, s, s)
+                if hasattr(self.volumetric_avatar, 'volume_source_nw'):
+                    source_volume = self.volumetric_avatar.volume_source_nw(source_volume)
+                canonical_volume = self.volumetric_avatar.volume_process_nw(source_volume)
+                
+                # Generate each frame
+                for t in range(T):
+                    # Extract frame parameters
+                    frame_theta = motion['theta'][:, t] if 'theta' in motion else torch.eye(3, 4).unsqueeze(0).to(device)
+                    frame_expr = motion['expression'][:, t] if 'expression' in motion else torch.zeros(B, 256).to(device)
+                    
+                    # Create data dict for this frame
+                    data_dict = {
+                        'source_img': source_image,
+                        'target_img': source_image,  # Dummy
+                        'source_theta': frame_theta,
+                        'target_theta': frame_theta,
+                        'source_pose_embed': frame_expr.unsqueeze(1),
+                        'target_pose_embed': frame_expr.unsqueeze(1),
+                    }
+                    
+                    # Generate frame through decoder
+                    try:
+                        # Get embeddings
+                        source_warp_embed_dict, target_warp_embed_dict, _, embed_dict = \
+                            self.volumetric_avatar.predict_embed(data_dict)
+                        
+                        # Apply motion warping
+                        grid = self.volumetric_avatar.identity_grid_3d.repeat_interleave(B, dim=0)
+                        target_rotation_warp = grid.bmm(frame_theta[:, :3].transpose(1, 2)).view(B, d, s, s, 3)
+                        
+                        # Warp canonical volume
+                        warped_volume = self.volumetric_avatar.grid_sample(canonical_volume, target_rotation_warp)
+                        target_latent_feats = warped_volume.view(B, c * d, s, s)
+                        
+                        # Generate frame
+                        frame, _, _, _ = self.volumetric_avatar.decoder_nw(
+                            data_dict,
+                            embed_dict,
+                            target_latent_feats,
+                            None
+                        )
+                        frames.append(frame)
+                        
+                    except Exception as e:
+                        logger.warning(f"Error generating frame {t}: {e}")
+                        # Use source image as fallback
+                        frames.append(source_image)
+                
+                # Stack frames [B, T, C, H, W]
+                if frames:
+                    return torch.stack(frames, dim=1)
+                else:
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"Error in generate_frames_from_motion: {e}")
+            return None
+    
     def _generate_verification_frame(self, data_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Helper method to generate verification frame through EMO pipeline with memory optimizations."""
         try:
@@ -881,6 +1056,73 @@ class VASALossModule:
             logger.error(f"Error in batch processing: {str(e)}")
             logger.error(traceback.format_exc())
             raise
+    
+    def _compute_sync_loss(
+        self,
+        generated_frames: torch.Tensor,  # [B, T, C, H, W]
+        targets: Dict[str, torch.Tensor]
+    ) -> torch.Tensor:
+        """
+        Compute sync loss using SyncNet to evaluate lip-audio synchronization.
+        Returns a loss that should be minimized (lower is better).
+        """
+        try:
+            # Get audio features - prefer MFCC for SyncNet, fallback to audio_features
+            if 'mfcc' in targets:
+                audio_features = targets['mfcc']
+                logger.debug("Using MFCC features for sync loss")
+            elif 'audio_features' in targets:
+                audio_features = targets['audio_features']
+                logger.debug("Using audio_features for sync loss")
+            else:
+                logger.warning("No audio features (mfcc or audio_features) in targets, returning zero sync loss")
+                return torch.tensor(0.0, device=generated_frames.device)
+            
+            # Ensure proper shapes
+            B, T = generated_frames.shape[:2]
+            
+            # Only compute sync loss if we have enough frames
+            if T < 5:  # SyncNet needs at least 5 frames
+                logger.debug(f"Not enough frames for sync loss (T={T})")
+                return torch.tensor(0.0, device=generated_frames.device)
+            
+            # Prepare frames for SyncNet (expects [B, C, T, H, W])
+            if generated_frames.dim() == 5 and generated_frames.shape[1] == T:
+                frames_for_sync = generated_frames.transpose(1, 2)  # [B, T, C, H, W] -> [B, C, T, H, W]
+            else:
+                frames_for_sync = generated_frames
+            
+            # Prepare audio (SyncNet expects [B, 1, T, D])
+            if audio_features.dim() == 3:  # [B, T, D]
+                audio_for_sync = audio_features.unsqueeze(1)  # -> [B, 1, T, D]
+            else:
+                audio_for_sync = audio_features
+            
+            # Evaluate sync with SyncNet
+            with torch.no_grad():
+                offset, confidence = self.syncnet.evaluate(
+                    frames=frames_for_sync,
+                    audio_features=audio_for_sync,
+                    batch_size=B
+                )
+            
+            # Convert confidence to loss
+            # SyncNet confidence is higher when sync is better
+            # We want to minimize loss, so use negative confidence
+            # Scale by 5.0 to make the loss magnitude reasonable
+            sync_loss = 5.0 - confidence.mean()  # Target confidence of 5.0
+            
+            # Ensure loss is positive
+            sync_loss = torch.clamp(sync_loss, min=0.0)
+            
+            logger.debug(f"Sync confidence: {confidence.mean().item():.4f}, loss: {sync_loss.item():.4f}")
+            
+            return sync_loss
+            
+        except Exception as e:
+            logger.error(f"Error computing sync loss: {str(e)}")
+            logger.error(traceback.format_exc())
+            return torch.tensor(0.0, device=generated_frames.device)
         
     def evaluate_sync_quality(
         self,
@@ -1444,7 +1686,7 @@ class VASALossModule:
         
         # Handle sequence vs single frame
         if len(pred_np.shape) > 1 and pred_np.shape[0] > 1:
-            logger.info(f"Got sequence of shape {pred_np.shape}, extracting first frame")
+            logger.debug(f"Got sequence of shape {pred_np.shape}, extracting first frame")
             pred_np = pred_np[0]
             target_np = target_np[0]
         
@@ -2180,73 +2422,151 @@ class VASALossModule:
         
         return orth_error < eps and det_error < eps
     
+
     def compute_disentanglement_loss(
         self, 
-        batch: Dict[str, torch.Tensor],
-        pred_landmarks: Dict[str, torch.Tensor],
-        pred_motion: Dict[str, torch.Tensor]
-    ) -> torch.Tensor:
+        motion_outputs: Dict[str, torch.Tensor],
+        target_frames: Optional[torch.Tensor] = None,
+        generated_frames: Optional[torch.Tensor] = None,
+        source_identity: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Compute VASA-1 style disentanglement losses for better latent space separation.
-        Includes l_consist (pairwise transfer) and l_cross_id (identity preservation).
+        Compute VASA-1 style disentanglement losses as described in Section 3.1.
+        
+        Following VASA paper:
+        - l_consist: Pairwise head pose and facial dynamics transfer loss
+        - l_cross_id: Face identity similarity loss for cross-identity transfer
+        
+        Args:
+            motion_outputs: Dictionary containing predicted motion parameters
+            target_frames: Optional ground truth frames for reference [B, T, C, H, W]
+            generated_frames: Optional generated frames from motion [B, T, C, H, W]
+            source_identity: Optional source identity image [B, C, H, W]
         """
         try:
             device = self.device
-            B, T = batch['expression'].shape[:2] if 'expression' in batch else (1, 1)
             
-            if T < 2:
-                return torch.tensor(0.0, device=device)
-            
-            # Sample two random frames
-            idx_i = torch.randint(0, T, (B,), device=device)
-            idx_j = torch.randint(0, T, (B,), device=device)
-            
-            # L_consist: Pairwise transfer loss for pose/dynamics disentanglement
+            # Initialize losses
             l_consist = torch.tensor(0.0, device=device)
-            
-            if 'theta' in pred_motion and 'expression' in pred_landmarks:
-                # Extract pose and dynamics at different time steps
-                pose_i = pred_motion['theta'][torch.arange(B), idx_i]
-                pose_j = pred_motion['theta'][torch.arange(B), idx_j]
-                dyn_i = pred_landmarks['expression'][torch.arange(B), idx_i] if 'expression' in pred_landmarks else None
-                dyn_j = pred_landmarks['expression'][torch.arange(B), idx_j] if 'expression' in pred_landmarks else None
-                
-                if dyn_i is not None and dyn_j is not None:
-                    # Compute discrepancy when swapping components
-                    # This encourages disentanglement between pose and dynamics
-                    swap_diff = F.mse_loss(dyn_i, dyn_j.detach()) + F.mse_loss(pose_i, pose_j.detach())
-                    l_consist = swap_diff * self.lambda_consist
-            
-            # L_cross_id: Cross-identity similarity loss  
             l_cross_id = torch.tensor(0.0, device=device)
             
-            if self.id_extractor is not None and 'frames' in batch:
-                try:
-                    # Extract identity features from original frames
-                    frames_i = batch['frames'][torch.arange(B), idx_i]
-                    frames_j = batch['frames'][torch.arange(B), idx_j]
-                    
-                    # Resize frames for identity extractor (expects 160x160)
-                    frames_i_resized = F.interpolate(frames_i, size=(160, 160), mode='bilinear', align_corners=False)
-                    frames_j_resized = F.interpolate(frames_j, size=(160, 160), mode='bilinear', align_corners=False)
-                    
-                    with torch.no_grad():
-                        id_feat_i = self.id_extractor(frames_i_resized)
-                        id_feat_j = self.id_extractor(frames_j_resized)
-                    
-                    # Encourage identity preservation (maximize cosine similarity)
-                    l_cross_id = (1 - F.cosine_similarity(id_feat_i, id_feat_j, dim=1).mean()) * self.lambda_cross_id
-                    
-                except Exception as e:
-                    logger.debug(f"Cross-id loss computation skipped: {e}")
-                    l_cross_id = torch.tensor(0.0, device=device)
+            # Check if we have the required outputs
+            if 'theta' not in motion_outputs:
+                logger.debug("DISENTANGLE: No theta (pose) in outputs, skipping")
+                return l_consist, l_consist, l_consist
             
-            return l_consist + l_cross_id
+            B, T = motion_outputs['theta'].shape[:2]
+            
+            if T < 2:
+                logger.debug(f"DISENTANGLE: Sequence too short (T={T}), need at least 2 frames")
+                return l_consist, l_consist, l_consist
+            
+            # 1. L_consist: Pairwise transfer loss (VASA Section 3.1)
+            # Transfer pose from frame i to j and dynamics from j to i
+            # Get dynamics - could be 'expression', 'expression_embed', or individual components
+            dynamics_key = None
+            if 'expression_embed' in motion_outputs:
+                dynamics_key = 'expression_embed'
+            elif 'expression' in motion_outputs:
+                dynamics_key = 'expression'
+            
+            if dynamics_key:
+                # Sample two different time points
+                idx_i = 0  # First frame
+                idx_j = T - 1  # Last frame
+                
+                # Get pose (theta) and dynamics at different times
+                pose_i = motion_outputs['theta'][:, idx_i]  # [B, 3, 4]
+                pose_j = motion_outputs['theta'][:, idx_j]
+                dyn_i = motion_outputs[dynamics_key][:, idx_i]  # [B, D]
+                dyn_j = motion_outputs[dynamics_key][:, idx_j]
+                
+                # Following VASA Eq in Section 3.1:
+                # The discrepancy between swapped combinations should be minimized
+                # This encourages disentanglement between pose and dynamics
+                pose_diff = F.mse_loss(pose_i, pose_j.detach())
+                dyn_diff = F.mse_loss(dyn_i, dyn_j.detach())
+                
+                l_consist = (pose_diff + dyn_diff) * self.lambda_consist
+                logger.debug(f"DISENTANGLE: l_consist computed = {l_consist.item():.6f} (pose_diff={pose_diff.item():.4f}, dyn_diff={dyn_diff.item():.4f})")
+            else:
+                logger.debug("DISENTANGLE: No dynamics (expression) found, l_consist = 0")
+
+            # 2. L_cross_id: Identity preservation loss (VASA Section 3.1)
+            # Ensures identity is preserved when transferring motion
+            if self.id_extractor is not None:
+                try:
+                    # Determine what frames to use for identity comparison
+                    source_frame = None
+                    generated_frame = None
+                    
+                    # Priority 1: Use provided source identity and generated frames
+                    if source_identity is not None and generated_frames is not None:
+                        source_frame = source_identity  # [B, C, H, W]
+                        # Use first generated frame for comparison
+                        generated_frame = generated_frames[:, 0]  # [B, C, H, W]
+                        logger.debug("Using provided source_identity and generated_frames")
+                    
+                    # Priority 2: Use target frames as source identity reference
+                    elif target_frames is not None and generated_frames is not None:
+                        source_frame = target_frames[:, 0]  # First frame as identity reference
+                        generated_frame = generated_frames[:, 0]  # First generated frame
+                        logger.debug("Using target_frames[0] as source identity")
+                    
+                    # Priority 3: Fall back to comparing different time points in target frames
+                    # (This is the original flawed implementation, but kept as last resort)
+                    elif target_frames is not None and target_frames.shape[1] >= 2:
+                        source_frame = target_frames[:, 0]   # Frame at time i (first)
+                        generated_frame = target_frames[:, -1]  # Frame at time j (last)
+                        logger.debug("Fallback: comparing target_frames across time (suboptimal)")
+                    
+                    if source_frame is not None and generated_frame is not None:
+                        # Resize frames for identity extractor (expects 160x160)
+                        source_resized = F.interpolate(
+                            source_frame, size=(160, 160), 
+                            mode='bilinear', align_corners=False
+                        )
+                        generated_resized = F.interpolate(
+                            generated_frame, size=(160, 160),
+                            mode='bilinear', align_corners=False
+                        )
+                        
+                        with torch.no_grad():
+                            # Extract identity features
+                            id_feat_source = self.id_extractor(source_resized)
+                            id_feat_generated = self.id_extractor(generated_resized)
+                        
+                        # Following VASA: maximize cosine similarity to preserve identity
+                        # Use 1 - cosine_similarity as loss (minimize to maximize similarity)
+                        similarity = F.cosine_similarity(id_feat_source, id_feat_generated, dim=1).mean()
+                        l_cross_id = (1 - similarity) * self.lambda_cross_id
+                        
+                        logger.debug(f"DISENTANGLE: l_cross_id computed = {l_cross_id.item():.6f} (similarity={similarity.item():.4f})")
+                    else:
+                        logger.debug("DISENTANGLE: No suitable frames for l_cross_id computation")
+                        
+                except Exception as e:
+                    logger.debug(f"Cross-id loss computation failed: {e}")
+                    l_cross_id = torch.tensor(0.0, device=device)
+            else:
+                logger.debug(f"DISENTANGLE: id_extractor not available")
+            
+            # Return both the total and individual components
+            total_disentangle = l_consist + l_cross_id
+            
+            logger.debug(
+                f"VASA Disentanglement - l_consist: {l_consist.item():.6f}, "
+                f"l_cross_id: {l_cross_id.item():.6f}, "
+                f"total: {total_disentangle.item():.6f}"
+            )
+            
+            return total_disentangle, l_consist, l_cross_id
             
         except Exception as e:
-            logger.error(f"Error in disentanglement loss: {str(e)}")
-            return torch.tensor(0.0, device=device)
-    
+            logger.error(f"Error in VASA disentanglement loss: {str(e)}")
+            zero_tensor = torch.tensor(0.0, device=device)
+            return zero_tensor, zero_tensor, zero_tensor
+        
     def compute_velocity_smoothness_loss(
         self,
         pred: Dict[str, torch.Tensor],
