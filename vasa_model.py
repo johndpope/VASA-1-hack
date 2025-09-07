@@ -2037,13 +2037,21 @@ class MotionSequenceHandler:
             
     def prepare_motion_data(self, window: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Prepare motion data from window, ensuring batch dimension is preserved."""
-        return {
+        motion_data = {
             'theta': window['theta'],            # Should be [B, T, 3, 4]
             'scale': window['scale'],            # Should be [B, T, 3]
             'rotation': window['rotation'],      # Should be [B, T, 3]
             'translation': window['translation'], # Should be [B, T, 3]
             'expression_embed': window['expression_embed']  # Should be [B, T, 128]
-        }  
+        }
+        
+        # Include audio features for sync loss
+        if 'audio_features' in window:
+            motion_data['audio_features'] = window['audio_features']  # Should be [B, T, D]
+        elif 'mfcc' in window:
+            motion_data['audio_features'] = window['mfcc']  # MFCC features
+        
+        return motion_data  
 
     def merge_windows(self, windows, total_frames, device):
         """Merge overlapping motion sequence windows."""
