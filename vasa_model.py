@@ -2045,11 +2045,11 @@ class MotionSequenceHandler:
             'expression_embed': window['expression_embed']  # Should be [B, T, 128]
         }
         
-        # Include audio features for sync loss
+        # Include audio features for sync loss and other audio-related losses
         if 'audio_features' in window:
             motion_data['audio_features'] = window['audio_features']  # Should be [B, T, D]
-        elif 'mfcc' in window:
-            motion_data['audio_features'] = window['mfcc']  # MFCC features
+        if 'mfcc' in window:
+            motion_data['mfcc'] = window['mfcc']  # MFCC features for SyncNet
         
         return motion_data  
 
