@@ -18,6 +18,7 @@ import cv2
 from typing import Dict, Optional, List
 from collections import defaultdict
 from omegaconf import OmegaConf
+from datetime import datetime
 from vasa_model import VASAModel, MotionSequenceHandler
 from vasa_losses import VASALossModule
 from tdd_progressive_loss import TDDProgressiveLoss
@@ -767,6 +768,14 @@ class VASATrainer:
                 self.best_val_loss = current_loss
                 self.save_checkpoint(is_best=True)
                 logger.info(f"New best model saved with loss: {current_loss:.4f}")
+            
+            # ALWAYS save a checkpoint every epoch (in addition to best model)
+            # This prevents losing hours of training if memory crashes
+            epoch_checkpoint_path = self.output_dir / f'checkpoint_epoch_{epoch:04d}.pt'
+            self.save_epoch_checkpoint(epoch_checkpoint_path)
+            
+            # Keep only last 3 epoch checkpoints to save disk space
+            self.cleanup_old_epoch_checkpoints(keep_last=3)
 
 
     def train_epoch(self) -> Dict[str, float]:
@@ -945,7 +954,8 @@ class VASATrainer:
                                             # Generate only 2 frames instead of T frames
                                             generated_frames = self.model.volumetric_avatar.generate_frames_from_motion(
                                                 motion_outputs=sparse_outputs,
-                                                source_params=source_params
+                                                source_params=source_params,
+                                                use_black_background=True  # Use black background for training
                                             )
                                             generated_frames = generated_frames.detach()
                                             
@@ -956,7 +966,8 @@ class VASATrainer:
                                             # Generate all frames (more faithful to paper but memory intensive)
                                             generated_frames = self.model.volumetric_avatar.generate_frames_from_motion(
                                                 motion_outputs=outputs,
-                                                source_params=source_params
+                                                source_params=source_params,
+                                                use_black_background=True  # Use black background for training
                                             )
                                             generated_frames = generated_frames.detach()
                                         
@@ -1018,8 +1029,19 @@ class VASATrainer:
                             self.scheduler.step()
                             self.optimizer.zero_grad()
                             
-                            batch_total_loss += losses['total'].item()
-                            logger.info(f"  Window {window_idx} completed - loss: {losses['total'].item():.4f}")
+                            # Store loss value before cleanup
+                            window_loss = losses['total'].item()
+                            batch_total_loss += window_loss
+                            logger.info(f"  Window {window_idx} completed - loss: {window_loss:.4f}")
+                            
+                            # Clear intermediate tensors to prevent memory buildup
+                            del losses
+                            if 'outputs' in locals():
+                                del outputs
+                            if 'noise' in locals():
+                                del noise
+                            if 'noised_motion' in locals():
+                                del noised_motion
                             
                             # Add row to metrics table
                             if self.config.wandb.enabled and self.accelerator.is_local_main_process:
@@ -1092,7 +1114,8 @@ class VASATrainer:
                                                 # Generate single frame only
                                                 single_frame_generated = self.model.volumetric_avatar.generate_frames_from_motion(
                                                     motion_outputs=single_motion,
-                                                    source_params={'source_img': source_img}
+                                                    source_params={'source_img': source_img},
+                                                    use_black_background=True  # Use black background for thumbnails
                                                 ).detach()
                                                 
                                                 # Clear memory immediately
@@ -1133,13 +1156,20 @@ class VASATrainer:
                             logger.error(traceback.format_exc())
                             continue
 
-                # Average metrics across windows
-                avg_metrics = {
-                    k: torch.stack(v).mean().item() if isinstance(v[0], torch.Tensor)
-                    else sum(v) / len(v)
-                    for k, v in batch_metrics.items()
-                }
+                # Average metrics across windows and immediately convert to scalars
+                avg_metrics = {}
+                for k, v in batch_metrics.items():
+                    if isinstance(v[0], torch.Tensor):
+                        # Stack, compute mean, and immediately convert to scalar
+                        stacked = torch.stack(v)
+                        avg_metrics[k] = stacked.mean().item()
+                        del stacked  # Free memory immediately
+                    else:
+                        avg_metrics[k] = sum(v) / len(v)
                 avg_metrics['total'] = batch_total_loss / len(windows)
+                
+                # Clear batch_metrics to free memory
+                del batch_metrics
                 
                 # Update metrics
                 self.train_metrics.update(avg_metrics)
@@ -1156,6 +1186,16 @@ class VASATrainer:
                         avg_metrics,
                         grad_norms
                     )
+                
+                # Periodic CUDA cache clearing to prevent memory fragmentation
+                if batch_idx % 10 == 0:
+                    torch.cuda.empty_cache()
+                    if batch_idx % 50 == 0:
+                        # Log memory stats every 50 batches
+                        if torch.cuda.is_available():
+                            allocated = torch.cuda.memory_allocated() / 1024**3
+                            reserved = torch.cuda.memory_reserved() / 1024**3
+                            logger.info(f"GPU Memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
                 
                 # Update progress bar
                 self.progress_bar.update(1)
@@ -1902,6 +1942,61 @@ class VASATrainer:
         except Exception as e:
             logger.error(f"Error saving checkpoint: {str(e)}")
             logger.error(traceback.format_exc())
+    
+    def save_epoch_checkpoint(self, save_path: Path):
+        """Save checkpoint for current epoch (called every epoch).
+        
+        Args:
+            save_path: Path to save the checkpoint
+        """
+        if self.output_dir is None:
+            return
+            
+        try:
+            # Get unwrapped model state dict
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+            state_dict = unwrapped_model.state_dict()
+            
+            checkpoint = {
+                'epoch': self.current_epoch,
+                'global_step': self.global_step,
+                'model_state_dict': state_dict,
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+                'loss': self.best_val_loss,
+                'config': self.config,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(checkpoint, save_path)
+            logger.info(f"💾 Saved epoch checkpoint to {save_path}")
+            
+        except Exception as e:
+            logger.error(f"Error saving epoch checkpoint: {str(e)}")
+            logger.error(traceback.format_exc())
+    
+    def cleanup_old_epoch_checkpoints(self, keep_last: int = 3):
+        """Remove old epoch checkpoints to save disk space.
+        
+        Args:
+            keep_last: Number of recent epoch checkpoints to keep
+        """
+        if self.output_dir is None:
+            return
+            
+        try:
+            # Find all epoch checkpoint files
+            epoch_checkpoints = sorted(self.output_dir.glob('checkpoint_epoch_*.pt'))
+            
+            if len(epoch_checkpoints) > keep_last:
+                # Remove old checkpoints
+                for checkpoint_path in epoch_checkpoints[:-keep_last]:
+                    checkpoint_path.unlink()
+                    logger.info(f"Removed old checkpoint: {checkpoint_path}")
+                    
+        except Exception as e:
+            logger.error(f"Error cleaning up old checkpoints: {str(e)}")
             
 
     def load_checkpoint(self, checkpoint_path: str):
