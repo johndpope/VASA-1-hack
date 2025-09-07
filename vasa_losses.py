@@ -674,9 +674,9 @@ class VASALossModule:
             logger.debug("\nChecking sync loss conditions:")
             logger.debug(f"Use sync loss: {self.config.loss.use_sync_loss}")
             
-            if self.config.loss.use_sync_loss:
+            if self.config.loss.use_sync_loss and generated_frames is not None:
                 logger.debug("Computing sync loss...")
-                sync_loss = self._compute_sync_loss(outputs, targets)
+                sync_loss = self._compute_sync_loss(generated_frames, targets)
                 losses['sync_loss'] = sync_loss * self.lambda_sync
                 logger.debug(f"Sync loss: {losses['sync_loss'].item():.6f}")
             else:
@@ -1052,6 +1052,69 @@ class VASALossModule:
             logger.error(f"Error in batch processing: {str(e)}")
             logger.error(traceback.format_exc())
             raise
+    
+    def _compute_sync_loss(
+        self,
+        generated_frames: torch.Tensor,  # [B, T, C, H, W]
+        targets: Dict[str, torch.Tensor]
+    ) -> torch.Tensor:
+        """
+        Compute sync loss using SyncNet to evaluate lip-audio synchronization.
+        Returns a loss that should be minimized (lower is better).
+        """
+        try:
+            # Get audio features
+            if 'audio_features' not in targets:
+                logger.warning("No audio features in targets, returning zero sync loss")
+                return torch.tensor(0.0, device=generated_frames.device)
+            
+            audio_features = targets['audio_features']
+            
+            # Ensure proper shapes
+            B, T = generated_frames.shape[:2]
+            
+            # Only compute sync loss if we have enough frames
+            if T < 5:  # SyncNet needs at least 5 frames
+                logger.debug(f"Not enough frames for sync loss (T={T})")
+                return torch.tensor(0.0, device=generated_frames.device)
+            
+            # Prepare frames for SyncNet (expects [B, C, T, H, W])
+            if generated_frames.dim() == 5 and generated_frames.shape[1] == T:
+                frames_for_sync = generated_frames.transpose(1, 2)  # [B, T, C, H, W] -> [B, C, T, H, W]
+            else:
+                frames_for_sync = generated_frames
+            
+            # Prepare audio (SyncNet expects [B, 1, T, D])
+            if audio_features.dim() == 3:  # [B, T, D]
+                audio_for_sync = audio_features.unsqueeze(1)  # -> [B, 1, T, D]
+            else:
+                audio_for_sync = audio_features
+            
+            # Evaluate sync with SyncNet
+            with torch.no_grad():
+                offset, confidence = self.syncnet.evaluate(
+                    frames=frames_for_sync,
+                    audio_features=audio_for_sync,
+                    batch_size=B
+                )
+            
+            # Convert confidence to loss
+            # SyncNet confidence is higher when sync is better
+            # We want to minimize loss, so use negative confidence
+            # Scale by 5.0 to make the loss magnitude reasonable
+            sync_loss = 5.0 - confidence.mean()  # Target confidence of 5.0
+            
+            # Ensure loss is positive
+            sync_loss = torch.clamp(sync_loss, min=0.0)
+            
+            logger.debug(f"Sync confidence: {confidence.mean().item():.4f}, loss: {sync_loss.item():.4f}")
+            
+            return sync_loss
+            
+        except Exception as e:
+            logger.error(f"Error computing sync loss: {str(e)}")
+            logger.error(traceback.format_exc())
+            return torch.tensor(0.0, device=generated_frames.device)
         
     def evaluate_sync_quality(
         self,
