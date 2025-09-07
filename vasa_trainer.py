@@ -1038,7 +1038,14 @@ class VASATrainer:
                             if batch_idx % 5 == 0 and window_idx == 0:  # Only log first window
                                 if 'outputs' in locals():
                                     self._log_visualizations(outputs, motion_data, self.global_step)
-                                    self._log_gradient_stats(self.global_step)
+                                    # Gradient stats disabled for performance
+                                    # self._log_gradient_stats(self.global_step)
+                            
+                            # Store outputs needed for thumbnail before cleanup (every batch for first window)
+                            stored_outputs = None
+                            if 'outputs' in locals() and window_idx == 0:  # Generate thumbnail for every batch's first window
+                                stored_outputs = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v 
+                                                for k, v in outputs.items()}
                             
                             # Clear intermediate tensors to prevent memory buildup
                             del losses
@@ -1080,8 +1087,8 @@ class VASATrainer:
                                 )
                             
                             # Generate thumbnail with single frame only to save memory
-                            # Generate more frequently: every 10 batches or on first batch
-                            if (batch_idx % 10 == 0 or batch_idx == 0) and window_idx == 0 and self.config.wandb.enabled:
+                            # Generate for every batch to ensure we get thumbnails every epoch
+                            if window_idx == 0 and self.config.wandb.enabled and stored_outputs is not None:
                                 try:
                                     from thumbnail_generator import generate_window_thumbnail
                                     import random
@@ -1106,11 +1113,12 @@ class VASATrainer:
                                                 
                                                 # Extract single frame motion params
                                                 single_motion = {}
-                                                for key in outputs:
-                                                    if isinstance(outputs[key], torch.Tensor) and outputs[key].dim() > 2:
-                                                        single_motion[key] = outputs[key][:, frame_idx:frame_idx+1]
-                                                    else:
-                                                        single_motion[key] = outputs[key]
+                                                if stored_outputs is not None:
+                                                    for key in stored_outputs:
+                                                        if isinstance(stored_outputs[key], torch.Tensor) and stored_outputs[key].dim() > 2:
+                                                            single_motion[key] = stored_outputs[key][:, frame_idx:frame_idx+1].to(self.device)
+                                                        else:
+                                                            single_motion[key] = stored_outputs[key] if not isinstance(stored_outputs[key], torch.Tensor) else stored_outputs[key].to(self.device)
                                                 
                                                 # Generate single frame only
                                                 single_frame_generated = self.model.volumetric_avatar.generate_frames_from_motion(
@@ -2280,27 +2288,29 @@ class VASATrainer:
             return None
 
     def _log_gradient_stats(self, step: int):
-        """Log gradient statistics to WandB."""
-        if not self.config.wandb.enabled or not self.accelerator.is_local_main_process:
-            return
-            
-        try:
-            grad_stats = {}
-            for name, param in self.model.named_parameters():
-                if param.grad is not None:
-                    grad_norm = param.grad.norm().item()
-                    grad_stats[f"gradients/{name}_norm"] = grad_norm
-                    
-                    # Log histogram for important layers
-                    if any(key in name for key in ['motion_proj', 'transformer', 'output']):
-                        wandb.log({f"grad_hist/{name}": wandb.Histogram(param.grad.cpu().numpy())}, step=step)
-            
-            # Log aggregated stats
-            if grad_stats:
-                wandb.log(grad_stats, step=step)
-                
-        except Exception as e:
-            logger.warning(f"Error logging gradient stats: {str(e)}")
+        """Log gradient statistics to WandB - DISABLED for performance."""
+        return  # Disabled for performance
+        
+        # Original code kept for reference:
+        # if not self.config.wandb.enabled or not self.accelerator.is_local_main_process:
+        #     return
+        #     
+        # try:
+        #     grad_stats = {}
+        #     for name, param in self.model.named_parameters():
+        #         if param.grad is not None:
+        #             grad_norm = param.grad.norm().item()
+        #             grad_stats[f"gradients/{name}_norm"] = grad_norm
+        #             
+        #             # Log histogram for important layers - DISABLED
+        #             # if any(key in name for key in ['motion_proj', 'transformer', 'output']):
+        #             #     wandb.log({f"grad_hist/{name}": wandb.Histogram(param.grad.cpu().numpy())}, step=step)
+        #     
+        #     # Log aggregated stats
+        #     if grad_stats:
+        #         wandb.log(grad_stats, step=step)
+        # except Exception as e:
+        #     logger.warning(f"Error logging gradient stats: {str(e)}")
 
 
 if __name__ == "__main__":
