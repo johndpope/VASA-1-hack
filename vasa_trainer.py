@@ -925,7 +925,7 @@ class VASATrainer:
                             # Note: VASA paper doesn't specify needing all frames for these losses,
                             # and mathematically only 2 frames are used (first and last)
                             generated_frames = None
-                            use_sparse_frames = True  # Set to False to generate all frames (more memory intensive)
+                            use_sparse_frames = False  # Set to False to generate all frames (more memory intensive)
                             if (self.config.loss.lambda_consist > 0 or self.config.loss.lambda_cross_id > 0) and target_frames is not None:
                                 try:
                                     # Get source images (first frame of each video in the batch)
@@ -971,7 +971,7 @@ class VASATrainer:
                                             )
                                             generated_frames = generated_frames.detach()
                                         
-                                    logger.debug(f"Generated frames shape (sparse): {generated_frames.shape}")
+                                    logger.info(f"📲. Generated frames shape (sparse): {generated_frames.shape}")
                                     logger.debug(f"Target frames shape (sparse): {target_frames.shape}")
                                 except Exception as e:
                                     logger.error(f"Failed to generate frames for disentanglement loss: {str(e)}")
