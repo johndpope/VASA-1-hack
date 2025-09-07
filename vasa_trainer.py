@@ -1114,11 +1114,12 @@ class VASATrainer:
                                                 # Extract single frame motion params
                                                 single_motion = {}
                                                 if stored_outputs is not None:
+                                                    device = self.accelerator.device
                                                     for key in stored_outputs:
                                                         if isinstance(stored_outputs[key], torch.Tensor) and stored_outputs[key].dim() > 2:
-                                                            single_motion[key] = stored_outputs[key][:, frame_idx:frame_idx+1].to(self.device)
+                                                            single_motion[key] = stored_outputs[key][:, frame_idx:frame_idx+1].to(device)
                                                         else:
-                                                            single_motion[key] = stored_outputs[key] if not isinstance(stored_outputs[key], torch.Tensor) else stored_outputs[key].to(self.device)
+                                                            single_motion[key] = stored_outputs[key] if not isinstance(stored_outputs[key], torch.Tensor) else stored_outputs[key].to(device)
                                                 
                                                 # Generate single frame only
                                                 # Access the actual model (unwrap from accelerator if needed)
