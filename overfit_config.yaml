@@ -165,6 +165,14 @@ loss:
   lambda_velocity: 0.0001     # Velocity matching regularization
   lambda_smoothness: 0.0001   # Acceleration smoothness regularization
   
+  # Disentanglement loss configuration
+  disentangle_num_pairs: 3           # Number of frame pairs to sample for l_consist
+  disentangle_sampling: 'random'     # Sampling strategy: 'random', 'uniform', or 'extremes'
+  disentangle_compute_freq: 1        # Compute disentanglement losses every N steps (1=always)
+  disentangle_vis_freq: 100          # Visualize disentanglement every N steps
+  cross_id_num_frames: 3             # Number of frames to use for identity comparison
+  cross_id_normalize: true           # Normalize frames before identity extraction
+  
   # Frame generation for disentanglement losses
   use_sparse_frames: false    # If true, only generate first and last frame (saves 90% memory)
   
