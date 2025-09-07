@@ -34,14 +34,14 @@ diffusion:
 # Motion generation parameters
 motion:
   num_speed_buckets: 9
-  window_size: 20              # Reduced window size to match sequence length
-  stride: 10                   # Smaller stride for more overlap
-  context_size: 5              # Smaller context for memory
+  window_size: 50              # Original window size
+  stride: 25                   # Original stride
+  context_size: 10             # Original context size
   overlap_smooth: true
   # Add these:
-  min_window_size: 10          # Minimum window size for curriculum
-  max_window_size: 20          # Maximum window size
-  smooth_window: 3             # Temporal smoothing window size
+  min_window_size: 15          # Minimum window size for curriculum
+  max_window_size: 30          # Maximum window size
+  smooth_window: 5             # Temporal smoothing window size
   use_motion_prior: true       # Whether to use motion prior
 
   warmup_steps: 500          # Extended warmup for VASA-1 alignment
@@ -205,13 +205,13 @@ inference:
 
 # Dataset parameters
 dataset:
-  sequence_length: 20          # Reduced sequence length for memory
+  sequence_length: 25          # Back to original for window_size 50
   frame_size: [512, 512]
   preextract_audio: true
   cache_audio: true
   hop_length: 10
   max_videos: 50               # Start with fewer videos
-  min_sequence_length: 10     # Lower minimum for more samples
+  min_sequence_length: 15     # Minimum sequence length
   max_sequence_samples: 500   # Limit samples per epoch
   augmentation:
     enabled: false             # Disable augmentation initially for stability
