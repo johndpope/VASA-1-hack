@@ -2443,9 +2443,9 @@ class VASALossModule:
                         similarity = F.cosine_similarity(id_feat_i, id_feat_j, dim=1).mean()
                         l_cross_id = (1 - similarity) * self.lambda_cross_id
                         
-                        logger.info(f"DISENTANGLE: l_cross_id computed = {l_cross_id.item():.6f} (similarity={similarity.item():.4f})")
+                        logger.debug(f"DISENTANGLE: l_cross_id computed = {l_cross_id.item():.6f} (similarity={similarity.item():.4f})")
                     else:
-                        logger.info(f"DISENTANGLE: Not enough frames for l_cross_id (shape={target_frames.shape})")
+                        logger.debug(f"DISENTANGLE: Not enough frames for l_cross_id (shape={target_frames.shape})")
                     
                 except Exception as e:
                     logger.debug(f"Cross-id loss computation skipped: {e}")
@@ -2456,7 +2456,7 @@ class VASALossModule:
             # Return both the total and individual components
             total_disentangle = l_consist + l_cross_id
             
-            logger.info(
+            logger.debug(
                 f"VASA  - l_consist: {l_consist.item():.6f}, "
                 f"l_cross_id: {l_cross_id.item():.6f}, "
                 f"total: {total_disentangle.item():.6f}"

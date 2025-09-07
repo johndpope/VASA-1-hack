@@ -857,14 +857,14 @@ class VASATrainer:
 
                 # Process each window
                 for window_idx, window in enumerate(windows):
-                    logger.info(f"  Processing window {window_idx}/{len(windows)}")
+                    logger.debug(f"  Processing window {window_idx}/{len(windows)}")
                     if not window:
                         logger.warning(f"  Window {window_idx} is None")
                         continue
                     # Use accumulate per window instead of per batch
                     with self.accelerator.accumulate(self.model):
                         try:
-                            logger.info(f"  Preparing motion data for window {window_idx}")
+                            logger.debug(f"  Preparing motion data for window {window_idx}")
                             # Extract target motion parameters
                             motion_data = self.motion_handler.prepare_motion_data(window)
                             B = motion_data['theta'].shape[0]
@@ -971,8 +971,8 @@ class VASATrainer:
                                             )
                                             generated_frames = generated_frames.detach()
                                         
-                                    logger.info(f"Generated frames shape (sparse): {generated_frames.shape}")
-                                    logger.info(f"Target frames shape (sparse): {target_frames.shape}")
+                                    logger.debug(f"Generated frames shape (sparse): {generated_frames.shape}")
+                                    logger.debug(f"Target frames shape (sparse): {target_frames.shape}")
                                 except Exception as e:
                                     logger.error(f"Failed to generate frames for disentanglement loss: {str(e)}")
                                     generated_frames = None
@@ -1121,7 +1121,9 @@ class VASATrainer:
                                                             single_motion[key] = stored_outputs[key] if not isinstance(stored_outputs[key], torch.Tensor) else stored_outputs[key].to(self.device)
                                                 
                                                 # Generate single frame only
-                                                single_frame_generated = self.model.volumetric_avatar.generate_frames_from_motion(
+                                                # Access the actual model (unwrap from accelerator if needed)
+                                                actual_model = self.accelerator.unwrap_model(self.model) if hasattr(self, 'accelerator') else self.model
+                                                single_frame_generated = actual_model.volumetric_avatar.generate_frames_from_motion(
                                                     motion_outputs=single_motion,
                                                     source_params={'source_img': source_img},
                                                     use_black_background=True  # Use black background for thumbnails
@@ -1139,23 +1141,26 @@ class VASATrainer:
                                     thumbnail = generate_window_thumbnail(
                                         generated_frames=single_frame_generated,  # Just one frame
                                         target_frames=single_frame_target,        # Just one frame
-                                        motion_outputs=outputs,                   # For motion stats overlay
+                                        motion_outputs=stored_outputs,            # For motion stats overlay (using stored)
                                         size=(1024, 512)  # Wide format for side-by-side comparison
                                     )
                                     
                                     # Log to wandb with more descriptive caption
-                                    if single_frame_generated is not None:
-                                        frame_info = f"Generated vs Target (frame {frame_idx} of T={outputs['theta'].shape[1]})"
+                                    if thumbnail is not None:
+                                        if single_frame_generated is not None:
+                                            frame_info = f"Generated vs Target (frame {frame_idx} of T={stored_outputs['theta'].shape[1] if 'theta' in stored_outputs else 'unknown'})"
+                                        else:
+                                            frame_info = f"Target frame only (frame {frame_idx}, generation failed)"
+                                        
+                                        wandb.log({
+                                            "visuals/training_thumbnail": wandb.Image(
+                                                thumbnail,
+                                                caption=f"Epoch {self.current_epoch}, Batch {batch_idx}, {frame_info}"
+                                            )
+                                        }, step=self.global_step)
+                                        logger.info(f"📸 Generated and logged training thumbnail for epoch {self.current_epoch}")
                                     else:
-                                        frame_info = f"Random frame from window (T={outputs['theta'].shape[1]} frames)"
-                                    wandb.log({
-                                        "visuals/training_thumbnail": wandb.Image(
-                                            thumbnail,
-                                            caption=f"Epoch {self.current_epoch}, Batch {batch_idx}, {frame_info}"
-                                        )
-                                    }, step=self.global_step)
-                                    
-                                    logger.info(f"📸 Generated training thumbnail for epoch {self.current_epoch}")
+                                        logger.warning("Thumbnail generation returned None")
                                     
                                 except Exception as e:
                                     logger.warning(f"Could not generate thumbnail: {e}")
