@@ -11,6 +11,7 @@ import traceback
 import wandb
 from PIL import Image
 import torchvision.transforms as transforms
+from torchvision.utils import save_image
 import matplotlib.pyplot as plt
 from collections import defaultdict
 import sys
