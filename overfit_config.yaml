@@ -119,7 +119,7 @@ loss:
   use_adaptive_weighting: true
   adaptive_update_freq: 100   # Update weights every N steps  # Minimum weight for least important dimensions
     
-  use_sync_loss: true  # Enable lip-sync loss for better audio alignment
+  use_sync_loss: false  # SyncNet is for evaluation only (per VASA-1 paper)
   use_verification: false     # Disabled for faster training
   lambda_verification: 0
   
@@ -143,7 +143,7 @@ loss:
   
   # Stage 6: Lip Sync (unlocks at epoch 45 if emotion < 0.3)
   lambda_lips: 0.0            # Will ramp to 2.0
-  lambda_sync: 1.5            # Weight for lip-sync loss (important for audio alignment)
+  lambda_sync: 0.0            # SyncNet for evaluation only, audio conditioning handles training
   
   # Other losses
   lambda_nonlip: 0.0          # Weight for non-lip facial landmarks
