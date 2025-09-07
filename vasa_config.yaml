@@ -63,32 +63,32 @@ motion:
 
 # Training parameters
 train:
-  resume_from: "" # "./checkpoints/checkpoint_epoch_1330.pt" #  # "./checkpoints/checkpoint_epoch_600.pt"  # or specify a path to checkpoint
+  resume_from: "./checkpoints/best_checkpoint.pt" #  #  # "./checkpoints/checkpoint_epoch_600.pt"  # or specify a path to checkpoint
   # when to add conditional signals
-  control_start_epoch: 1750 # 👹 this should be 1 or 0 for large video datasets with smaller epochs
+  control_start_epoch: 0 # 👹 this should be 1 or 0 for large video datasets with smaller epochs
 
 
-  lr: 1e-3 # Base learning rate
-  motion_proj_lr: 0.1 # Optional: Higher learning rate for motion projections
-  expression_lr: 0.1   # Optional: Potentially different learning rate 
+  lr: 5e-3 # Increased base learning rate for faster convergence
+  motion_proj_lr: 0.5 # Increased motion projection LR multiplier
+  expression_lr: 0.5   # Increased expression LR multiplier 
 
-  turn_off_noise: false # no noise signal / no drop out - Debugging the basic architecture - Verifying the conditioning works - Testing the training pipeline
+  turn_off_noise: false # no noise signal / no drop out
   learning_rates:
-    condition_embedding: 2e-4
-    motion_projections: 1e-4
-    transformer_early: 1.5e-4
-    transformer_late: 5e-5
-    output_projections: 2e-4
+    condition_embedding: 1e-3  # 5x increase
+    motion_projections: 5e-4   # 5x increase
+    transformer_early: 7.5e-4  # 5x increase
+    transformer_late: 2.5e-4   # 5x increase
+    output_projections: 1e-3   # 5x increase
 
-  batch_size: 28                # Increased from 1 to maximize GPU utilization
-  gradient_accumulation_steps: 2  # Reduced since batch size is larger
-  num_epochs: 4000
+  batch_size: 28                # Increased from 16 to maximize 32GB VRAM utilization
+  gradient_accumulation_steps: 2  # Increase effective batch size to break plateau
+  num_epochs: 1000            # Reduced for quick testing
 
   beta1: 0.9
   beta2: 0.999
   weight_decay: 0.01
   max_grad_norm: 1.0
-  save_freq: 2 # checkpoint saving for 35000 youre gonna want it to be 0
+  save_freq: 10               # Save more frequently for overfitting test
   
   # Dropout probabilities for CFG - VASA-1 uses 0.2 drop rate
   dropout_probs:
