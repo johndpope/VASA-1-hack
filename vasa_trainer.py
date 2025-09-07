@@ -913,7 +913,10 @@ class VASATrainer:
                             
                             # Generate frames if we have disentanglement losses enabled
                             # OPTIMIZATION: Only generate the 2 frames needed for disentanglement loss
+                            # Note: VASA paper doesn't specify needing all frames for these losses,
+                            # and mathematically only 2 frames are used (first and last)
                             generated_frames = None
+                            use_sparse_frames = True  # Set to False to generate all frames (more memory intensive)
                             if (self.config.loss.lambda_consist > 0 or self.config.loss.lambda_cross_id > 0) and target_frames is not None:
                                 try:
                                     # Get source images (first frame of each video in the batch)
@@ -924,28 +927,41 @@ class VASATrainer:
                                         'source_img': source_img
                                     }
                                     
-                                    # Only generate first and last frame for disentanglement loss
-                                    # This saves significant memory compared to generating all T frames
+                                    # Generate frames using volumetric avatar
                                     with torch.no_grad():
                                         T = outputs['theta'].shape[1]
                                         
-                                        # Create a subset of outputs with only first and last frame
-                                        sparse_outputs = {}
-                                        for key, value in outputs.items():
-                                            if isinstance(value, torch.Tensor) and value.dim() > 2 and value.shape[1] == T:
-                                                # Extract only first and last frame [B, 2, ...]
-                                                sparse_outputs[key] = torch.stack([value[:, 0], value[:, -1]], dim=1)
-                                            else:
-                                                sparse_outputs[key] = value
+                                        if use_sparse_frames:
+                                            # OPTIMIZATION: Only generate first and last frame (90% memory savings)
+                                            # This is sufficient for disentanglement losses which only use these 2 frames
+                                            sparse_outputs = {}
+                                            for key, value in outputs.items():
+                                                if isinstance(value, torch.Tensor) and value.dim() > 2 and value.shape[1] == T:
+                                                    # Extract only first and last frame [B, 2, ...]
+                                                    sparse_outputs[key] = torch.stack([value[:, 0], value[:, -1]], dim=1)
+                                                else:
+                                                    sparse_outputs[key] = value
+                                            
+                                            # Generate only 2 frames instead of T frames
+                                            generated_frames = self.model.volumetric_avatar.generate_frames_from_motion(
+                                                motion_outputs=sparse_outputs,
+                                                source_params=source_params
+                                            )
+                                            generated_frames = generated_frames.detach()
+                                            
+                                            # Also make target frames sparse to match
+                                            sparse_target_frames = torch.stack([target_frames[:, 0], target_frames[:, -1]], dim=1)
+                                            target_frames = sparse_target_frames
+                                        else:
+                                            # Generate all frames (more faithful to paper but memory intensive)
+                                            generated_frames = self.model.volumetric_avatar.generate_frames_from_motion(
+                                                motion_outputs=outputs,
+                                                source_params=source_params
+                                            )
+                                            generated_frames = generated_frames.detach()
                                         
-                                        # Generate only 2 frames instead of T frames
-                                        generated_frames = self.model.volumetric_avatar.generate_frames_from_motion(
-                                            motion_outputs=sparse_outputs,
-                                            source_params=source_params
-                                        )
-                                        # Detach immediately to prevent gradient tracking
-                                        generated_frames = generated_frames.detach()
                                     logger.info(f"Generated frames shape (sparse): {generated_frames.shape}")
+                                    logger.info(f"Target frames shape (sparse): {target_frames.shape}")
                                 except Exception as e:
                                     logger.error(f"Failed to generate frames for disentanglement loss: {str(e)}")
                                     generated_frames = None
