@@ -34,9 +34,9 @@ diffusion:
 # Motion generation parameters
 motion:
   num_speed_buckets: 9
-  window_size: 50
-  stride: 25
-  context_size: 10
+  window_size: 50              # Original window size
+  stride: 25                   # Original stride
+  context_size: 10             # Original context size
   overlap_smooth: true
   # Add these:
   min_window_size: 15          # Minimum window size for curriculum
@@ -63,32 +63,32 @@ motion:
 
 # Training parameters
 train:
-  resume_from: "" # "./checkpoints/checkpoint_epoch_1330.pt" #  # "./checkpoints/checkpoint_epoch_600.pt"  # or specify a path to checkpoint
+  resume_from: "./checkpoints/best_checkpoint.pt" #  #  # "./checkpoints/checkpoint_epoch_600.pt"  # or specify a path to checkpoint
   # when to add conditional signals
-  control_start_epoch: 1750 # 👹 this should be 1 or 0 for large video datasets with smaller epochs
+  control_start_epoch: 0 # 👹 this should be 1 or 0 for large video datasets with smaller epochs
 
 
-  lr: 1e-3 # Base learning rate
-  motion_proj_lr: 0.1 # Optional: Higher learning rate for motion projections
-  expression_lr: 0.1   # Optional: Potentially different learning rate 
+  lr: 5e-3 # Increased base learning rate for faster convergence
+  motion_proj_lr: 0.5 # Increased motion projection LR multiplier
+  expression_lr: 0.5   # Increased expression LR multiplier 
 
-  turn_off_noise: false # no noise signal / no drop out - Debugging the basic architecture - Verifying the conditioning works - Testing the training pipeline
+  turn_off_noise: false # no noise signal / no drop out
   learning_rates:
-    condition_embedding: 2e-4
-    motion_projections: 1e-4
-    transformer_early: 1.5e-4
-    transformer_late: 5e-5
-    output_projections: 2e-4
+    condition_embedding: 1e-3  # 5x increase
+    motion_projections: 5e-4   # 5x increase
+    transformer_early: 7.5e-4  # 5x increase
+    transformer_late: 2.5e-4   # 5x increase
+    output_projections: 1e-3   # 5x increase
 
-  batch_size: 28                # Increased from 1 to maximize GPU utilization
-  gradient_accumulation_steps: 2  # Reduced since batch size is larger
-  num_epochs: 4000
+  batch_size: 4                # Back to 4 with larger dataset
+  gradient_accumulation_steps: 4  # Effective batch size of 16
+  num_epochs: 1000            # Reduced for quick testing
 
   beta1: 0.9
   beta2: 0.999
   weight_decay: 0.01
   max_grad_norm: 1.0
-  save_freq: 2 # checkpoint saving for 35000 youre gonna want it to be 0
+  save_freq: 10               # Save more frequently for overfitting test
   
   # Dropout probabilities for CFG - VASA-1 uses 0.2 drop rate
   dropout_probs:
@@ -129,17 +129,17 @@ loss:
   adaptive_update_freq: 100   # Update weights every N steps  # Minimum weight for least important dimensions
     
   use_sync_loss: false
-  use_verification: true
-  lambda_verification: 10
+  use_verification: false      # Disable verification to save memory
+  lambda_verification: 0       # Disable verification to save memory
   
-  lambda_lips: 0     # Weight for lip motion loss
-  lambda_nonlip: 0.0    # Weight for non-lip facial landmarks
-  lambda_speed: 0
-  lambda_pose: 1
-  lambda_dynamics: 10.0 # expression
-  lambda_reconstruction: 1
+  lambda_lips: 0.5    # Weight for lip motion loss
+  lambda_nonlip: 0.1   # Weight for non-lip facial landmarks
+  lambda_speed: 0.1
+  lambda_pose: 1.0
+  lambda_dynamics: 5.0  # Reduced expression weight for stability
+  lambda_reconstruction: 1.0
   # Audio-visual sync loss
-  lambda_sync: 1.0 
+  lambda_sync: 0.0     # Disabled - SyncNet for evaluation only 
 
   
   # Control signal adherence loss
@@ -164,6 +164,22 @@ loss:
   lambda_cross_id: 0.1        # Cross-identity similarity loss
   lambda_velocity: 0.0001     # Velocity matching regularization
   lambda_smoothness: 0.0001   # Acceleration smoothness regularization
+  
+  # Disentanglement loss configuration
+  disentangle_num_pairs: 2           # Reduced pairs to save computation
+  disentangle_sampling: 'extremes'   # Use first and last only
+  disentangle_compute_freq: 10       # Compute less frequently
+  disentangle_vis_freq: 500          # Visualize less frequently
+  cross_id_num_frames: 2             # Fewer frames for identity
+  cross_id_normalize: true           # Normalize frames before identity extraction
+  
+  # High-res identity extraction settings
+  identity_highres_scale: 2           # Upscale factor before identity extraction
+  identity_sharpening_alpha: 0.5     # Sharpening strength (0-1)
+  identity_use_antialias: true       # Use antialiasing for downsampling
+  
+  # Frame generation for disentanglement losses
+  use_sparse_frames: true     # Generate only sparse frames to save memory
   
   warmup_epochs: 0            # Loss warmup epochs - for many videos dont worry
   
@@ -194,16 +210,16 @@ inference:
 
 # Dataset parameters
 dataset:
-  sequence_length: 25
+  sequence_length: 25          # Back to original for window_size 50
   frame_size: [512, 512]
   preextract_audio: true
   cache_audio: true
   hop_length: 10
-  max_videos: null
-  min_sequence_length: 15    # Minimum sequence length
-  max_sequence_samples: 1000 # Maximum samples per epoch
+  max_videos: 100              # Using subset of CelebV-HQ dataset
+  min_sequence_length: 15     # Minimum sequence length
+  max_sequence_samples: 500   # Limit samples per epoch
   augmentation:
-    enabled: true
+    enabled: false             # Disable augmentation initially for stability
     flip_prob: 0.5
     temporal_crop_prob: 0.3
     intensity_scale: 0.2
@@ -216,14 +232,14 @@ paths:
   volumetric_model: "nemo/logs/Retrain_with_17_V1_New_rand_MM_SEC_4_drop_02_stm_10_CV_05_1_1/checkpoints/328_model.pth"
   volumetric_config: "nemo/models/stage_1/volumetric_avatar/va.yaml"
   data_dir: "data"
-  video_folder: "junk"
+  video_folder: "/media/12TB/Downloads/CelebV-HQ/celebvhq/35666"
   cache_dir: "cache"
 
 
 # Hardware/environment settings
 device: "cuda"
-seed: 42
-num_workers: 8                # Multi-threading for data loading
+seed: 123  # Changed seed to get different random video selection
+num_workers: 4                # Reduced to prevent memory issues
 debug: false
 wandb:
   project: "vasa"
@@ -275,5 +291,5 @@ distributed:
 optimization:
   compile_model: false      # Whether to use torch.compile
   channels_last: true       # Use channels_last memory format
-  gradient_checkpointing: false
+  gradient_checkpointing: true  # Enable to save memory
   sync_batchnorm: true 
