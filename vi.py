@@ -1335,6 +1335,12 @@ if __name__ == "__main__":
                         help='Output video FPS (default: 25.0)')
     parser.add_argument('--neutral', action='store_true',
                         help='Use neutral expression')
+    parser.add_argument('--visualize', action='store_true',
+                        help='Generate visualization outputs instead of video')
+    parser.add_argument('--target-image', type=str, default='./data/A.png',
+                        help='Target image for visualization (default: ./data/A.png)')
+    parser.add_argument('--vis-dir', type=str, default='vis_output',
+                        help='Output directory for visualizations (default: vis_output)')
     
     args = parser.parse_args()
     
@@ -1376,7 +1382,6 @@ if __name__ == "__main__":
     logger.info(f"Configuration: {args.config}")
     logger.info(f"Checkpoint: {checkpoint_path}")
     logger.info(f"Input video: {args.input}")
-    logger.info(f"Output video: {args.output}")
     
     # Create inferencer
     inferencer = VASAInference(
@@ -1384,13 +1389,24 @@ if __name__ == "__main__":
         config_path=args.config
     )
 
-    # Generate video
-    inferencer.generate_from_video(
-        input_video=args.input,
-        output_path=args.output,
-        fps=args.fps,
-        neutral_expression=args.neutral
-    )
+    if args.visualize:
+        # Generate visualization outputs
+        logger.info(f"Generating visualizations to: {args.vis_dir}")
+        logger.info(f"Target image: {args.target_image}")
+        inferencer.visualize_inference_outputs(
+            input_video=args.input,
+            target_image_path=args.target_image,
+            output_dir=args.vis_dir
+        )
+    else:
+        # Generate video
+        logger.info(f"Output video: {args.output}")
+        inferencer.generate_from_video(
+            input_video=args.input,
+            output_path=args.output,
+            fps=args.fps,
+            neutral_expression=args.neutral
+        )
 
     # inferencer.visualize_inference_outputs(
     #     input_video="./junk/ovs-GiY_848_1.mp4",

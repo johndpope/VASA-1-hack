@@ -38,9 +38,22 @@ case $choice in
 esac
 
 echo ""
+echo "Select output mode:"
+echo "1) Generate video"
+echo "2) Generate visualizations"
+echo ""
+read -p "Enter your choice (1-2): " mode_choice
+
+echo ""
 echo "Starting inference with config: $CONFIG_FILE"
 echo "================================"
 echo ""
 
-# Run the inference script with the selected config
-python vi.py --config "$CONFIG_FILE"
+# Run the inference script with the selected config and mode
+if [ "$mode_choice" = "2" ]; then
+    echo "Generating visualizations..."
+    python vi.py --config "$CONFIG_FILE" --visualize
+else
+    echo "Generating video..."
+    python vi.py --config "$CONFIG_FILE"
+fi
