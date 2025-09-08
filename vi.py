@@ -450,11 +450,19 @@ class VASAInference:
                 }
 
                 # Generate sequence using last available motion
+                # Use CFG scales from config for stronger audio conditioning
+                cfg_scales = {
+                    'audio': self.config.get('cfg_scale', 3.0),
+                    'speed': 1.0
+                }
+                
                 motion_sequence = self.model.generate_sequence(
                     initial_pose=motion_data,
                     initial_dynamics=motion_data['expression_embed'],
                     conditions=conditions,
-                    num_steps=50
+                    num_steps=50,
+                    eta=0.0,  # Deterministic DDIM
+                    cfg_scales=cfg_scales
                 )
                 
                 logger.info(f"Generated sequence shape: {motion_sequence['expression_embed'].shape}")

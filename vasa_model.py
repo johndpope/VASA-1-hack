@@ -370,48 +370,6 @@ class EfficientConditionEmbedding(nn.Module):
 
         
 
-    def _place_control_embeddings(
-        self,
-        output: torch.Tensor,
-        control_emb: torch.Tensor,
-        B: int,
-        T: int
-    ) -> None:
-        """Place control embeddings in output tensor with proper indexing."""
-        try:
-            logger.debug("\nPlacing control embeddings in output tensor:")
-            # Gaze: first 2 channels
-            start, end = self.channel_layout['gaze']
-            gaze_range = control_emb[..., :2]
-            logger.debug(f"  gaze: placing tensor {gaze_range.shape} at positions [{start}:{end}]")
-            output[:, :, start:end] = gaze_range
-
-            # Head distance: 1 channel
-            start, end = self.channel_layout['head_distance']
-            dist_range = control_emb[..., 2:3]
-            logger.debug(f"  head_distance: placing tensor {dist_range.shape} at positions [{start}:{end}]")
-            output[:, :, start:end] = dist_range
-
-            # Emotion: 2 channels
-            start, end = self.channel_layout['emotion']
-            emotion_range = control_emb[..., 3:5]
-            logger.debug(f"  emotion: placing tensor {emotion_range.shape} at positions [{start}:{end}]")
-            output[:, :, start:end] = emotion_range
-
-            # Speed bucket: 1 channel
-            start, end = self.channel_layout['speed_bucket']
-            speed_range = control_emb[..., 5:6]
-            logger.debug(f"  speed_bucket: placing tensor {speed_range.shape} at positions [{start}:{end}]")
-            output[:, :, start:end] = speed_range
-
-        except Exception as e:
-            logger.error(f"Error placing control embeddings: {str(e)}")
-            logger.error("Debug info:")
-            logger.error(f"  Output tensor shape: {output.shape}")
-            logger.error(f"  Control embedding shape: {control_emb.shape}")
-            logger.error(f"  B={B}, T={T}")
-            raise
-
     def forward(
         self,
         conditions: Dict[str, torch.Tensor],
@@ -1657,11 +1615,12 @@ class VASAModel(nn.Module):
 
                 # DDIM sampling loop
                 for i, t in enumerate(self.scheduler.timesteps):
-                    # Get model prediction
+                    # Get model prediction with CFG
                     model_output = self.forward(
                         motion_data=motion_sequence,
                         noise_level=t.expand(B),
-                        conditions=conditions
+                        conditions=conditions,
+                        cfg_scales=cfg_scales
                     )
 
                     # DDIM step for each motion parameter
