@@ -476,6 +476,7 @@ class VASAInference:
                     prev_context = {
                         'theta': torch.zeros(1, context_size, 3, 4, device=device),
                         'rotation': torch.zeros(1, context_size, 3, device=device),
+                        'scale': torch.ones(1, context_size, 3, device=device),  # Added scale with default 1.0
                         'translation': torch.zeros(1, context_size, 3, device=device),
                         'expression_embed': torch.zeros(1, context_size, 128, device=device),
                         'audio_features': torch.zeros(1, context_size, 768, device=device)  # Wav2Vec dim
@@ -496,6 +497,7 @@ class VASAInference:
                     prev_context = {
                         'theta': torch.zeros(1, context_size, 3, 4, device=device),
                         'rotation': torch.zeros(1, context_size, 3, device=device),
+                        'scale': torch.ones(1, context_size, 3, device=device),  # Added scale with default 1.0
                         'translation': torch.zeros(1, context_size, 3, device=device),
                         'expression_embed': torch.zeros(1, context_size, 128, device=device),
                         'audio_features': torch.zeros(1, context_size, 768, device=device)
@@ -601,7 +603,7 @@ class VASAInference:
                     'rotation': motion_sequence['rotation'][:, -1:],
                     'scale': motion_sequence['scale'][:, -1:],
                     'translation': motion_sequence['translation'][:, -1:],
-                    'expression_embed': motion_sequence['expression_embed'][:, -1]
+                    'expression_embed': motion_sequence['expression_embed'][:, -1:]  # Fixed: Added colon for consistent shape
                 }
                 
                 # Update prev_context with last K frames from current window for next iteration
@@ -609,6 +611,7 @@ class VASAInference:
                     prev_context = {
                         'theta': motion_sequence['theta'][:, -context_size:],
                         'rotation': motion_sequence['rotation'][:, -context_size:],
+                        'scale': motion_sequence['scale'][:, -context_size:],  # Added scale to prev_context
                         'translation': motion_sequence['translation'][:, -context_size:],
                         'expression_embed': motion_sequence['expression_embed'][:, -context_size:],
                         'audio_features': window_data['audio_features'][:, -context_size:]
