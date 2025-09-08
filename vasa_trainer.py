@@ -959,7 +959,14 @@ class VASATrainer:
                                     if self.identity_image is not None:
                                         # Use the same high-quality identity image for all samples in batch
                                         source_img = self.identity_image.repeat(B, 1, 1, 1).to(self.accelerator.device)
-                                        logger.debug("Using high-quality identity image for source")
+                                        logger.info(f"Using high-quality identity image for source, shape: {source_img.shape}, range: [{source_img.min():.2f}, {source_img.max():.2f}]")
+                                        
+                                        # Save debug image on first batch
+                                        if self.global_step == 0:
+                                            from torchvision.utils import save_image
+                                            denorm_img = source_img[0] * 0.5 + 0.5  # Denormalize
+                                            save_image(denorm_img, f"debug_source_img_step{self.global_step}.png")
+                                            logger.info(f"Saved debug source image to debug_source_img_step{self.global_step}.png")
                                     else:
                                         # Fall back to first frame of each video in the batch
                                         source_img = target_frames[:, 0]  # [B, C, H, W]

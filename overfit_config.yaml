@@ -83,7 +83,7 @@ train:
   beta2: 0.999
   weight_decay: 0.01
   max_grad_norm: 1.0
-  save_freq: 10               # Save more frequently for overfitting test
+  save_freq: 5                # Save very frequently to enable recovery from OOM
   
   # Dropout probabilities for CFG - VASA-1 uses different rates for prev_ vs current
   dropout_probs:
