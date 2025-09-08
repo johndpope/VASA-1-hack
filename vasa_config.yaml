@@ -80,8 +80,8 @@ train:
     transformer_late: 2.5e-4   # 5x increase
     output_projections: 1e-3   # 5x increase
 
-  batch_size: 2                # Further reduced to prevent crashes
-  gradient_accumulation_steps: 8  # Increase effective batch size to 16
+  batch_size: 4                # Back to 4 with larger dataset
+  gradient_accumulation_steps: 4  # Effective batch size of 16
   num_epochs: 1000            # Reduced for quick testing
 
   beta1: 0.9
@@ -173,6 +173,11 @@ loss:
   cross_id_num_frames: 2             # Fewer frames for identity
   cross_id_normalize: true           # Normalize frames before identity extraction
   
+  # High-res identity extraction settings
+  identity_highres_scale: 2           # Upscale factor before identity extraction
+  identity_sharpening_alpha: 0.5     # Sharpening strength (0-1)
+  identity_use_antialias: true       # Use antialiasing for downsampling
+  
   # Frame generation for disentanglement losses
   use_sparse_frames: true     # Generate only sparse frames to save memory
   
@@ -210,7 +215,7 @@ dataset:
   preextract_audio: true
   cache_audio: true
   hop_length: 10
-  max_videos: 20               # Further reduced to prevent crashes
+  max_videos: 100              # Using subset of CelebV-HQ dataset
   min_sequence_length: 15     # Minimum sequence length
   max_sequence_samples: 500   # Limit samples per epoch
   augmentation:
@@ -227,13 +232,13 @@ paths:
   volumetric_model: "nemo/logs/Retrain_with_17_V1_New_rand_MM_SEC_4_drop_02_stm_10_CV_05_1_1/checkpoints/328_model.pth"
   volumetric_config: "nemo/models/stage_1/volumetric_avatar/va.yaml"
   data_dir: "data"
-  video_folder: "junk"
+  video_folder: "/media/12TB/Downloads/CelebV-HQ/celebvhq/35666"
   cache_dir: "cache"
 
 
 # Hardware/environment settings
 device: "cuda"
-seed: 42
+seed: 123  # Changed seed to get different random video selection
 num_workers: 4                # Reduced to prevent memory issues
 debug: false
 wandb:

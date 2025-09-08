@@ -2611,15 +2611,67 @@ class VASALossModule:
                         source_flat = source_frames.view(B * T_src, *source_frames.shape[2:])
                         generated_flat = generated_frames_to_compare.view(B * T_src, *generated_frames_to_compare.shape[2:])
                         
-                        # Resize frames for identity extractor (expects 160x160)
+                        # Enhanced high-res identity extraction
+                        # Get configuration values
+                        highres_scale = getattr(self.config.loss, 'identity_highres_scale', 2)
+                        sharpening_alpha = getattr(self.config.loss, 'identity_sharpening_alpha', 0.5)
+                        use_antialias = getattr(self.config.loss, 'identity_use_antialias', True)
+                        
+                        original_h, original_w = source_flat.shape[-2:]
+                        
+                        # Step 1: Upscale to higher resolution with bicubic for smooth interpolation
+                        source_highres = F.interpolate(
+                            source_flat, 
+                            size=(original_h * highres_scale, original_w * highres_scale),
+                            mode='bicubic', 
+                            align_corners=False
+                        )
+                        generated_highres = F.interpolate(
+                            generated_flat,
+                            size=(original_h * highres_scale, original_w * highres_scale), 
+                            mode='bicubic',
+                            align_corners=False
+                        )
+                        
+                        # Step 2: Apply sharpening filter to enhance facial features
+                        # Simple unsharp mask: image + alpha * (image - blurred)
+                        blur_kernel_size = 3
+                        alpha = sharpening_alpha  # Sharpening strength from config
+                        
+                        # Apply Gaussian blur for unsharp mask
+                        source_blurred = F.avg_pool2d(
+                            F.pad(source_highres, (1, 1, 1, 1), mode='reflect'),
+                            kernel_size=blur_kernel_size, stride=1
+                        )
+                        generated_blurred = F.avg_pool2d(
+                            F.pad(generated_highres, (1, 1, 1, 1), mode='reflect'),
+                            kernel_size=blur_kernel_size, stride=1
+                        )
+                        
+                        # Apply unsharp mask
+                        source_sharpened = source_highres + alpha * (source_highres - source_blurred)
+                        generated_sharpened = generated_highres + alpha * (generated_highres - generated_blurred)
+                        
+                        # Step 3: Resize to identity extractor input size (160x160)
+                        # Use Lanczos (approximated by bicubic) for high-quality downsampling
                         source_resized = F.interpolate(
-                            source_flat, size=(160, 160), 
-                            mode='bilinear', align_corners=False
+                            source_sharpened, 
+                            size=(160, 160),
+                            mode='bicubic',
+                            align_corners=False,
+                            antialias=use_antialias
                         )
                         generated_resized = F.interpolate(
-                            generated_flat, size=(160, 160),
-                            mode='bilinear', align_corners=False
+                            generated_sharpened,
+                            size=(160, 160),
+                            mode='bicubic', 
+                            align_corners=False,
+                            antialias=use_antialias
                         )
+                        
+                        # Clamp values to valid range after processing
+                        source_resized = torch.clamp(source_resized, -1, 1)
+                        generated_resized = torch.clamp(generated_resized, -1, 1)
                         
                         with torch.no_grad():
                             # Extract identity features for all frames
