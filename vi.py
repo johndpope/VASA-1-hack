@@ -802,7 +802,7 @@ class VASAInference:
                     audio_std = features.std().item()
                     audio_mean = features.mean().item()
                     audio_max = features.abs().max().item()
-                    if window_idx == 0:  # Log only for first window to avoid spam
+                    if len(windows) == 0:  # Log only for first window to avoid spam
                         logger.info(f"Audio features - std: {audio_std:.4f}, mean: {audio_mean:.4f}, max: {audio_max:.4f}")
                         logger.info(f"Expected: std >0.5 for speech, near 0 for silence")
                         if audio_std < 0.1:

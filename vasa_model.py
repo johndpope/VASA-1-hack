@@ -1364,22 +1364,22 @@ class VASAModel(nn.Module):
                 filtered_conditions, device
             )
 
-            logger.debug("\nGenerating conditional sequence...")
+            logger.debug("\nGenerating conditional output...")
             logger.debug(f"Active conditions: {list(filtered_conditions.keys())}")
             
-            cond_output = self.generate_sequence(
-                initial_pose=motion_data,
-                initial_dynamics=motion_data['expression_embed'][:, 0],
-                conditions=filtered_conditions,
-                num_steps=num_steps
+            # Forward pass with conditions
+            cond_output = self.forward(
+                motion_data=motion_data,
+                noise_level=noise_level,
+                conditions=filtered_conditions
             )
             
-            logger.debug("\nGenerating unconditional sequence...")
-            uncond_output = self.generate_sequence(
-                initial_pose=motion_data,
-                initial_dynamics=motion_data['expression_embed'][:, 0],
-                conditions=uncond_conditions,
-                num_steps=num_steps
+            logger.debug("\nGenerating unconditional output...")
+            # Forward pass without conditions
+            uncond_output = self.forward(
+                motion_data=motion_data,
+                noise_level=noise_level,
+                conditions=uncond_conditions
             )
 
             # Apply CFG selectively
