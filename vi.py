@@ -1312,23 +1312,76 @@ class VASAInference:
 # inferencer.visualize_inference_outputs("input.mp4", "vis_output")
 # Example usage
 if __name__ == "__main__":
-    epoch = 6  # Using available checkpoint
-    # inferencer = VASAInference(
-    #     checkpoint_path=f"./checkpoints/checkpoint_epoch_{epoch}.pt",
-    #     config_path='config_stage2.yaml'
-    # )
-
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='VASA-1 Video Inference')
+    parser.add_argument('--config', type=str, default='vasa_config.yaml',
+                        help='Path to config file (default: vasa_config.yaml)')
+    parser.add_argument('--checkpoint', type=str, default=None,
+                        help='Path to checkpoint file (default: auto-detect from config)')
+    parser.add_argument('--input', type=str, default='./junk/11.mp4',
+                        help='Input video path')
+    parser.add_argument('--output', type=str, default=None,
+                        help='Output video path (default: auto-generate)')
+    parser.add_argument('--fps', type=float, default=25.0,
+                        help='Output video FPS (default: 25.0)')
+    parser.add_argument('--neutral', action='store_true',
+                        help='Use neutral expression')
+    
+    args = parser.parse_args()
+    
+    # Load config to determine checkpoint path
+    config = OmegaConf.load(args.config)
+    
+    # Determine checkpoint path
+    if args.checkpoint:
+        checkpoint_path = args.checkpoint
+    else:
+        # Auto-detect checkpoint based on config
+        if 'overfit' in args.config:
+            checkpoint_path = "./checkpoints_overfit/best_checkpoint.pt"
+            if not Path(checkpoint_path).exists():
+                # Try to find latest checkpoint
+                checkpoint_dir = Path("./checkpoints_overfit")
+                if checkpoint_dir.exists():
+                    checkpoints = sorted(checkpoint_dir.glob("checkpoint_epoch_*.pt"))
+                    if checkpoints:
+                        checkpoint_path = str(checkpoints[-1])
+                        logger.info(f"Using latest checkpoint: {checkpoint_path}")
+        else:
+            checkpoint_path = "./checkpoints/best_checkpoint.pt"
+            if not Path(checkpoint_path).exists():
+                # Try to find latest checkpoint
+                checkpoint_dir = Path("./checkpoints")
+                if checkpoint_dir.exists():
+                    checkpoints = sorted(checkpoint_dir.glob("checkpoint_epoch_*.pt"))
+                    if checkpoints:
+                        checkpoint_path = str(checkpoints[-1])
+                        logger.info(f"Using latest checkpoint: {checkpoint_path}")
+    
+    # Generate output path if not specified
+    if args.output is None:
+        config_name = Path(args.config).stem
+        input_name = Path(args.input).stem
+        args.output = f"vasa-output-{config_name}-{input_name}.mp4"
+    
+    logger.info(f"Configuration: {args.config}")
+    logger.info(f"Checkpoint: {checkpoint_path}")
+    logger.info(f"Input video: {args.input}")
+    logger.info(f"Output video: {args.output}")
+    
+    # Create inferencer
     inferencer = VASAInference(
-        checkpoint_path=f"./checkpoints_overfit/best_checkpoint.pt",
-        config_path='overfit_config.yaml'
+        checkpoint_path=checkpoint_path,
+        config_path=args.config
     )
 
-
+    # Generate video
     inferencer.generate_from_video(
-        input_video="./junk/11.mp4",
-        output_path=f"vasa-output-epoch-{epoch}.mp4",
-        fps=25.0,
-        neutral_expression=False
+        input_video=args.input,
+        output_path=args.output,
+        fps=args.fps,
+        neutral_expression=args.neutral
     )
 
     # inferencer.visualize_inference_outputs(
