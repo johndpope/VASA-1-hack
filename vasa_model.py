@@ -655,17 +655,29 @@ class HolisticMotionTransformer(nn.Module):
         self.gradient_checkpointing = False  # Disabled for speed testing
 
     def _validate_context(self, prev_context: Optional[Dict[str, torch.Tensor]]) -> None:
-        """Validate that prev_context contains exactly 10 frames."""
+        """Validate that prev_context contains exactly context_size frames."""
         if prev_context is not None:
             expected_keys = ['theta', 'rotation', 'translation', 'expression_embed']
+            context_size = getattr(self.config.training, 'context_size', 10)
+            
             for key in expected_keys:
                 assert key in prev_context, f"Missing {key} in prev_context"
-                assert prev_context[key].dim() == 3, f"Expected 3D tensor for {key}, got {prev_context[key].dim()}D"
-                assert prev_context[key].shape[1] == 10, (
-                    f"Expected exactly 10 context frames for {key}, "
-                    f"got {prev_context[key].shape[1]} frames. "
-                    f"Full shape: {prev_context[key].shape}"
-                )
+                
+                # Special handling for theta which is 4D [B, T, 3, 4]
+                if key == 'theta':
+                    assert prev_context[key].dim() == 4, f"Expected 4D tensor for {key}, got {prev_context[key].dim()}D"
+                    assert prev_context[key].shape[1] == context_size, (
+                        f"Expected exactly {context_size} context frames for {key}, "
+                        f"got {prev_context[key].shape[1]} frames. "
+                        f"Full shape: {prev_context[key].shape}"
+                    )
+                else:
+                    assert prev_context[key].dim() == 3, f"Expected 3D tensor for {key}, got {prev_context[key].dim()}D"
+                    assert prev_context[key].shape[1] == context_size, (
+                        f"Expected exactly {context_size} context frames for {key}, "
+                        f"got {prev_context[key].shape[1]} frames. "
+                        f"Full shape: {prev_context[key].shape}"
+                    )
 
 
     def _validate_conditions(
@@ -1320,7 +1332,8 @@ class VASAModel(nn.Module):
         conditions: Dict[str, torch.Tensor],
         cfg_scales: Optional[Dict[str, float]] = None,
         drop_conditions: Optional[List[str]] = None,
-        num_steps: int = 50
+        num_steps: int = 50,
+        prev_context: Optional[Dict[str, torch.Tensor]] = None
     ) -> Dict[str, torch.Tensor]:
         """
         Generate sequence with classifier-free guidance, with conditional dropping.
@@ -1347,7 +1360,8 @@ class VASAModel(nn.Module):
                 return self.forward(
                     motion_data=motion_data,
                     noise_level=noise_level,
-                    conditions=conditions
+                    conditions=conditions,
+                    prev_context=prev_context
                 )
 
             # Filter out dropped conditions
@@ -1371,7 +1385,8 @@ class VASAModel(nn.Module):
             cond_output = self.forward(
                 motion_data=motion_data,
                 noise_level=noise_level,
-                conditions=filtered_conditions
+                conditions=filtered_conditions,
+                prev_context=prev_context
             )
             
             logger.debug("\nGenerating unconditional output...")
@@ -1379,7 +1394,8 @@ class VASAModel(nn.Module):
             uncond_output = self.forward(
                 motion_data=motion_data,
                 noise_level=noise_level,
-                conditions=uncond_conditions
+                conditions=uncond_conditions,
+                prev_context=prev_context
             )
 
             # Apply CFG selectively
@@ -1580,7 +1596,8 @@ class VASAModel(nn.Module):
         conditions: Dict[str, torch.Tensor],
         num_steps: int = 50,
         eta: float = 0.0,  # DDIM stochasticity parameter
-        cfg_scales: Optional[Dict[str, float]] = None
+        cfg_scales: Optional[Dict[str, float]] = None,
+        prev_context: Optional[Dict[str, torch.Tensor]] = None
     ) -> Dict[str, torch.Tensor]:
         """Generate sequence using DDIM sampling."""
         self.eval()
@@ -1620,7 +1637,8 @@ class VASAModel(nn.Module):
                         motion_data=motion_sequence,
                         noise_level=t.expand(B),
                         conditions=conditions,
-                        cfg_scales=cfg_scales
+                        cfg_scales=cfg_scales,
+                        prev_context=prev_context  # Pass prev_context for temporal consistency
                     )
 
                     # DDIM step for each motion parameter

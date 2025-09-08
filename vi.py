@@ -440,6 +440,10 @@ class VASAInference:
                 'translation': None
             }
             
+            # Initialize prev_context for temporal consistency (VASA-1 paper approach)
+            prev_context = None
+            context_size = self.config.get('training', {}).get('context_size', 10)
+            
             # Process each audio window
             for window_idx, window_data in enumerate(audio_windows):
                 logger.info(f"Processing window {window_idx}/{len(audio_windows)}")
@@ -460,17 +464,45 @@ class VASAInference:
                 noise_scale = 0.01  # Small noise to prevent static output
                 use_window_cache = self.config.get('inference', {}).get('use_window_cache', True)
                 
-                # Add noise for first window or when cache is disabled
-                if window_idx == 0 or not use_window_cache:
-                    if window_idx == 0:
-                        logger.info(f"Adding noise (scale={noise_scale}) to initial latents for diversity")
-                    if not use_window_cache:
-                        logger.info(f"Window cache disabled - regenerating initial state for window {window_idx}")
+                # Initialize or extract prev_context for temporal consistency
+                if window_idx == 0:
+                    # First window: initialize with zeros per VASA-1 paper
+                    logger.info("First window: Initializing prev_context with zeros")
+                    prev_context = {
+                        'theta': torch.zeros(1, context_size, 3, 4, device=device),
+                        'rotation': torch.zeros(1, context_size, 3, device=device),
+                        'translation': torch.zeros(1, context_size, 3, device=device),
+                        'expression_embed': torch.zeros(1, context_size, 128, device=device),
+                        'audio_features': torch.zeros(1, context_size, 768, device=device)  # Wav2Vec dim
+                    }
+                    # Add small noise to kickstart variation
+                    logger.info(f"Adding noise (scale={noise_scale}) to initial latents and prev_context")
+                    for key in ['expression_embed', 'theta', 'rotation']:
+                        if key in prev_context:
+                            prev_context[key] = prev_context[key] + torch.randn_like(prev_context[key]) * noise_scale * 0.01
                     
                     motion_data['expression_embed'] = motion_data['expression_embed'] + torch.randn_like(motion_data['expression_embed']) * noise_scale
-                    # Also add small noise to pose parameters
                     motion_data['theta'] = motion_data['theta'] + torch.randn_like(motion_data['theta']) * noise_scale * 0.1
                     motion_data['rotation'] = motion_data['rotation'] + torch.randn_like(motion_data['rotation']) * noise_scale * 0.1
+                
+                elif prev_context is None:
+                    # Should not happen but handle gracefully
+                    logger.warning("prev_context is None for non-first window, initializing with zeros")
+                    prev_context = {
+                        'theta': torch.zeros(1, context_size, 3, 4, device=device),
+                        'rotation': torch.zeros(1, context_size, 3, device=device),
+                        'translation': torch.zeros(1, context_size, 3, device=device),
+                        'expression_embed': torch.zeros(1, context_size, 128, device=device),
+                        'audio_features': torch.zeros(1, context_size, 768, device=device)
+                    }
+                
+                # Log prev_context statistics for debugging
+                if window_idx == 0 or window_idx % 5 == 0:
+                    logger.info(f"Window {window_idx} prev_context std devs:")
+                    for key in ['expression_embed', 'theta', 'rotation']:
+                        if key in prev_context:
+                            std = prev_context[key].std().item()
+                            logger.info(f"  prev_{key}: {std:.4f}")
                 
                 motion_sequence = self.model.generate_sequence(
                     initial_pose=motion_data,
@@ -478,7 +510,8 @@ class VASAInference:
                     conditions=conditions,
                     num_steps=self.config.get('inference', {}).get('num_inference_steps', 100),  # Use config value
                     eta=self.config.get('inference', {}).get('eta', 0.5),  # Use config value for stochasticity
-                    cfg_scales=cfg_scales
+                    cfg_scales=cfg_scales,
+                    prev_context=prev_context  # Pass prev_context for temporal consistency
                 )
                 
                 logger.info(f"Generated sequence shape: {motion_sequence['expression_embed'].shape}")
@@ -540,6 +573,17 @@ class VASAInference:
                     'translation': motion_sequence['translation'][:, -1:],
                     'expression_embed': motion_sequence['expression_embed'][:, -1]
                 }
+                
+                # Update prev_context with last K frames from current window for next iteration
+                if window_idx < len(audio_windows) - 1:  # Not last window
+                    prev_context = {
+                        'theta': motion_sequence['theta'][:, -context_size:],
+                        'rotation': motion_sequence['rotation'][:, -context_size:],
+                        'translation': motion_sequence['translation'][:, -context_size:],
+                        'expression_embed': motion_sequence['expression_embed'][:, -context_size:],
+                        'audio_features': window_data['audio_features'][:, -context_size:]
+                    }
+                    logger.debug(f"Updated prev_context with last {context_size} frames for next window")
 
             logger.info(f"Total frames generated: {len(generated_frames)}")
             

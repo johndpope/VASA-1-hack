@@ -85,12 +85,20 @@ train:
   max_grad_norm: 1.0
   save_freq: 10               # Save more frequently for overfitting test
   
-  # Dropout probabilities for CFG - VASA-1 uses 0.1 for general conditions
+  # Dropout probabilities for CFG - VASA-1 uses different rates for prev_ vs current
   dropout_probs:
-    audio: 0.1                # Paper default: 0.1 for general conditions (was 0.2)
-    gaze: 0.1                 # Paper default: 0.1 (was 0.2)
-    head_distance: 0.1        # Paper default: 0.1 (was 0.2)
-    emotion: 0.1              # Paper default: 0.1 (was 0.2)
+    # Current conditions (0.1 dropout per paper)
+    audio: 0.1                # Paper default: 0.1 for general conditions
+    gaze: 0.1                 # Paper default: 0.1
+    head_distance: 0.1        # Paper default: 0.1
+    emotion: 0.1              # Paper default: 0.1
+    
+    # Previous context conditions (0.5 dropout per paper for robustness)
+    prev_audio: 0.5           # Paper: 0.5 for previous audio context
+    prev_theta: 0.5           # Paper: 0.5 for previous motion
+    prev_rotation: 0.5        # Paper: 0.5 for previous motion
+    prev_translation: 0.5     # Paper: 0.5 for previous motion
+    prev_expression: 0.5      # Paper: 0.5 for previous dynamics
 
   # CFG scales schedule (aligned with VASA-1 paper)
   cfg_scales:
