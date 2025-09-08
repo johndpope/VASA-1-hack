@@ -59,7 +59,7 @@ motion:
 
 # Training parameters - OVERFITTING FOCUSED
 train:
-  resume_from: "checkpoints_overfit/checkpoint_epoch_0032.pt" # Resume from epoch 32
+  resume_from: null # Resume from epoch 32
   # when to add conditional signals
   control_start_epoch: 0      # Start control immediately for overfitting
 
