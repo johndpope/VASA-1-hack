@@ -430,6 +430,11 @@ class VASAInference:
                 'expression_embed': initial_expression
             }
             
+            # Debug: Log shapes
+            logger.info(f"DEBUG - motion_data shapes:")
+            for k, v in motion_data.items():
+                logger.info(f"  {k}: {v.shape}")
+            
             # Track all generated frames and previous motion parameters
             generated_frames = []
             prev_motion = {
@@ -511,10 +516,28 @@ class VASAInference:
                     num_steps=self.config.get('inference', {}).get('num_inference_steps', 100),  # Use config value
                     eta=self.config.get('inference', {}).get('eta', 0.5),  # Use config value for stochasticity
                     cfg_scales=cfg_scales,
-                    prev_context=prev_context  # Pass prev_context for temporal consistency
+                    prev_context=prev_context  # Now enabled with proper dimension handling
                 )
                 
                 logger.info(f"Generated sequence shape: {motion_sequence['expression_embed'].shape}")
+                
+                # Debug: Check if generated sequence has variation
+                expr_seq = motion_sequence['expression_embed']
+                expr_std_time = expr_seq.std(dim=1).mean().item()
+                frame_diffs = []
+                for i in range(min(5, expr_seq.shape[1]-1)):
+                    diff = (expr_seq[:, i+1] - expr_seq[:, i]).abs().mean().item()
+                    frame_diffs.append(diff)
+                logger.info(f"DEBUG - Expression std across time: {expr_std_time:.6f}")
+                logger.info(f"DEBUG - First 5 frame diffs: {frame_diffs}")
+                
+                # Check if all frames identical
+                all_same = all(torch.allclose(expr_seq[:, 0], expr_seq[:, i], atol=1e-6) 
+                              for i in range(1, expr_seq.shape[1]))
+                if all_same:
+                    logger.error("❌ CRITICAL: Model generated IDENTICAL expressions for all frames!")
+                else:
+                    logger.info(f"✓ Model generated varied expressions (avg diff: {sum(frame_diffs)/len(frame_diffs):.4f})")
 
                 # Generate frames for this window
                 for t in range(motion_sequence['expression_embed'].size(1)):
@@ -552,8 +575,15 @@ class VASAInference:
                         self.motion_stats['theta'].append(theta_std)
                         self.motion_stats['rot'].append(rot_std)
 
-                    # Generate the frame
-                    frame = self._generate_frame(source_params, curr_expression, device)
+                    # Generate the frame with ALL motion parameters
+                    motion_params = {
+                        'expression': curr_expression,
+                        'theta': curr_theta,
+                        'rotation': curr_rotation,
+                        'translation': curr_translation,
+                        'scale': curr_scale
+                    }
+                    frame = self._generate_frame(source_params, motion_params, device)
                     generated_frames.append(frame)
 
                     # Update previous motion parameters
@@ -874,17 +904,39 @@ class VASAInference:
             logger.error(f"Error in process_audio: {str(e)}")
             logger.error(traceback.format_exc())
             raise
-    def _generate_frame(self, source_params, curr_expression, device):
-        """Generate a single frame using EMO decoder with given expression."""
+    def _generate_frame(self, source_params, motion_params, device):
+        """Generate a single frame using EMO decoder with given motion parameters."""
         try:
             # Get dimensions from EMO model
             c = self.volumetric_avatar.args.latent_volume_channels
             d = self.volumetric_avatar.args.latent_volume_depth
             s = self.volumetric_avatar.args.latent_volume_size
 
+            # Extract motion parameters
+            curr_expression = motion_params['expression']
+            curr_theta = motion_params['theta']
+            curr_rotation = motion_params['rotation']
+            curr_translation = motion_params['translation']
+            curr_scale = motion_params['scale']
+            
+            # Build full theta matrix from generated components
+            # Combine rotation and translation into full theta matrix
+            theta_matrix = torch.eye(4, device=device).unsqueeze(0)
+            # Set rotation part (top-left 3x3)
+            from scipy.spatial.transform import Rotation as R
+            rot_np = curr_rotation.cpu().numpy().squeeze()
+            rot_matrix = torch.tensor(R.from_euler('xyz', rot_np, degrees=False).as_matrix(), 
+                                     dtype=torch.float32, device=device)
+            theta_matrix[0, :3, :3] = rot_matrix * curr_scale.view(3, 1)  # Apply scale
+            # Set translation part (last column)
+            theta_matrix[0, :3, 3] = curr_translation.squeeze()
+            # Use only first 3 rows for affine transform
+            curr_theta_full = theta_matrix[:, :3, :]
+
             # Create identity grid first
             grid = self.volumetric_avatar.identity_grid_3d.repeat_interleave(1, dim=0)
-            target_rotation_warp = grid.bmm(source_params['theta'][:, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+            # Use the GENERATED theta for target rotation
+            target_rotation_warp = grid.bmm(curr_theta_full.transpose(1, 2)).view(-1, d, s, s, 3)
 
             # Create source tensor with correct shape for RGB image (B, C, H, W)
             dummy_rgb = torch.zeros(1, 3, 512, 512).to(device)  # Create dummy RGB image 
@@ -896,10 +948,10 @@ class VASAInference:
                 'source_mask': source_params['source_mask'],
                 'target_mask': source_params['source_mask'],
                 'source_theta': source_params['theta'],
-                'target_theta': source_params['theta'],
+                'target_theta': curr_theta_full,  # Use GENERATED theta
                 'idt_embed': source_params['idt_embed'],
                 'source_pose_embed': source_params['expression_embed'],
-                'target_pose_embed': curr_expression,
+                'target_pose_embed': curr_expression,  # Use GENERATED expression
                 'target_delta_uv': torch.zeros(1, 3, d, s, s).to(device)
             }
 

@@ -59,7 +59,7 @@ motion:
 
 # Training parameters - OVERFITTING FOCUSED
 train:
-  resume_from: "checkpoints_overfit/best_checkpoint.pt" # Resume from best checkpoint
+  resume_from: null # Start from scratch with new temporal losses
   # when to add conditional signals
   control_start_epoch: 0      # Start control immediately for overfitting
 
@@ -170,8 +170,8 @@ loss:
   use_score_matching: true    # Use VASA-1 style clean signal prediction (not noise)
   lambda_consist: 1.0         # Pairwise transfer loss for disentanglement
   lambda_cross_id: 0.1        # Cross-identity similarity loss
-  lambda_velocity: 0.001      # Velocity matching regularization (increased for more motion)
-  lambda_smoothness: 0.00001  # Acceleration smoothness regularization (reduced to allow more variation)
+  lambda_velocity: 1.0        # Velocity matching regularization (GREATLY increased to enforce motion)
+  lambda_smoothness: 0.01     # Acceleration smoothness regularization (increased for temporal consistency)
   
   # Disentanglement loss configuration
   disentangle_num_pairs: 3           # Number of frame pairs to sample for l_consist
