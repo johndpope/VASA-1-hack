@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 from tqdm import tqdm
 import logging
+import os
 from rich.logging import RichHandler
 from pathlib import Path
 import torch
@@ -577,6 +578,29 @@ class VASATrainer:
             logger.info("🎯 TDD Progressive Loss System Enabled")
             logger.info("   Losses will unlock progressively based on training milestones")
         
+        # Load high-quality identity image if specified
+        self.identity_image = None
+        if config.dataset.get('use_identity_image', False):
+            identity_path = config.dataset.get('identity_image_path', None)
+            if identity_path and os.path.exists(identity_path):
+                from PIL import Image
+                import torchvision.transforms as transforms
+                
+                logger.info(f"Loading high-quality identity image from: {identity_path}")
+                
+                # Load and preprocess the identity image
+                img = Image.open(identity_path).convert('RGB')
+                transform = transforms.Compose([
+                    transforms.Resize((512, 512)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+                ])
+                self.identity_image = transform(img).unsqueeze(0)  # [1, C, H, W]
+                logger.info(f"Identity image loaded with shape: {self.identity_image.shape}")
+            else:
+                logger.warning(f"Identity image path not found: {identity_path}")
+                logger.warning("Falling back to using video frames for identity")
+        
 
         # Initialize MotionSequenceHandler
         self.motion_handler = MotionSequenceHandler(
@@ -931,8 +955,14 @@ class VASATrainer:
                             use_sparse_frames = getattr(self.config.loss, 'use_sparse_frames', False)  # Read from config, default to False
                             if (self.config.loss.lambda_consist > 0 or self.config.loss.lambda_cross_id > 0) and target_frames is not None:
                                 try:
-                                    # Get source images (first frame of each video in the batch)
-                                    source_img = target_frames[:, 0]  # [B, C, H, W]
+                                    # Get source images - use high-quality identity image if available
+                                    if self.identity_image is not None:
+                                        # Use the same high-quality identity image for all samples in batch
+                                        source_img = self.identity_image.repeat(B, 1, 1, 1).to(self.accelerator.device)
+                                        logger.debug("Using high-quality identity image for source")
+                                    else:
+                                        # Fall back to first frame of each video in the batch
+                                        source_img = target_frames[:, 0]  # [B, C, H, W]
                                     
                                     # Prepare source params for frame generation
                                     source_params = {
@@ -1113,7 +1143,11 @@ class VASATrainer:
                                         # Generate just this one frame
                                         with torch.no_grad():
                                             try:
-                                                source_img = target_frames[:, 0]  # [B, C, H, W]
+                                                # Use high-quality identity image if available
+                                                if self.identity_image is not None:
+                                                    source_img = self.identity_image.repeat(B, 1, 1, 1).to(self.accelerator.device)
+                                                else:
+                                                    source_img = target_frames[:, 0]  # [B, C, H, W]
                                                 
                                                 # Extract single frame motion params
                                                 single_motion = {}

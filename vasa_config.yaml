@@ -226,6 +226,8 @@ dataset:
   max_videos: 100              # Using subset of CelebV-HQ dataset
   min_sequence_length: 15     # Minimum sequence length
   max_sequence_samples: 500   # Limit samples per epoch
+  use_identity_image: false   # Set to true to use high-quality identity image
+  identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image
   augmentation:
     enabled: false             # Disable augmentation initially for stability
     flip_prob: 0.5

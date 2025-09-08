@@ -218,6 +218,8 @@ dataset:
   max_videos: null             # Use all available videos in junk folder
   min_sequence_length: 15    # Minimum sequence length
   max_sequence_samples: 1000 # Maximum samples per epoch
+  use_identity_image: true    # Use high-quality identity image instead of video frame
+  identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image
   augmentation:
     enabled: false            # NO AUGMENTATION for overfitting
     flip_prob: 0.0
