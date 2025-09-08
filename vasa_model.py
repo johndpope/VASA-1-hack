@@ -496,42 +496,8 @@ class EfficientConditionEmbedding(nn.Module):
                         
                     output[..., start:end] = curr_emb
 
-            # 5. Previous context if available
-            if prev_context is not None:
-                logger.debug("\nProcessing previous context...")
-                prev_keys = [
-                    ('theta', 12), ('rotation', 3),  ('scale', 3), 
-                    ('translation', 3), ('expression', self.prev_expression_dim),
-                    ('audio', self.prev_audio_dim)
-                ]
-                
-                for name, dim in prev_keys:
-                    context_key = f'prev_{name}'
-                    if context_key not in self.channel_layout:
-                        continue
-                        
-                    start, end = self.channel_layout[context_key]
-                    if context_key in prev_context:
-                        # Reshape if needed and place in output
-                        context_value = prev_context[context_key]
-                        if name == 'theta':
-                            # Flatten 3x4 matrix to 12 elements per timestep
-                            # Input is [B, T, 3, 4], output should be [B, T, 12]
-                            if context_value.dim() == 4:  # [B, T, 3, 4]
-                                B_ctx, T_ctx = context_value.shape[:2]
-                                context_value = context_value.view(B_ctx, T_ctx, -1)  # [B, T, 12]
-                            elif context_value.dim() == 3 and context_value.shape[-1] != 12:  # [B, 3, 4]
-                                context_value = context_value.view(B, T, -1)  # [B, T, 12]
-                        if context_value.shape[-1] != dim:
-                            logger.warning(
-                                f"Context dimension mismatch for {name}: "
-                                f"got {context_value.shape[-1]}, expected {dim}"
-                            )
-                            context_value = torch.zeros(B, T, dim, device=device)
-                        output[..., start:end] = context_value
-                    else:
-                        # Fill with zeros if missing
-                        output[..., start:end] = torch.zeros(B, dim, device=device)
+            # 5. Previous context is now handled directly in the transformer
+            # No need to compress it into the condition embedding
 
             # 6. Final processing
             # Clip to prevent extreme values
@@ -878,10 +844,18 @@ class HolisticMotionTransformer(nn.Module):
             assert motion_data['expression_embed'].shape == (B, T, 128), f"Expected expression shape [B,T,128], got {motion_data['expression_embed'].shape}"
             assert noise_level.shape == (B,), f"Expected noise_level shape [B], got {noise_level.shape}"
 
-            # Temporarily disabled for testing - validation has issues
-            # self._validate_context(prev_context)
+            # Handle previous context if provided
+            device = motion_data['theta'].device
+            if prev_context is not None:
+                # Process previous context frames through same motion projections
+                K = prev_context['theta'].shape[1]  # Number of context frames
+                prev_features = self._project_motion_parameters(prev_context, B, K)
+                logger.debug(f"Previous context features shape: {prev_features.shape}")
+            else:
+                prev_features = None
+                K = 0
 
-            self._validate_conditions(conditions,B,T,motion_data['theta'].device)
+            self._validate_conditions(conditions, B, T, device)
 
             # Handle condition embeddings with validation
             if cond_emb is None and conditions is not None:
@@ -937,15 +911,46 @@ class HolisticMotionTransformer(nn.Module):
             logger.debug("\nProjecting motion parameters...")
             motion_features = self._project_motion_parameters(motion_data, B, T)
             logger.debug(f"Motion features shape: {motion_features.shape}")
+            
+            # Concatenate previous context with current features if available
+            if prev_features is not None:
+                # Concatenate along sequence dimension: [B, K+T, D]
+                x = torch.cat([prev_features, motion_features], dim=1)
+                total_seq_len = K + T
+                logger.debug(f"Combined features shape (with context): {x.shape}")
+            else:
+                x = motion_features
+                total_seq_len = T
 
-            # Add time embeddings
+            # Add time embeddings (expand to match sequence length)
             time_emb = self._time_embedding(noise_level, self.transformer_dim)
-            x = motion_features + time_emb.unsqueeze(1)
+            x = x + time_emb.unsqueeze(1).expand(-1, total_seq_len, -1)
 
-            # Add condition embeddings if present
+            # Add condition embeddings if present (only to current frames, not context)
             if cond_emb is not None:
-                x = x + cond_emb
+                if prev_features is not None:
+                    # Only add conditions to current frames, not context
+                    # Pad conditions with zeros for context frames
+                    cond_emb_padded = torch.cat([
+                        torch.zeros(B, K, self.transformer_dim, device=device),
+                        cond_emb
+                    ], dim=1)
+                    x = x + cond_emb_padded
+                else:
+                    x = x + cond_emb
                 logger.debug("Added condition embeddings")
+            
+            # Add positional embeddings to distinguish context from current
+            pos_emb = self._get_positional_embedding(total_seq_len, self.transformer_dim, device)
+            if prev_features is not None:
+                # Use negative positions for context, positive for current
+                context_positions = torch.arange(-K, 0, device=device)
+                current_positions = torch.arange(0, T, device=device)
+                all_positions = torch.cat([context_positions, current_positions])
+                pos_emb = self._compute_sinusoidal_embedding(all_positions, self.transformer_dim)
+                x = x + pos_emb.unsqueeze(0).expand(B, -1, -1)
+            else:
+                x = x + pos_emb.unsqueeze(0).expand(B, -1, -1)
 
             # Process through transformer blocks
             logger.debug("\nProcessing through transformer blocks...")
@@ -955,9 +960,16 @@ class HolisticMotionTransformer(nn.Module):
                     raise ValueError(f"Non-finite values detected after transformer block {i}")
                 logger.debug(f"Block {i} output shape: {x.shape}")
 
+            # Extract only the current frame outputs (not context)
+            if prev_features is not None:
+                # Take only the last T frames (current window)
+                x_current = x[:, K:, :]  # [B, T, D]
+            else:
+                x_current = x
+
             # Project outputs back to motion parameters
             logger.debug("\nProjecting outputs...")
-            outputs = self._project_outputs(x, B, T)
+            outputs = self._project_outputs(x_current, B, T)
             
             return outputs
 
@@ -1071,6 +1083,20 @@ class HolisticMotionTransformer(nn.Module):
         emb = math.log(10000) / (half_dim - 1)
         emb = torch.exp(torch.arange(half_dim, device=timesteps.device) * -emb)
         emb = timesteps[:, None] * emb[None, :]
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
+    
+    def _get_positional_embedding(self, seq_len: int, dim: int, device: torch.device) -> torch.Tensor:
+        """Get standard positional embedding for sequence."""
+        positions = torch.arange(seq_len, device=device)
+        return self._compute_sinusoidal_embedding(positions, dim)
+    
+    def _compute_sinusoidal_embedding(self, positions: torch.Tensor, dim: int) -> torch.Tensor:
+        """Compute sinusoidal positional embeddings."""
+        half_dim = dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=positions.device) * -emb)
+        emb = positions[:, None] * emb[None, :]
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
  
