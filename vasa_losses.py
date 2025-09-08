@@ -546,7 +546,8 @@ class VASALossModule:
         current_epoch: Optional[int] = None,
         step: Optional[int] = None,
         generated_frames: Optional[torch.Tensor] = None,
-        target_frames: Optional[torch.Tensor] = None
+        target_frames: Optional[torch.Tensor] = None,
+        source_identity: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         """Compute all losses including expression verification and perceptual loss."""
         try:

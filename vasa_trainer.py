@@ -1011,6 +1011,11 @@ class VASATrainer:
                                     logger.error(f"Failed to generate frames for disentanglement loss: {str(e)}")
                                     generated_frames = None
                            
+                            # Prepare source identity for loss computation
+                            source_identity_for_loss = None
+                            if self.identity_image is not None:
+                                source_identity_for_loss = self.identity_image.repeat(B, 1, 1, 1).to(self.accelerator.device)
+                            
                             # Compute losses including perceptual loss
                             losses, metrics = self.loss_module.compute_losses(
                                 outputs=outputs,
@@ -1021,7 +1026,8 @@ class VASATrainer:
                                 current_epoch=self.current_epoch,
                                 step=self.global_step,
                                 generated_frames=generated_frames,
-                                target_frames=target_frames
+                                target_frames=target_frames,
+                                source_identity=source_identity_for_loss  # Pass high-quality identity
                             )
                             
                             # Clean up generated frames immediately after loss computation
