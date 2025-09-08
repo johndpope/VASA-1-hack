@@ -90,16 +90,16 @@ train:
   max_grad_norm: 1.0
   save_freq: 10               # Save more frequently for overfitting test
   
-  # Dropout probabilities for CFG - VASA-1 uses 0.2 drop rate
+  # Dropout probabilities for CFG - VASA-1 uses 0.1 for general conditions
   dropout_probs:
-    audio: 0.2                # VASA-1 paper value: 20% drop rate
-    gaze: 0.2
-    head_distance: 0.2
-    emotion: 0.2
+    audio: 0.1                # Paper default: 0.1 (was 0.2)
+    gaze: 0.1
+    head_distance: 0.1
+    emotion: 0.1
 
-  # CFG scales schedule
+  # CFG scales schedule (aligned with VASA-1 paper)
   cfg_scales:
-    audio: 3.0
+    audio: 0.5      # Paper default: 0.5 (was 3.0)
     gaze: 1.0
     head_distance: 0.8
     emotion: 0.5
@@ -162,8 +162,8 @@ loss:
   use_score_matching: true    # Use VASA-1 style clean signal prediction (not noise)
   lambda_consist: 1.0         # Pairwise transfer loss for disentanglement
   lambda_cross_id: 0.1        # Cross-identity similarity loss
-  lambda_velocity: 0.0001     # Velocity matching regularization
-  lambda_smoothness: 0.0001   # Acceleration smoothness regularization
+  lambda_velocity: 0.001      # Velocity matching regularization (increased for more motion)
+  lambda_smoothness: 0.00001  # Acceleration smoothness regularization (reduced to allow variation)
   
   # Disentanglement loss configuration
   disentangle_num_pairs: 2           # Reduced pairs to save computation
@@ -199,10 +199,10 @@ loss:
 # Inference parameters
 inference:
   batch_size: 1
-  cfg_scale: 3.0
-  eta: 0.0  # DDIM stochastic sampling parameter
+  cfg_scale: 0.5  # Aligned with paper default (was 3.0)
+  eta: 0.5  # Increased from 0.0 for stochasticity to prevent static output
   output_size: [512, 512]
-  num_inference_steps: 50     # Number of DDIM steps during inference
+  num_inference_steps: 100    # Number of DDIM steps (increased from 50 for better quality)
   temperature: 1.0            # Sampling temperature
   top_k: 50                   # Top-k sampling parameter
   top_p: 0.9                 # Nucleus sampling parameter

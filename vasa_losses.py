@@ -1379,7 +1379,7 @@ class VASALossModule:
                             comparison_target['expression_embed']
                         )
          
-                should_visualize = step > 0 and step % self.vis_freq == 0
+                should_visualize = step is not None and step > 0 and step % self.vis_freq == 0
                 if should_visualize:
                     self.visualize_sequence(pred['expression_embed'],target['expression_embed'],step,0)
 

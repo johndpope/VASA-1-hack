@@ -1616,7 +1616,7 @@ class VASAModel(nn.Module):
                 # DDIM sampling loop
                 for i, t in enumerate(self.scheduler.timesteps):
                     # Get model prediction with CFG
-                    model_output = self.forward(
+                    model_output = self.forward_with_cfg(
                         motion_data=motion_sequence,
                         noise_level=t.expand(B),
                         conditions=conditions,

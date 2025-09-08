@@ -452,16 +452,32 @@ class VASAInference:
                 # Generate sequence using last available motion
                 # Use CFG scales from config for stronger audio conditioning
                 cfg_scales = {
-                    'audio': self.config.get('cfg_scale', 3.0),
+                    'audio': self.config.get('cfg_scale', 0.5),  # Updated to paper default
                     'speed': 1.0
                 }
+                
+                # Add small noise to initial latents for diversity
+                noise_scale = 0.01  # Small noise to prevent static output
+                use_window_cache = self.config.get('inference', {}).get('use_window_cache', True)
+                
+                # Add noise for first window or when cache is disabled
+                if window_idx == 0 or not use_window_cache:
+                    if window_idx == 0:
+                        logger.info(f"Adding noise (scale={noise_scale}) to initial latents for diversity")
+                    if not use_window_cache:
+                        logger.info(f"Window cache disabled - regenerating initial state for window {window_idx}")
+                    
+                    motion_data['expression_embed'] = motion_data['expression_embed'] + torch.randn_like(motion_data['expression_embed']) * noise_scale
+                    # Also add small noise to pose parameters
+                    motion_data['theta'] = motion_data['theta'] + torch.randn_like(motion_data['theta']) * noise_scale * 0.1
+                    motion_data['rotation'] = motion_data['rotation'] + torch.randn_like(motion_data['rotation']) * noise_scale * 0.1
                 
                 motion_sequence = self.model.generate_sequence(
                     initial_pose=motion_data,
                     initial_dynamics=motion_data['expression_embed'],
                     conditions=conditions,
-                    num_steps=50,
-                    eta=0.0,  # Deterministic DDIM
+                    num_steps=self.config.get('inference', {}).get('num_inference_steps', 100),  # Use config value
+                    eta=self.config.get('inference', {}).get('eta', 0.5),  # Use config value for stochasticity
                     cfg_scales=cfg_scales
                 )
                 
@@ -484,12 +500,24 @@ class VASAInference:
                         scale_diff = (curr_scale - prev_motion['scale']).abs().mean().item()
                         trans_diff = (curr_translation - prev_motion['translation']).abs().mean().item()
                         
+                        # Calculate standard deviations for motion variance check
+                        expr_std = curr_expression.std().item()
+                        theta_std = curr_theta.std().item()
+                        rot_std = curr_rotation.std().item()
+                        
                         logger.info(f"Frame {window_idx * 50 + t} differences:")
-                        logger.info(f"  Expression diff: {expr_diff:.4f}")
-                        logger.info(f"  Theta diff: {theta_diff:.4f}")
-                        logger.info(f"  Rotation diff: {rot_diff:.4f}")
+                        logger.info(f"  Expression diff: {expr_diff:.4f} (std: {expr_std:.4f})")
+                        logger.info(f"  Theta diff: {theta_diff:.4f} (std: {theta_std:.4f})")
+                        logger.info(f"  Rotation diff: {rot_diff:.4f} (std: {rot_std:.4f})")
                         logger.info(f"  Scale diff: {scale_diff:.4f}")
                         logger.info(f"  Translation diff: {trans_diff:.4f}")
+                        
+                        # Accumulate statistics for sanity check
+                        if not hasattr(self, 'motion_stats'):
+                            self.motion_stats = {'expr': [], 'theta': [], 'rot': []}
+                        self.motion_stats['expr'].append(expr_std)
+                        self.motion_stats['theta'].append(theta_std)
+                        self.motion_stats['rot'].append(rot_std)
 
                     # Generate the frame
                     frame = self._generate_frame(source_params, curr_expression, device)
@@ -514,7 +542,50 @@ class VASAInference:
                 }
 
             logger.info(f"Total frames generated: {len(generated_frames)}")
-            return torch.stack(generated_frames).squeeze(1)
+            
+            # Stack frames for analysis
+            frames_tensor = torch.stack(generated_frames).squeeze(1)  # [T, C, H, W]
+            
+            # Compute frame difference metrics
+            if frames_tensor.shape[0] > 1:
+                # Calculate pixel-wise absolute differences
+                frame_diffs = torch.abs(frames_tensor[1:] - frames_tensor[:-1])
+                mean_abs_diff = frame_diffs.mean().item()
+                max_abs_diff = frame_diffs.max().item()
+                
+                # Calculate PSNR between consecutive frames
+                import numpy as np
+                from skimage.metrics import peak_signal_noise_ratio as psnr
+                psnr_vals = []
+                for i in range(min(10, frames_tensor.shape[0]-1)):  # Sample first 10 frames
+                    frame1 = frames_tensor[i].cpu().numpy().transpose(1, 2, 0)
+                    frame2 = frames_tensor[i+1].cpu().numpy().transpose(1, 2, 0)
+                    psnr_val = psnr(frame1, frame2, data_range=1.0)
+                    psnr_vals.append(psnr_val)
+                avg_psnr = np.mean(psnr_vals) if psnr_vals else float('inf')
+                
+                logger.info("\n=== FRAME DIFFERENCE METRICS ===")
+                logger.info(f"Mean absolute difference: {mean_abs_diff:.4f} (>0.05 for visible motion)")
+                logger.info(f"Max absolute difference: {max_abs_diff:.4f}")
+                logger.info(f"Average PSNR: {avg_psnr:.2f} dB (<30 dB if motion, inf if static)")
+                
+                if mean_abs_diff < 0.02:
+                    logger.warning("⚠️ VERY LOW frame differences detected - likely static output!")
+                elif mean_abs_diff < 0.05:
+                    logger.warning("⚠️ Low frame differences - minimal motion detected")
+                else:
+                    logger.info("✓ Good frame differences - motion detected")
+            
+            # Log motion statistics summary for sanity check
+            if hasattr(self, 'motion_stats') and self.motion_stats['expr']:
+                logger.info("\n=== MOTION SANITY CHECK ===")
+                logger.info(f"Expression std - Mean: {np.mean(self.motion_stats['expr']):.4f}, Max: {np.max(self.motion_stats['expr']):.4f}")
+                logger.info(f"Theta std - Mean: {np.mean(self.motion_stats['theta']):.4f}, Max: {np.max(self.motion_stats['theta']):.4f}")
+                logger.info(f"Rotation std - Mean: {np.mean(self.motion_stats['rot']):.4f}, Max: {np.max(self.motion_stats['rot']):.4f}")
+                logger.info("Expected: theta_std ~0.05-0.2, expr_std >0.01 for proper motion")
+                logger.info("If values are near 0, no motion in latents - check CFG/losses\n")
+            
+            return frames_tensor
 
         except Exception as e:
             logger.error(f"Error in generation: {str(e)}")
@@ -726,6 +797,16 @@ class VASAInference:
                         size=self.window_size,
                         mode='linear'
                     ).transpose(1, 2)  # -> [1, T, D]
+                    
+                    # Log audio feature statistics for sanity check
+                    audio_std = features.std().item()
+                    audio_mean = features.mean().item()
+                    audio_max = features.abs().max().item()
+                    if window_idx == 0:  # Log only for first window to avoid spam
+                        logger.info(f"Audio features - std: {audio_std:.4f}, mean: {audio_mean:.4f}, max: {audio_max:.4f}")
+                        logger.info(f"Expected: std >0.5 for speech, near 0 for silence")
+                        if audio_std < 0.1:
+                            logger.warning("⚠️ Low audio variation detected - may result in static motion")
                     
                     speed_bucket = torch.ones(1, self.window_size, 1).to(self.device) * 4
 
