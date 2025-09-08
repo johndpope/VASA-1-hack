@@ -972,8 +972,10 @@ class VASATrainer:
                                         source_img = target_frames[:, 0]  # [B, C, H, W]
                                     
                                     # Prepare source params for frame generation
+                                    # Pass target frames so volumetric avatar knows what to generate
                                     source_params = {
-                                        'source_img': source_img
+                                        'source_img': source_img,
+                                        'target_img': target_frames  # Pass the actual target frames
                                     }
                                     
                                     # Generate frames using volumetric avatar
@@ -1177,7 +1179,10 @@ class VASATrainer:
                                                 actual_model = self.accelerator.unwrap_model(self.model) if hasattr(self, 'accelerator') else self.model
                                                 single_frame_generated = actual_model.volumetric_avatar.generate_frames_from_motion(
                                                     motion_outputs=single_motion,
-                                                    source_params={'source_img': source_img},
+                                                    source_params={
+                                                        'source_img': source_img,
+                                                        'target_img': single_frame_target  # Pass target frame
+                                                    },
                                                     use_black_background=True  # Use black background for thumbnails
                                                 ).detach()
                                                 

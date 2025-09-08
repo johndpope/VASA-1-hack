@@ -39,8 +39,10 @@ def find_latest_checkpoint(checkpoint_dir):
 def run_training(config_path, resume_from=None, max_retries=5):
     """Run training with automatic recovery from OOM errors."""
     
-    from vasa_trainer import VASATrainer, create_vasa_dataloader
+    from vasa_trainer import VASATrainer
     from vasa_model import VASAModel
+    from vasa_dataset import VASAIntegratedDataset
+    from torch.utils.data import DataLoader
     
     retry_count = 0
     last_checkpoint = resume_from
@@ -81,7 +83,14 @@ def run_training(config_path, resume_from=None, max_retries=5):
             
             # Create data loader
             logger.info("Creating data loader...")
-            train_loader = create_vasa_dataloader(config, is_train=True)
+            dataset = VASAIntegratedDataset(config)
+            train_loader = DataLoader(
+                dataset,
+                batch_size=config.train.batch_size,
+                shuffle=True,
+                num_workers=config.get('num_workers', 4),
+                pin_memory=True
+            )
             
             # Initialize trainer
             logger.info("Initializing trainer...")
