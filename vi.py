@@ -430,6 +430,11 @@ class VASAInference:
                 'expression_embed': initial_expression
             }
             
+            # Debug: Log shapes
+            logger.info(f"DEBUG - motion_data shapes:")
+            for k, v in motion_data.items():
+                logger.info(f"  {k}: {v.shape}")
+            
             # Track all generated frames and previous motion parameters
             generated_frames = []
             prev_motion = {
@@ -439,6 +444,10 @@ class VASAInference:
                 'rotation': None,
                 'translation': None
             }
+            
+            # Initialize prev_context for temporal consistency (VASA-1 paper approach)
+            prev_context = None
+            context_size = self.config.get('training', {}).get('context_size', 10)
             
             # Process each audio window
             for window_idx, window_data in enumerate(audio_windows):
@@ -450,14 +459,85 @@ class VASAInference:
                 }
 
                 # Generate sequence using last available motion
+                # Use CFG scales from config for stronger audio conditioning
+                cfg_scales = {
+                    'audio': self.config.get('cfg_scale', 0.5),  # Updated to paper default
+                    'speed': 1.0
+                }
+                
+                # Add small noise to initial latents for diversity
+                noise_scale = 0.01  # Small noise to prevent static output
+                use_window_cache = self.config.get('inference', {}).get('use_window_cache', True)
+                
+                # Initialize or extract prev_context for temporal consistency
+                if window_idx == 0:
+                    # First window: initialize with zeros per VASA-1 paper
+                    logger.info("First window: Initializing prev_context with zeros")
+                    prev_context = {
+                        'theta': torch.zeros(1, context_size, 3, 4, device=device),
+                        'rotation': torch.zeros(1, context_size, 3, device=device),
+                        'translation': torch.zeros(1, context_size, 3, device=device),
+                        'expression_embed': torch.zeros(1, context_size, 128, device=device),
+                        'audio_features': torch.zeros(1, context_size, 768, device=device)  # Wav2Vec dim
+                    }
+                    # Add small noise to kickstart variation
+                    logger.info(f"Adding noise (scale={noise_scale}) to initial latents and prev_context")
+                    for key in ['expression_embed', 'theta', 'rotation']:
+                        if key in prev_context:
+                            prev_context[key] = prev_context[key] + torch.randn_like(prev_context[key]) * noise_scale * 0.01
+                    
+                    motion_data['expression_embed'] = motion_data['expression_embed'] + torch.randn_like(motion_data['expression_embed']) * noise_scale
+                    motion_data['theta'] = motion_data['theta'] + torch.randn_like(motion_data['theta']) * noise_scale * 0.1
+                    motion_data['rotation'] = motion_data['rotation'] + torch.randn_like(motion_data['rotation']) * noise_scale * 0.1
+                
+                elif prev_context is None:
+                    # Should not happen but handle gracefully
+                    logger.warning("prev_context is None for non-first window, initializing with zeros")
+                    prev_context = {
+                        'theta': torch.zeros(1, context_size, 3, 4, device=device),
+                        'rotation': torch.zeros(1, context_size, 3, device=device),
+                        'translation': torch.zeros(1, context_size, 3, device=device),
+                        'expression_embed': torch.zeros(1, context_size, 128, device=device),
+                        'audio_features': torch.zeros(1, context_size, 768, device=device)
+                    }
+                
+                # Log prev_context statistics for debugging
+                if window_idx == 0 or window_idx % 5 == 0:
+                    logger.info(f"Window {window_idx} prev_context std devs:")
+                    for key in ['expression_embed', 'theta', 'rotation']:
+                        if key in prev_context:
+                            std = prev_context[key].std().item()
+                            logger.info(f"  prev_{key}: {std:.4f}")
+                
                 motion_sequence = self.model.generate_sequence(
                     initial_pose=motion_data,
                     initial_dynamics=motion_data['expression_embed'],
                     conditions=conditions,
-                    num_steps=50
+                    num_steps=self.config.get('inference', {}).get('num_inference_steps', 100),  # Use config value
+                    eta=self.config.get('inference', {}).get('eta', 0.5),  # Use config value for stochasticity
+                    cfg_scales=cfg_scales,
+                    prev_context=prev_context  # Now enabled with proper dimension handling
                 )
                 
                 logger.info(f"Generated sequence shape: {motion_sequence['expression_embed'].shape}")
+                
+                # Debug: Check if generated sequence has variation
+                expr_seq = motion_sequence['expression_embed']
+                expr_std_time = expr_seq.std(dim=1).mean().item()
+                frame_diffs = []
+                for i in range(min(5, expr_seq.shape[1]-1)):
+                    diff = (expr_seq[:, i+1] - expr_seq[:, i]).abs().mean().item()
+                    frame_diffs.append(diff)
+                logger.info(f"DEBUG - Expression std across time: {expr_std_time:.6f}")
+                logger.info(f"DEBUG - First 5 frame diffs: {frame_diffs}")
+                
+                # Check if all frames identical
+                all_same = all(torch.allclose(expr_seq[:, 0], expr_seq[:, i], atol=1e-6) 
+                              for i in range(1, expr_seq.shape[1]))
+                if all_same:
+                    logger.error("❌ CRITICAL: Model generated IDENTICAL expressions for all frames!")
+                else:
+                    logger.info(f"✓ Model generated varied expressions (avg diff: {sum(frame_diffs)/len(frame_diffs):.4f})")
 
                 # Generate frames for this window
                 for t in range(motion_sequence['expression_embed'].size(1)):
@@ -476,15 +556,34 @@ class VASAInference:
                         scale_diff = (curr_scale - prev_motion['scale']).abs().mean().item()
                         trans_diff = (curr_translation - prev_motion['translation']).abs().mean().item()
                         
+                        # Calculate standard deviations for motion variance check
+                        expr_std = curr_expression.std().item()
+                        theta_std = curr_theta.std().item()
+                        rot_std = curr_rotation.std().item()
+                        
                         logger.info(f"Frame {window_idx * 50 + t} differences:")
-                        logger.info(f"  Expression diff: {expr_diff:.4f}")
-                        logger.info(f"  Theta diff: {theta_diff:.4f}")
-                        logger.info(f"  Rotation diff: {rot_diff:.4f}")
+                        logger.info(f"  Expression diff: {expr_diff:.4f} (std: {expr_std:.4f})")
+                        logger.info(f"  Theta diff: {theta_diff:.4f} (std: {theta_std:.4f})")
+                        logger.info(f"  Rotation diff: {rot_diff:.4f} (std: {rot_std:.4f})")
                         logger.info(f"  Scale diff: {scale_diff:.4f}")
                         logger.info(f"  Translation diff: {trans_diff:.4f}")
+                        
+                        # Accumulate statistics for sanity check
+                        if not hasattr(self, 'motion_stats'):
+                            self.motion_stats = {'expr': [], 'theta': [], 'rot': []}
+                        self.motion_stats['expr'].append(expr_std)
+                        self.motion_stats['theta'].append(theta_std)
+                        self.motion_stats['rot'].append(rot_std)
 
-                    # Generate the frame
-                    frame = self._generate_frame(source_params, curr_expression, device)
+                    # Generate the frame with ALL motion parameters
+                    motion_params = {
+                        'expression': curr_expression,
+                        'theta': curr_theta,
+                        'rotation': curr_rotation,
+                        'translation': curr_translation,
+                        'scale': curr_scale
+                    }
+                    frame = self._generate_frame(source_params, motion_params, device)
                     generated_frames.append(frame)
 
                     # Update previous motion parameters
@@ -504,9 +603,63 @@ class VASAInference:
                     'translation': motion_sequence['translation'][:, -1:],
                     'expression_embed': motion_sequence['expression_embed'][:, -1]
                 }
+                
+                # Update prev_context with last K frames from current window for next iteration
+                if window_idx < len(audio_windows) - 1:  # Not last window
+                    prev_context = {
+                        'theta': motion_sequence['theta'][:, -context_size:],
+                        'rotation': motion_sequence['rotation'][:, -context_size:],
+                        'translation': motion_sequence['translation'][:, -context_size:],
+                        'expression_embed': motion_sequence['expression_embed'][:, -context_size:],
+                        'audio_features': window_data['audio_features'][:, -context_size:]
+                    }
+                    logger.debug(f"Updated prev_context with last {context_size} frames for next window")
 
             logger.info(f"Total frames generated: {len(generated_frames)}")
-            return torch.stack(generated_frames).squeeze(1)
+            
+            # Stack frames for analysis
+            frames_tensor = torch.stack(generated_frames).squeeze(1)  # [T, C, H, W]
+            
+            # Compute frame difference metrics
+            if frames_tensor.shape[0] > 1:
+                # Calculate pixel-wise absolute differences
+                frame_diffs = torch.abs(frames_tensor[1:] - frames_tensor[:-1])
+                mean_abs_diff = frame_diffs.mean().item()
+                max_abs_diff = frame_diffs.max().item()
+                
+                # Calculate PSNR between consecutive frames
+                import numpy as np
+                from skimage.metrics import peak_signal_noise_ratio as psnr
+                psnr_vals = []
+                for i in range(min(10, frames_tensor.shape[0]-1)):  # Sample first 10 frames
+                    frame1 = frames_tensor[i].cpu().numpy().transpose(1, 2, 0)
+                    frame2 = frames_tensor[i+1].cpu().numpy().transpose(1, 2, 0)
+                    psnr_val = psnr(frame1, frame2, data_range=1.0)
+                    psnr_vals.append(psnr_val)
+                avg_psnr = np.mean(psnr_vals) if psnr_vals else float('inf')
+                
+                logger.info("\n=== FRAME DIFFERENCE METRICS ===")
+                logger.info(f"Mean absolute difference: {mean_abs_diff:.4f} (>0.05 for visible motion)")
+                logger.info(f"Max absolute difference: {max_abs_diff:.4f}")
+                logger.info(f"Average PSNR: {avg_psnr:.2f} dB (<30 dB if motion, inf if static)")
+                
+                if mean_abs_diff < 0.02:
+                    logger.warning("⚠️ VERY LOW frame differences detected - likely static output!")
+                elif mean_abs_diff < 0.05:
+                    logger.warning("⚠️ Low frame differences - minimal motion detected")
+                else:
+                    logger.info("✓ Good frame differences - motion detected")
+            
+            # Log motion statistics summary for sanity check
+            if hasattr(self, 'motion_stats') and self.motion_stats['expr']:
+                logger.info("\n=== MOTION SANITY CHECK ===")
+                logger.info(f"Expression std - Mean: {np.mean(self.motion_stats['expr']):.4f}, Max: {np.max(self.motion_stats['expr']):.4f}")
+                logger.info(f"Theta std - Mean: {np.mean(self.motion_stats['theta']):.4f}, Max: {np.max(self.motion_stats['theta']):.4f}")
+                logger.info(f"Rotation std - Mean: {np.mean(self.motion_stats['rot']):.4f}, Max: {np.max(self.motion_stats['rot']):.4f}")
+                logger.info("Expected: theta_std ~0.05-0.2, expr_std >0.01 for proper motion")
+                logger.info("If values are near 0, no motion in latents - check CFG/losses\n")
+            
+            return frames_tensor
 
         except Exception as e:
             logger.error(f"Error in generation: {str(e)}")
@@ -719,6 +872,16 @@ class VASAInference:
                         mode='linear'
                     ).transpose(1, 2)  # -> [1, T, D]
                     
+                    # Log audio feature statistics for sanity check
+                    audio_std = features.std().item()
+                    audio_mean = features.mean().item()
+                    audio_max = features.abs().max().item()
+                    if len(windows) == 0:  # Log only for first window to avoid spam
+                        logger.info(f"Audio features - std: {audio_std:.4f}, mean: {audio_mean:.4f}, max: {audio_max:.4f}")
+                        logger.info(f"Expected: std >0.5 for speech, near 0 for silence")
+                        if audio_std < 0.1:
+                            logger.warning("⚠️ Low audio variation detected - may result in static motion")
+                    
                     speed_bucket = torch.ones(1, self.window_size, 1).to(self.device) * 4
 
                     window_frames = self.window_size
@@ -741,17 +904,39 @@ class VASAInference:
             logger.error(f"Error in process_audio: {str(e)}")
             logger.error(traceback.format_exc())
             raise
-    def _generate_frame(self, source_params, curr_expression, device):
-        """Generate a single frame using EMO decoder with given expression."""
+    def _generate_frame(self, source_params, motion_params, device):
+        """Generate a single frame using EMO decoder with given motion parameters."""
         try:
             # Get dimensions from EMO model
             c = self.volumetric_avatar.args.latent_volume_channels
             d = self.volumetric_avatar.args.latent_volume_depth
             s = self.volumetric_avatar.args.latent_volume_size
 
+            # Extract motion parameters
+            curr_expression = motion_params['expression']
+            curr_theta = motion_params['theta']
+            curr_rotation = motion_params['rotation']
+            curr_translation = motion_params['translation']
+            curr_scale = motion_params['scale']
+            
+            # Build full theta matrix from generated components
+            # Combine rotation and translation into full theta matrix
+            theta_matrix = torch.eye(4, device=device).unsqueeze(0)
+            # Set rotation part (top-left 3x3)
+            from scipy.spatial.transform import Rotation as R
+            rot_np = curr_rotation.cpu().numpy().squeeze()
+            rot_matrix = torch.tensor(R.from_euler('xyz', rot_np, degrees=False).as_matrix(), 
+                                     dtype=torch.float32, device=device)
+            theta_matrix[0, :3, :3] = rot_matrix * curr_scale.view(3, 1)  # Apply scale
+            # Set translation part (last column)
+            theta_matrix[0, :3, 3] = curr_translation.squeeze()
+            # Use only first 3 rows for affine transform
+            curr_theta_full = theta_matrix[:, :3, :]
+
             # Create identity grid first
             grid = self.volumetric_avatar.identity_grid_3d.repeat_interleave(1, dim=0)
-            target_rotation_warp = grid.bmm(source_params['theta'][:, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+            # Use the GENERATED theta for target rotation
+            target_rotation_warp = grid.bmm(curr_theta_full.transpose(1, 2)).view(-1, d, s, s, 3)
 
             # Create source tensor with correct shape for RGB image (B, C, H, W)
             dummy_rgb = torch.zeros(1, 3, 512, 512).to(device)  # Create dummy RGB image 
@@ -763,10 +948,10 @@ class VASAInference:
                 'source_mask': source_params['source_mask'],
                 'target_mask': source_params['source_mask'],
                 'source_theta': source_params['theta'],
-                'target_theta': source_params['theta'],
+                'target_theta': curr_theta_full,  # Use GENERATED theta
                 'idt_embed': source_params['idt_embed'],
                 'source_pose_embed': source_params['expression_embed'],
-                'target_pose_embed': curr_expression,
+                'target_pose_embed': curr_expression,  # Use GENERATED expression
                 'target_delta_uv': torch.zeros(1, 3, d, s, s).to(device)
             }
 
@@ -1312,24 +1497,93 @@ class VASAInference:
 # inferencer.visualize_inference_outputs("input.mp4", "vis_output")
 # Example usage
 if __name__ == "__main__":
-    epoch = 6  # Using available checkpoint
-    # inferencer = VASAInference(
-    #     checkpoint_path=f"./checkpoints/checkpoint_epoch_{epoch}.pt",
-    #     config_path='config_stage2.yaml'
-    # )
-
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='VASA-1 Video Inference')
+    parser.add_argument('--config', type=str, default='vasa_config.yaml',
+                        help='Path to config file (default: vasa_config.yaml)')
+    parser.add_argument('--checkpoint', type=str, default=None,
+                        help='Path to checkpoint file (default: auto-detect from config)')
+    parser.add_argument('--input', type=str, default='./junk/11.mp4',
+                        help='Input video path')
+    parser.add_argument('--output', type=str, default=None,
+                        help='Output video path (default: auto-generate)')
+    parser.add_argument('--fps', type=float, default=25.0,
+                        help='Output video FPS (default: 25.0)')
+    parser.add_argument('--neutral', action='store_true',
+                        help='Use neutral expression')
+    parser.add_argument('--visualize', action='store_true',
+                        help='Generate visualization outputs instead of video')
+    parser.add_argument('--target-image', type=str, default='./data/A.png',
+                        help='Target image for visualization (default: ./data/A.png)')
+    parser.add_argument('--vis-dir', type=str, default='vis_output',
+                        help='Output directory for visualizations (default: vis_output)')
+    
+    args = parser.parse_args()
+    
+    # Load config to determine checkpoint path
+    config = OmegaConf.load(args.config)
+    
+    # Determine checkpoint path
+    if args.checkpoint:
+        checkpoint_path = args.checkpoint
+    else:
+        # Auto-detect checkpoint based on config
+        if 'overfit' in args.config:
+            checkpoint_path = "./checkpoints_overfit/best_checkpoint.pt"
+            if not Path(checkpoint_path).exists():
+                # Try to find latest checkpoint
+                checkpoint_dir = Path("./checkpoints_overfit")
+                if checkpoint_dir.exists():
+                    checkpoints = sorted(checkpoint_dir.glob("checkpoint_epoch_*.pt"))
+                    if checkpoints:
+                        checkpoint_path = str(checkpoints[-1])
+                        logger.info(f"Using latest checkpoint: {checkpoint_path}")
+        else:
+            checkpoint_path = "./checkpoints/best_checkpoint.pt"
+            if not Path(checkpoint_path).exists():
+                # Try to find latest checkpoint
+                checkpoint_dir = Path("./checkpoints")
+                if checkpoint_dir.exists():
+                    checkpoints = sorted(checkpoint_dir.glob("checkpoint_epoch_*.pt"))
+                    if checkpoints:
+                        checkpoint_path = str(checkpoints[-1])
+                        logger.info(f"Using latest checkpoint: {checkpoint_path}")
+    
+    # Generate output path if not specified
+    if args.output is None:
+        config_name = Path(args.config).stem
+        input_name = Path(args.input).stem
+        args.output = f"vasa-output-{config_name}-{input_name}.mp4"
+    
+    logger.info(f"Configuration: {args.config}")
+    logger.info(f"Checkpoint: {checkpoint_path}")
+    logger.info(f"Input video: {args.input}")
+    
+    # Create inferencer
     inferencer = VASAInference(
-        checkpoint_path=f"./checkpoints_overfit/best_checkpoint.pt",
-        config_path='overfit_config.yaml'
+        checkpoint_path=checkpoint_path,
+        config_path=args.config
     )
 
-
-    inferencer.generate_from_video(
-        input_video="./junk/11.mp4",
-        output_path=f"vasa-output-epoch-{epoch}.mp4",
-        fps=25.0,
-        neutral_expression=False
-    )
+    if args.visualize:
+        # Generate visualization outputs
+        logger.info(f"Generating visualizations to: {args.vis_dir}")
+        logger.info(f"Target image: {args.target_image}")
+        inferencer.visualize_inference_outputs(
+            input_video=args.input,
+            target_image_path=args.target_image,
+            output_dir=args.vis_dir
+        )
+    else:
+        # Generate video
+        logger.info(f"Output video: {args.output}")
+        inferencer.generate_from_video(
+            input_video=args.input,
+            output_path=args.output,
+            fps=args.fps,
+            neutral_expression=args.neutral
+        )
 
     # inferencer.visualize_inference_outputs(
     #     input_video="./junk/ovs-GiY_848_1.mp4",

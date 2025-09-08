@@ -1,5 +1,61 @@
 # Failed Videos Report
 
 
-junk/10_50frames.mp4:
-  2025-09-06 13:55:05 - video_too_short: {'total_frames': 50, 'min_frames': 85}
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/Vmvk1LC3bbI_2.mp4:
+  2025-09-08 13:34:18 - video_too_short: {'total_frames': 70, 'min_frames': 85}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/2nclzm_QlLw_2.mp4:
+  2025-09-08 13:34:18 - video_too_short: {'total_frames': 79, 'min_frames': 85}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/3vIsXcfPGO4_1.mp4:
+  2025-09-08 13:34:18 - video_too_short: {'total_frames': 75, 'min_frames': 85}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/574oBJ7SR_8_0.mp4:
+  2025-09-08 13:34:18 - video_too_short: {'total_frames': 78, 'min_frames': 85}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/f5umSa_YYX0_7.mp4:
+  2025-09-08 13:34:18 - video_too_short: {'total_frames': 73, 'min_frames': 85}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/FFnlaQlI1So_2.mp4:
+  2025-09-08 13:34:18 - video_too_short: {'total_frames': 78, 'min_frames': 85}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/L0dWlIl6wpE_0.mp4:
+  2025-09-08 13:34:18 - video_too_short: {'total_frames': 77, 'min_frames': 85}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/CVHkRwXmOW8_3.mp4:
+  2025-09-08 13:34:18 - video_too_short: {'total_frames': 79, 'min_frames': 85}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/e5TPJfirdsw_3.mp4:
+  2025-09-08 13:34:18 - video_too_short: {'total_frames': 69, 'min_frames': 85}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/K-rwStyCrw8_8.mp4:
+  2025-09-08 13:34:18 - video_too_short: {'total_frames': 74, 'min_frames': 85}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/2nclzm_QlLw_0.mp4:
+  2025-09-08 13:34:18 - video_too_short: {'total_frames': 75, 'min_frames': 85}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/Ym3EvqlsfaA_6.mp4:
+  2025-09-08 13:34:18 - video_too_short: {'total_frames': 67, 'min_frames': 85}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/yKqcBnmZ0jQ_0.mp4:
+  2025-09-08 13:34:18 - video_too_short: {'total_frames': 79, 'min_frames': 85}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/IGgnz8UUa4M_1.mp4:
+  2025-09-08 13:34:18 - video_too_short: {'total_frames': 75, 'min_frames': 85}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/UBOcWFBBB04_3.mp4:
+  2025-09-08 13:34:18 - video_too_short: {'total_frames': 73, 'min_frames': 85}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/GmVE2_a5I40_6.mp4:
+  2025-09-08 13:34:18 - video_too_short: {'total_frames': 68, 'min_frames': 85}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/QT1Tl6npLic_0.mp4:
+  2025-09-08 13:34:18 - video_too_short: {'total_frames': 78, 'min_frames': 85}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/68CXG6t1mxU_5.mp4:
+  2025-09-08 14:46:33 - face_detection_failed: {'frame_shape': (512, 512, 3), 'error': 'No face landmarks detected'}
+  2025-09-08 14:46:33 - landmark_detection_failed: {'error': 'Failed to extract valid landmarks'}
+
+/media/12TB/Downloads/CelebV-HQ/celebvhq/35666/8PX0z-PatVk_1.mp4:
+  2025-09-08 14:46:36 - face_detection_failed: {'frame_shape': (512, 512, 3), 'error': 'No face landmarks detected'}
+  2025-09-08 14:46:36 - landmark_detection_failed: {'error': 'Failed to extract valid landmarks'}

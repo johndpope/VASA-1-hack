@@ -761,7 +761,10 @@ class VASATrainer:
             val_stats = self.validate() if self.val_loader else None
             
             # Check if this is the best model based on training or validation loss
-            current_loss = val_stats['total'] if val_stats else train_stats.get('total', float('inf'))
+            if val_stats and isinstance(val_stats, dict):
+                current_loss = val_stats.get('total', val_stats.get('loss', float('inf')))
+            else:
+                current_loss = train_stats.get('total', float('inf'))
             
             # Save checkpoint only if it's the best model
             if current_loss < self.best_val_loss:
