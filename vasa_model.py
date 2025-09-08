@@ -839,7 +839,9 @@ class HolisticMotionTransformer(nn.Module):
             # Validate input shapes with explicit assertions
             assert motion_data['theta'].shape == (B, T, 3, 4), f"Expected theta shape [B,T,3,4], got {motion_data['theta'].shape}"
             assert motion_data['rotation'].shape == (B, T, 3), f"Expected rotation shape [B,T,3], got {motion_data['rotation'].shape}"
-            assert motion_data['scale'].shape == (B, T, 3), f"Expected scale shape [B,T,3], got {motion_data['scale'].shape}"
+            # Scale is optional during inference
+            if 'scale' in motion_data:
+                assert motion_data['scale'].shape == (B, T, 3), f"Expected scale shape [B,T,3], got {motion_data['scale'].shape}"
             assert motion_data['translation'].shape == (B, T, 3), f"Expected translation shape [B,T,3], got {motion_data['translation'].shape}" 
             assert motion_data['expression_embed'].shape == (B, T, 128), f"Expected expression shape [B,T,128], got {motion_data['expression_embed'].shape}"
             assert noise_level.shape == (B,), f"Expected noise_level shape [B], got {noise_level.shape}"
@@ -1006,12 +1008,18 @@ class HolisticMotionTransformer(nn.Module):
 
 
 
-            # scale
-            scale = motion_data['scale']  # [B, T, 3]
-            scale = torch.clamp(scale, -10.0, 10.0)
-            scale = self.motion_projections['scale'](scale)
+            # scale (optional - may not be present during inference)
+            if 'scale' in motion_data:
+                scale = motion_data['scale']  # [B, T, 3]
+                scale = torch.clamp(scale, -10.0, 10.0)
+                scale = self.motion_projections['scale'](scale)
+            else:
+                # Default scale of 1.0 for all dimensions
+                scale = torch.ones(B, T, 3, device=device, dtype=dtype)
+                scale = self.motion_projections['scale'](scale)
+            
             # Combine features with residual connection
-            features = torch.cat([theta,scale, rotation, translation, expression], dim=-1)
+            features = torch.cat([theta, scale, rotation, translation, expression], dim=-1)
             motion_features = self.motion_combine(features)  # Includes residual block
             
             # Final validations
