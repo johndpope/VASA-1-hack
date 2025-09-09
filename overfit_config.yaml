@@ -59,7 +59,7 @@ motion:
 
 # Training parameters - OVERFITTING FOCUSED
 train:
-  resume_from: null # Resume from epoch 32
+  resume_from: "checkpoints_overfit/best_checkpoint.pt" # Resume from best checkpoint
   # when to add conditional signals
   control_start_epoch: 0      # Start control immediately for overfitting
 
@@ -245,7 +245,7 @@ num_workers: 8                # Multi-threading for data loading
 debug: false
 wandb:
   project: "vasa-overfit"
-  enabled: true
+  enabled: false
 
 # Additional components
 face_analysis:

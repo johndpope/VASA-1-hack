@@ -1,0 +1,41 @@
+# VASA-VA Integration Fix: Achieving Pipeline2-Quality Output
+
+## Problem Statement
+The VASA model is generating terrible frames (green glows, distortions) when using the volumetric avatar (VA) from EmoPortraits. The issue stems from a fundamental mismatch between how VA expects warping signals and what VASA generates. Pipeline2.py produces clean 3-avatar visualization, but VASA's audio-driven motion generation doesn't align properly with VA's warping mechanism.
+
+## Core Technical Issues
+1. **Expression Space Misalignment**: VASA's expression embeddings aren't in the same latent space as VA's target_pose_embed
+2. **Pose Range Issues**: VASA theta values exceed VA's expected rotations/translations
+3. **No Temporal Smoothing**: Raw VASA motion is jittery without proper filtering
+4. **Source Not Neutral**: Identity image may have residual expression affecting canonical volume
+5. **Masking/Rendering Leaks**: Incomplete masking causing green glow artifacts
+
+## Solution Requirements
+1. Properly align VASA's motion outputs with VA's warping expectations
+2. Implement temporal smoothing for stable motion
+3. Create 3-avatar visualization like pipeline2.py (source, driving proxy, target)
+4. Fix masking and rendering artifacts
+5. Ensure neutral source for proper canonical volume
+
+## Technical Approach
+- Collect statistics from real driving videos to understand VA's expression/pose space
+- Normalize VASA outputs to match VA's expected distributions
+- Apply temporal smoothing to VASA motion
+- Implement proper masking with higher thresholds
+- Create neutral volume for driving proxy visualization
+
+## Success Criteria
+- Generated frames match pipeline2.py quality
+- No green glows or distortions
+- Smooth, realistic motion
+- Proper identity preservation
+- 3-avatar debug visualization working
+
+## Implementation Steps
+1. Analyze VA's expected motion space from real videos
+2. Update bridge to normalize VASA outputs
+3. Add temporal smoothing to motion
+4. Fix masking thresholds and compositing
+5. Implement 3-avatar visualization
+6. Test with various inputs
+7. Fine-tune parameters for optimal quality

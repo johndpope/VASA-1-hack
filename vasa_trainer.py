@@ -30,6 +30,13 @@ if 'nemo' not in sys.path:
 from logger import logger,TorchDebugger
 import traceback
 from vasa_dataset import WorkerState, VASAIntegratedDataset
+# Try to use improved bridge, fall back to original if not available
+try:
+    from vasa_va_bridge_v2 import VASAVolumetricAvatarBridgeV2 as VASAVolumetricAvatarBridge
+    logger.info("Using improved VASAVolumetricAvatarBridgeV2 with normalization and smoothing")
+except ImportError:
+    from vasa_va_bridge import VASAVolumetricAvatarBridge
+    logger.warning("Falling back to original VASAVolumetricAvatarBridge")
 from torch.utils.data import random_split
 import torch.multiprocessing as mp
 import random
@@ -568,6 +575,10 @@ class VASATrainer:
             device=self.accelerator.device
         )
         
+        # Initialize volumetric avatar bridge for proper frame generation
+        self.va_bridge = VASAVolumetricAvatarBridge(model.volumetric_avatar)
+        logger.info("Initialized VASAVolumetricAvatarBridge for proper frame generation")
+        
         # Initialize TDD progressive loss if enabled
         self.tdd_loss_module = None
         if config.loss.get('use_tdd_progressive', False):
@@ -811,6 +822,10 @@ class VASATrainer:
         self.train_metrics.reset()
         num_batches = len(self.train_loader)
         
+        # Clear VA bridge cache at start of epoch
+        if hasattr(self, 'va_bridge'):
+            self.va_bridge.clear_cache()
+        
         logger.info(f"\n=== Starting Epoch {self.current_epoch} ===")
         logger.info(f"Batch size: {self.config.train.batch_size}")
         logger.info(f"Total batches: {num_batches}")
@@ -993,25 +1008,47 @@ class VASATrainer:
                                                 else:
                                                     sparse_outputs[key] = value
                                             
-                                            # Generate only 2 frames instead of T frames
-                                            generated_frames = self.model.volumetric_avatar.generate_frames_from_motion(
-                                                motion_outputs=sparse_outputs,
-                                                source_params=source_params,
-                                                use_black_background=True  # Use black background for training
-                                            )
-                                            generated_frames = generated_frames.detach()
+                                            # Generate only 2 frames instead of T frames using bridge
+                                            # Check if using improved bridge
+                                            if hasattr(self.va_bridge, 'generate_frames_with_viz'):
+                                                result = self.va_bridge.generate_frames_with_viz(
+                                                    motion_outputs=sparse_outputs,
+                                                    source_img=source_img,
+                                                    use_black_background=True,
+                                                    enable_3avatar=False,  # Disable for training to save memory
+                                                    enable_smoothing=True  # Enable smoothing
+                                                )
+                                                generated_frames = result['frames'].detach()
+                                            else:
+                                                generated_frames = self.va_bridge.generate_frames_from_motion(
+                                                    motion_outputs=sparse_outputs,
+                                                    source_img=source_img,
+                                                    use_black_background=True
+                                                )
+                                                generated_frames = generated_frames.detach()
                                             
                                             # Also make target frames sparse to match
                                             sparse_target_frames = torch.stack([target_frames[:, 0], target_frames[:, -1]], dim=1)
                                             target_frames = sparse_target_frames
                                         else:
-                                            # Generate all frames (more faithful to paper but memory intensive)
-                                            generated_frames = self.model.volumetric_avatar.generate_frames_from_motion(
-                                                motion_outputs=outputs,
-                                                source_params=source_params,
-                                                use_black_background=True  # Use black background for training
-                                            )
-                                            generated_frames = generated_frames.detach()
+                                            # Generate all frames (more faithful to paper but memory intensive) using bridge
+                                            # Check if using improved bridge
+                                            if hasattr(self.va_bridge, 'generate_frames_with_viz'):
+                                                result = self.va_bridge.generate_frames_with_viz(
+                                                    motion_outputs=outputs,
+                                                    source_img=source_img,
+                                                    use_black_background=True,
+                                                    enable_3avatar=False,  # Disable for training to save memory
+                                                    enable_smoothing=True  # Enable smoothing
+                                                )
+                                                generated_frames = result['frames'].detach()
+                                            else:
+                                                generated_frames = self.va_bridge.generate_frames_from_motion(
+                                                    motion_outputs=outputs,
+                                                    source_img=source_img,
+                                                    use_black_background=True
+                                                )
+                                                generated_frames = generated_frames.detach()
                                         
                                     frame_type = "sparse (2 frames)" if use_sparse_frames else "full"
                                     logger.debug(f"Generated frames shape ({frame_type}): {generated_frames.shape}")
@@ -1174,15 +1211,10 @@ class VASATrainer:
                                                         else:
                                                             single_motion[key] = stored_outputs[key] if not isinstance(stored_outputs[key], torch.Tensor) else stored_outputs[key].to(device)
                                                 
-                                                # Generate single frame only
-                                                # Access the actual model (unwrap from accelerator if needed)
-                                                actual_model = self.accelerator.unwrap_model(self.model) if hasattr(self, 'accelerator') else self.model
-                                                single_frame_generated = actual_model.volumetric_avatar.generate_frames_from_motion(
+                                                # Generate single frame only using bridge
+                                                single_frame_generated = self.va_bridge.generate_frames_from_motion(
                                                     motion_outputs=single_motion,
-                                                    source_params={
-                                                        'source_img': source_img,
-                                                        'target_img': single_frame_target  # Pass target frame
-                                                    },
+                                                    source_img=source_img,
                                                     use_black_background=True  # Use black background for thumbnails
                                                 ).detach()
                                                 

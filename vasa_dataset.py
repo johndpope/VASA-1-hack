@@ -1596,7 +1596,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         return str(self._get_or_extract_audio(video_path))
 
     def __len__(self) -> int:
-        return len(self.video_paths)
+        return len(self.windows)
 
 
 
@@ -2213,40 +2213,39 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """Get all windows for a video with proper audio feature handling"""
+        """Get a single window by index with proper audio feature handling"""
         try:
-            # Get video path for this index
-            video_path = self.video_paths[idx]
-            # logger.debug(f"Processing video: {video_path}")
-            # Check cache first
-            if self.cache.has_cache(video_path):
-                windows_data = self.cache.load_windows(video_path)
-                return {
-                    'windows': windows_data,
-                    'video_path': video_path,
-                    'num_windows': len(windows_data)
-                }
+            # Get window info for this index
+            if idx >= len(self.windows):
+                raise IndexError(f"Index {idx} out of range for {len(self.windows)} windows")
+            
+            window = self.windows[idx]
+            video_path = window['video_path']
+            # logger.debug(f"Processing window {idx} from video: {video_path}")
+            
+            # Check if we have cached data for this specific window
+            cache_key = f"{video_path}_window_{window['window_idx']}"
+            if hasattr(self.cache, 'has_window_cache') and self.cache.has_window_cache(cache_key):
+                return self.cache.load_window(cache_key)
+            
+            # Process the single window
+            try:
+                # Extract frames
+                frames, frame_indices = self._extract_frames(
+                    video_path,
+                    window['start_frame'],
+                    self.sequence_length
+                )
+                
+                if not frames:
+                    return self._get_zero_sample()
 
-            # Process each window
-            windows_data = []
-            for window in self.video_windows[video_path]:
-                try:
-                    # Extract frames
-                    frames, frame_indices = self._extract_frames(
-                        video_path,
-                        window['start_frame'],
-                        self.sequence_length
-                    )
-                    
-                    if not frames:
-                        continue
-
-                    # Extract EMO features
-                    frames_tensor = torch.stack(frames)
-                    with torch.no_grad():
-                        emo_features = self._extract_emo_features(frames_tensor)
-                        if not emo_features:
-                            continue
+                # Extract EMO features
+                frames_tensor = torch.stack(frames)
+                with torch.no_grad():
+                    emo_features = self._extract_emo_features(frames_tensor)
+                    if not emo_features:
+                        return self._get_zero_sample()
 
                     # Extract both types of audio features
                     wav2vec_features, mfcc_features = self._extract_audio_features(
@@ -2340,7 +2339,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     lip_motion_sequence = self._get_lip_motion_sequence(lips_landmarks)
                     if lip_motion_sequence is None:
                         logger.warning(f"Skipping window - no valid lip motion")
-                        continue
+                        return self._get_zero_sample()
 
                     # Create window data with correct key names
                     window_data = {
@@ -2395,30 +2394,18 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                             # Create correct shape with zeros
                             window_data[key] = torch.zeros(expected_shape, dtype=torch.float32)
                     
-                    windows_data.append(window_data)
+                    # Return the single window data directly
+                    return window_data
 
-                except Exception as e:
-                    logger.error(f"Error processing window: {str(e)}")
-                    self.tracker.dispatch(VideoEventData(
-                        video_path=video_path,
-                        event_type=VideoEvent.PROCESSING_ERROR,
-                        details={"error": f"Face attribute error: {str(e)}"}
-                    ))
-                    logger.error(traceback.format_exc())
-                    continue
-
-            if not windows_data:
-                logger.warning(f"No valid windows for video {video_path}")
+            except Exception as e:
+                logger.error(f"Error processing window: {str(e)}")
+                self.tracker.dispatch(VideoEventData(
+                    video_path=video_path,
+                    event_type=VideoEvent.PROCESSING_ERROR,
+                    details={"error": f"Face attribute error: {str(e)}"}
+                ))
+                logger.error(traceback.format_exc())
                 return self._get_zero_sample()
-
-            # Cache the results
-            self.cache.save_windows(video_path, windows_data)
-        
-            return {
-                'windows': windows_data,
-                'video_path': video_path,
-                'num_windows': len(windows_data)
-            }
 
         except Exception as e:
             logger.error(f"Error in __getitem__: {str(e)}")

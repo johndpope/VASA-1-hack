@@ -1,0 +1,77 @@
+{
+  "master": {
+    "tasks": [
+      {
+        "id": 1,
+        "title": "Analyze VA motion space distributions",
+        "description": "Collect statistics from real driving videos to understand VA's expression/pose space distributions",
+        "details": "Create a script to process pipeline2.py outputs with real driving videos and collect mean/std of target_pose_embed and target_theta values. This will establish the expected ranges for VA warping.",
+        "testStrategy": "",
+        "status": "done",
+        "dependencies": [],
+        "priority": "high",
+        "subtasks": []
+      },
+      {
+        "id": 2,
+        "title": "Normalize VASA outputs to VA space",
+        "description": "Update vasa_va_bridge.py to normalize VASA's expression and pose outputs to match VA's expected distributions",
+        "details": "Implement normalization functions that transform VASA's expression_embed and theta values to match the mean/std collected from VA's real driving videos. This will prevent out-of-distribution warping artifacts.",
+        "testStrategy": "",
+        "status": "done",
+        "dependencies": [
+          1
+        ],
+        "priority": "high",
+        "subtasks": []
+      },
+      {
+        "id": 3,
+        "title": "Implement temporal smoothing",
+        "description": "Add temporal smoothing to VASA motion outputs to eliminate jitter",
+        "details": "Implement exponential moving average (EMA) smoothing for theta and expression values. Use alpha=0.7 for pose and alpha=0.9 for expressions. Also implement the config's smooth_window:5 using convolution.",
+        "testStrategy": "",
+        "status": "done",
+        "dependencies": [],
+        "priority": "high",
+        "subtasks": []
+      },
+      {
+        "id": 4,
+        "title": "Fix masking thresholds and compositing",
+        "description": "Increase face mask threshold from 0.6 to 0.8 and enable modnet_mask for better compositing",
+        "details": "Update face_idt.forward threshold to 0.8 to prevent green glow artifacts. Enable modnet_mask=True in bridge for better edge handling. Test with different backgrounds to verify leak prevention.",
+        "testStrategy": "",
+        "status": "done",
+        "dependencies": [],
+        "priority": "high",
+        "subtasks": []
+      },
+      {
+        "id": 5,
+        "title": "Implement 3-avatar visualization",
+        "description": "Create visualization showing source/identity, driving proxy, and target frames side-by-side like pipeline2.py",
+        "details": "Modify vasa_va_bridge.py to generate 3 columns: (1) static source identity, (2) neutral face with VASA motion as driving proxy, (3) final warped result. Concatenate horizontally for debugging and quality assessment.",
+        "testStrategy": "",
+        "status": "done",
+        "dependencies": [],
+        "priority": "medium",
+        "subtasks": []
+      }
+    ],
+    "metadata": {
+      "projectName": "VASA-VA-Integration",
+      "createdAt": "2024-09-09",
+      "currentTag": "master",
+      "tags": {
+        "master": {
+          "description": "Main development branch",
+          "createdAt": "2024-09-09"
+        }
+      },
+      "created": "2025-09-09T01:31:02.525Z",
+      "description": "Tasks for master context",
+      "updated": "2025-09-09T01:35:56.872Z"
+    }
+  }
+}

@@ -1,14 +1,23 @@
-2025-09-09 11:57:04,181 - __main__ - INFO - Loading config from overfit_config.yaml
-2025-09-09 11:57:07,331 - vasa - INFO - Using ChunkedWindowCache for flexible window sizes
-2025-09-09 11:57:07,332 - vasa - INFO - Using improved VASAVolumetricAvatarBridgeV2 with normalization and smoothing
-2025-09-09 11:57:07,332 - __main__ - INFO - Loading volumetric avatar...
-2025-09-09 11:57:14,354 - __main__ - INFO - Volumetric avatar loaded successfully
-2025-09-09 11:57:14,354 - __main__ - INFO - Initializing VASA model...
-2025-09-09 11:57:14,355 - vasa - INFO - Initializing EfficientConditionEmbedding: model_dim=512, max_seq_len=20
-2025-09-09 11:57:14,367 - vasa - INFO - Set prev_context dimensions: expression=64, audio=64
-2025-09-09 11:57:14,367 - vasa - INFO - Using Wav2Vec audio features (768 dimensions)
-2025-09-09 11:57:14,368 - vasa - INFO - Using full projection for Wav2Vec features (768 dimensions)
-2025-09-09 11:57:15,070 - __main__ - INFO - Creating data loader...
+2025-09-09 11:58:35,587 - __main__ - INFO - Loading config from overfit_config.yaml
+2025-09-09 11:58:38,742 - vasa - INFO - Using ChunkedWindowCache for flexible window sizes
+2025-09-09 11:58:38,742 - vasa - INFO - Using improved VASAVolumetricAvatarBridgeV2 with normalization and smoothing
+2025-09-09 11:58:38,742 - __main__ - INFO - Loading volumetric avatar...
+2025-09-09 11:58:46,092 - __main__ - INFO - Volumetric avatar loaded successfully
+2025-09-09 11:58:46,092 - __main__ - INFO - Initializing VASA model...
+2025-09-09 11:58:46,094 - vasa - INFO - Initializing EfficientConditionEmbedding: model_dim=512, max_seq_len=20
+2025-09-09 11:58:46,105 - vasa - INFO - Set prev_context dimensions: expression=64, audio=64
+2025-09-09 11:58:46,105 - vasa - INFO - Using Wav2Vec audio features (768 dimensions)
+2025-09-09 11:58:46,106 - vasa - INFO - Using full projection for Wav2Vec features (768 dimensions)
+2025-09-09 11:58:46,806 - __main__ - INFO - Creating data loader...
+2025-09-09 11:58:46,807 - window_cache - INFO - Initialized WindowCache with chunk_size=1000, overlap=50
+2025-09-09 11:58:46,807 - vasa - INFO - Initialized ChunkedWindowCache at cache_overfit
+2025-09-09 11:58:46,807 - video_tracker - INFO - Initialized ProblematicVideosTracker with output dir: bad_videos
+2025-09-09 11:58:46,807 - vasa - INFO - Using audio cache directory: junk/audio_cache
+2025-09-09 11:58:46,807 - vasa - INFO - Found 6 total videos
+2025-09-09 11:58:46,807 - vasa - INFO - Loaded cached status with 6 entries
+2025-09-09 11:58:46,807 - vasa - INFO - Kept 6 valid cached entries
+2025-09-09 11:58:46,807 - vasa - INFO - Found 6 videos with valid audio
+2025-09-09 11:58:46,807 - vasa - INFO - Pre-extracting audio for 6 videos...
 Hybrid stages [True, True, True]
 bbbbbbbbbbb
 Hybrid stages [True, True, True]
@@ -30,24 +39,107 @@ WS applied to warp_embed_head_orig_nw
 WS applied to volume_process_nw
 WS applied to volume_source_nw
 WS applied to decoder_nw
+Extracting audio:   0%|          | 0/6 [00:00<?, ?it/s]2025-09-09 11:58:46,808 - vasa - INFO - Processed 1/6 videos
+Extracting audio: 100%|██████████| 6/6 [00:00<00:00, 17061.58it/s]
+2025-09-09 11:58:46,808 - vasa - INFO - 
+=== Creating Window Indices ===
+2025-09-09 11:58:46,808 - vasa - INFO - Window size: 20
+2025-09-09 11:58:46,808 - vasa - INFO - Stride: 10
+2025-09-09 11:58:46,808 - vasa - INFO - Context size: 10
+2025-09-09 11:58:46,808 - vasa - INFO - Total videos to process: 6
+2025-09-09 11:58:46,813 - vasa - INFO - Created 30 windows for video junk/7.mp4
+  First window: 0 -> 20
+  Last window: 290 -> 310
+2025-09-09 11:58:46,817 - vasa - INFO - Created 29 windows for video junk/11.mp4
+  First window: 0 -> 20
+  Last window: 280 -> 300
+2025-09-09 11:58:46,821 - vasa - INFO - Created 36 windows for video junk/3.mp4
+  First window: 0 -> 20
+  Last window: 350 -> 370
+2025-09-09 11:58:46,825 - vasa - INFO - Created 36 windows for video junk/9.mp4
+  First window: 0 -> 20
+  Last window: 350 -> 370
+2025-09-09 11:58:46,829 - vasa - INFO - Created 36 windows for video junk/15.mp4
+  First window: 0 -> 20
+  Last window: 350 -> 370
+2025-09-09 11:58:46,833 - vasa - INFO - Created 149 windows for video junk/l3.mp4
+  First window: 0 -> 20
+  Last window: 1480 -> 1500
+2025-09-09 11:58:46,833 - vasa - INFO - 
+Window Creation Summary:
+  Valid videos: 6/6
+  Total windows: 316
+  Window size: 20
+  Stride: 10
+  Expected overlap: 10
+2025-09-09 11:58:46,834 - vasa - INFO - Created 316 total windows across 6 videos
+2025-09-09 11:58:46,834 - __main__ - INFO - Initializing trainer...
+2025-09-09 11:58:46,852 - vasa - INFO - Mixed precision training: ENABLED (fp16)
+2025-09-09 11:58:46,852 - vasa - INFO - Gradient accumulation steps: 2
+2025-09-09 11:58:46,852 - vasa - INFO - === Initializing SyncNetModel ===
+2025-09-09 11:58:46,852 - vasa - INFO - FC layers size: 1024
+2025-09-09 11:58:46,852 - vasa - INFO - Building audio encoder...
+2025-09-09 11:58:46,864 - vasa - INFO - Audio encoder built
+2025-09-09 11:58:46,864 - vasa - INFO - Building visual encoder...
+2025-09-09 11:58:46,881 - vasa - INFO - Visual encoder built
+2025-09-09 11:58:46,885 - vasa - INFO - Network components initialized
+2025-09-09 11:58:47,689 - vasa - INFO - Initialized InceptionResnetV1 for identity extraction
+2025-09-09 11:58:47,689 - vasa_va_bridge_v2 - INFO - Loaded VA motion statistics from va_motion_statistics.pkl
+2025-09-09 11:58:47,695 - vasa_va_bridge_v2 - INFO - Expression embed normalization ready - mean shape: torch.Size([128])
+2025-09-09 11:58:47,696 - vasa_va_bridge_v2 - INFO - Theta normalization ready - mean shape: torch.Size([3, 4])
+2025-09-09 11:58:47,696 - vasa - INFO - Initialized VASAVolumetricAvatarBridge for proper frame generation
+2025-09-09 11:58:47,696 - vasa - INFO - 🎯 TDD Progressive Loss System Enabled
+2025-09-09 11:58:47,696 - vasa - INFO -    Losses will unlock progressively based on training milestones
+2025-09-09 11:58:47,696 - vasa - INFO - Loading high-quality identity image from: nemo/data/IMG_1.png
+2025-09-09 11:58:47,755 - vasa - INFO - Identity image loaded with shape: torch.Size([1, 3, 512, 512])
+2025-09-09 11:58:47,756 - vasa - INFO - Initialized MotionSequenceHandler:
+2025-09-09 11:58:47,756 - vasa - INFO -   window_size: 20
+2025-09-09 11:58:47,756 - vasa - INFO -   stride: 10
+2025-09-09 11:58:47,756 - vasa - INFO -   context_size: 10
+2025-09-09 11:58:47,756 - vasa - INFO -   min_window_size: 10
+2025-09-09 11:58:47,756 - vasa - INFO -   max_window_size: 20
+2025-09-09 11:58:47,756 - vasa - INFO -   overlap_size: 10
+2025-09-09 11:58:47,759 - vasa - INFO - Learning Rate Parameter Groups:
+2025-09-09 11:58:47,759 - vasa - INFO -   motion_proj_theta:
+2025-09-09 11:58:47,759 - vasa - INFO -     Number of parameters: 16
+2025-09-09 11:58:47,759 - vasa - INFO -     Learning rate: 0.005
+2025-09-09 11:58:47,759 - vasa - INFO -   motion_proj_rotation:
+2025-09-09 11:58:47,759 - vasa - INFO -     Number of parameters: 16
+2025-09-09 11:58:47,759 - vasa - INFO -     Learning rate: 0.005
+2025-09-09 11:58:47,759 - vasa - INFO -   motion_proj_translation:
+2025-09-09 11:58:47,759 - vasa - INFO -     Number of parameters: 16
+2025-09-09 11:58:47,759 - vasa - INFO -     Learning rate: 0.005
+2025-09-09 11:58:47,759 - vasa - INFO -   motion_proj_expression:
+2025-09-09 11:58:47,759 - vasa - INFO -     Number of parameters: 16
+2025-09-09 11:58:47,759 - vasa - INFO -     Learning rate: 0.005
+2025-09-09 11:58:47,759 - vasa - INFO -   other:
+2025-09-09 11:58:47,759 - vasa - INFO -     Number of parameters: 724
+2025-09-09 11:58:47,759 - vasa - INFO -     Learning rate: 0.005
+2025-09-09 11:58:47,810 - __main__ - INFO - Starting training from epoch 0
+2025-09-09 11:58:47,810 - __main__ - INFO - Using improved VASAVolumetricAvatarBridgeV2: True
+2025-09-09 11:58:47,810 - __main__ - INFO - Configuration:
+2025-09-09 11:58:47,810 - __main__ - INFO -   - Batch size: 28
+Downloads complete.
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+Loading model from: /home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/lpips/weights/v0.1/alex.pth
 ╭───────────────────── Traceback (most recent call last) ──────────────────────╮
-│ /media/2TB/VASA-1-hack/train_overfit.py:144 in <module>                      │
+│ /media/2TB/VASA-1-hack/train_overfit.py:154 in <module>                      │
 │                                                                              │
-│   141 │   logger.info("Training completed!")                                 │
-│   142                                                                        │
-│   143 if __name__ == "__main__":                                             │
-│ ❱ 144 │   main()                                                             │
-│   145                                                                        │
+│   151 │   logger.info("Training completed!")                                 │
+│   152                                                                        │
+│   153 if __name__ == "__main__":                                             │
+│ ❱ 154 │   main()                                                             │
+│   155                                                                        │
 │                                                                              │
-│ /media/2TB/VASA-1-hack/train_overfit.py:86 in main                           │
+│ /media/2TB/VASA-1-hack/train_overfit.py:130 in main                          │
 │                                                                              │
-│    83 │   # Create data loader                                               │
-│    84 │   logger.info("Creating data loader...")                             │
-│    85 │   train_dataset = VASAIntegratedDataset(                             │
-│ ❱  86 │   │   data_dir=config.dataset.data_dir,                              │
-│    87 │   │   config=config,                                                 │
-│    88 │   │   split='train'                                                  │
-│    89 │   )                                                                  │
+│   127 │   logger.info(f"Using improved VASAVolumetricAvatarBridgeV2: {hasatt │
+│   128 │   logger.info(f"Configuration:")                                     │
+│   129 │   logger.info(f"  - Batch size: {config.train.batch_size}")          │
+│ ❱ 130 │   logger.info(f"  - Learning rate: {config.train.learning_rate}")    │
+│   131 │   logger.info(f"  - Num epochs: {config.train.num_epochs}")          │
+│   132 │   logger.info(f"  - Window size: {config.train.window_size}")        │
+│   133 │   logger.info(f"  - Overlap: {config.train.overlap}")                │
 │                                                                              │
 │ /home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/omegac │
 │ onf/dictconfig.py:355 in __getattr__                                         │
@@ -137,6 +229,6 @@ WS applied to decoder_nw
 │   482 │   │   │   raise MissingMandatoryValue("Missing mandatory value: $KEY │
 │   483 │   │   return value                                                   │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-ConfigAttributeError: Missing key data_dir
-    full_key: dataset.data_dir
+ConfigAttributeError: Missing key learning_rate
+    full_key: train.learning_rate
     object_type=dict
