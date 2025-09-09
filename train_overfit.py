@@ -10,6 +10,7 @@ from omegaconf import OmegaConf
 import sys
 import logging
 import os
+import wandb
 
 # Setup logging
 logging.basicConfig(
@@ -29,6 +30,13 @@ def main():
         
     logger.info(f"Loading config from {config_path}")
     config = OmegaConf.load(config_path)
+    
+    # Initialize wandb for tracking
+    wandb.init(
+        project="vasa-overfitting",
+        name="overfit-test",
+        config=OmegaConf.to_container(config, resolve=True)
+    )
     
     # Import after config to ensure paths are set
     sys.path.append('nemo')

@@ -63,7 +63,7 @@ motion:
 
 # Training parameters
 train:
-  resume_from: "./checkpoints/best_checkpoint.pt" #  #  # "./checkpoints/checkpoint_epoch_600.pt"  # or specify a path to checkpoint
+  resume_from: "" # Set to checkpoint path to resume training
   # when to add conditional signals
   control_start_epoch: 0 # 👹 this should be 1 or 0 for large video datasets with smaller epochs
 

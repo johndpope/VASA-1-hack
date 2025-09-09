@@ -175,13 +175,12 @@ def create_window_sequence_collate_fn(context_size: int = 10):
                     window['prev_expression'] = prev_window['expression_embed'][-context_size:]
                     window['prev_audio'] = prev_window['audio_features'][-context_size:]
                 else:
-                    # No previous context - use zeros
-                    T = window['theta'].shape[0]
-                    window['prev_theta'] = torch.zeros(context_size, window['theta'].shape[-1])
-                    window['prev_rotation'] = torch.zeros(context_size, *window['rotation'].shape[1:])
-                    window['prev_translation'] = torch.zeros(context_size, *window['translation'].shape[1:])
-                    window['prev_expression'] = torch.zeros(context_size, *window['expression_embed'].shape[1:])
-                    window['prev_audio'] = torch.zeros(context_size, *window['audio_features'].shape[1:])
+                    # No previous context - use zeros with correct shapes
+                    window['prev_theta'] = torch.zeros(context_size, 3, 4)  # Fixed shape for theta
+                    window['prev_rotation'] = torch.zeros(context_size, 3)
+                    window['prev_translation'] = torch.zeros(context_size, 3)
+                    window['prev_expression'] = torch.zeros(context_size, 128)  # Fixed expression dim
+                    window['prev_audio'] = torch.zeros(context_size, 768)  # Fixed audio dim
                 
                 processed_windows.append(window)
         

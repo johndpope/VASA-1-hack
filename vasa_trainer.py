@@ -4,6 +4,7 @@ from torch.cuda import amp
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 import wandb
+from vasa_sampler import WindowSequenceSampler, create_window_sequence_collate_fn
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 from tqdm import tqdm
@@ -2504,41 +2505,36 @@ if __name__ == "__main__":
     logger.info(f"  Total windows: {len(full_dataset.windows)}")
 
 
-    # Split dataset into train/val
-    val_size = int(0.1 * len(full_dataset))  # 10% for validation
-    train_size = len(full_dataset) - val_size
-    
-    train_dataset, val_dataset = random_split(
-        full_dataset, 
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
-    )
-
     # Calculate appropriate batch size based on dataset size
     dataset_size = len(full_dataset)
     batch_size = min(1, dataset_size)  # Use batch size 1 for testing
 
-
-
-    # Worker initialization function for consistency
-    def worker_init_fn(worker_id):
-        import numpy as np
-        np.random.seed(worker_id)
-        
-    # Create data loaders with optimized settings for faster training
+    # Create custom sampler for maintaining window sequences
+    # Use full_dataset for sampler since it needs the windows attribute
+    train_sampler = WindowSequenceSampler(
+        full_dataset,
+        batch_size=batch_size,
+        windows_per_sequence=4,  # Number of consecutive windows
+        shuffle=True
+    )
+    
+    # For validation, we'll use the full dataset but not sample all windows
+    # This is a simplified approach - in production you'd want a proper val split
+    val_dataset = full_dataset
+    train_dataset = full_dataset
+    
+    # Create custom collate function for adding prev_context
+    collate_fn = create_window_sequence_collate_fn(
+        context_size=config.motion.context_size if hasattr(config, 'motion') else 10
+    )
+    
+    # Create data loaders with custom sampler
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=config.get('num_workers', 8),  # Use config num_workers for parallel loading
-        pin_memory=True,  # Pin memory for faster GPU transfer
-        drop_last=True,
-        collate_fn=collate_vasa_batch,
-        # Add these safety settings
-        persistent_workers=True if batch_size > 1 else False,  # Keep workers alive
-        prefetch_factor=2,  # Prefetch 2 batches per worker
-        multiprocessing_context='spawn',  # Use spawn context for safety
-        worker_init_fn=worker_init_fn  # Ensure worker consistency
+        batch_sampler=train_sampler,
+        collate_fn=collate_fn,
+        num_workers=0,  # Set to 0 to avoid CUDA multiprocessing issues
+        pin_memory=True
     )
 
     val_loader = DataLoader(

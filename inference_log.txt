@@ -1,96 +1,24 @@
-2025-09-09 11:58:08,677 - __main__ - INFO - Loading config from overfit_config.yaml
-2025-09-09 11:58:11,850 - vasa - INFO - Using ChunkedWindowCache for flexible window sizes
-2025-09-09 11:58:11,850 - vasa - INFO - Using improved VASAVolumetricAvatarBridgeV2 with normalization and smoothing
-2025-09-09 11:58:11,851 - __main__ - INFO - Loading volumetric avatar...
-2025-09-09 11:58:19,196 - __main__ - INFO - Volumetric avatar loaded successfully
-2025-09-09 11:58:19,196 - __main__ - INFO - Initializing VASA model...
-2025-09-09 11:58:19,198 - vasa - INFO - Initializing EfficientConditionEmbedding: model_dim=512, max_seq_len=20
-2025-09-09 11:58:19,209 - vasa - INFO - Set prev_context dimensions: expression=64, audio=64
-2025-09-09 11:58:19,209 - vasa - INFO - Using Wav2Vec audio features (768 dimensions)
-2025-09-09 11:58:19,210 - vasa - INFO - Using full projection for Wav2Vec features (768 dimensions)
-2025-09-09 11:58:19,901 - __main__ - INFO - Creating data loader...
-2025-09-09 11:58:19,901 - window_cache - INFO - Initialized WindowCache with chunk_size=1000, overlap=50
-2025-09-09 11:58:19,901 - vasa - INFO - Initialized ChunkedWindowCache at cache_overfit
-2025-09-09 11:58:19,901 - video_tracker - INFO - Initialized ProblematicVideosTracker with output dir: bad_videos
-2025-09-09 11:58:19,901 - vasa - INFO - Using audio cache directory: junk/audio_cache
-2025-09-09 11:58:19,902 - vasa - INFO - Found 6 total videos
-2025-09-09 11:58:19,902 - vasa - INFO - Loaded cached status with 6 entries
-2025-09-09 11:58:19,902 - vasa - INFO - Kept 6 valid cached entries
-2025-09-09 11:58:19,902 - vasa - INFO - Found 6 videos with valid audio
-2025-09-09 11:58:19,902 - vasa - INFO - Pre-extracting audio for 6 videos...
-Hybrid stages [True, True, True]
-bbbbbbbbbbb
-Hybrid stages [True, True, True]
-SN applied to local_encoder_nw
-SN applied to idt_embedder_nw
-SN applied to expression_embedder_nw
-SN applied to xy_generator_nw
-SN applied to uv_generator_nw
-SN applied to warp_embed_head_orig_nw
-SN applied to volume_process_nw
-SN applied to volume_source_nw
-SN applied to decoder_nw
-WS applied to local_encoder_nw
-WS applied to idt_embedder_nw
-WS applied to expression_embedder_nw
-WS applied to xy_generator_nw
-WS applied to uv_generator_nw
-WS applied to warp_embed_head_orig_nw
-WS applied to volume_process_nw
-WS applied to volume_source_nw
-WS applied to decoder_nw
-Extracting audio:   0%|          | 0/6 [00:00<?, ?it/s]2025-09-09 11:58:19,902 - vasa - INFO - Processed 1/6 videos
-Extracting audio: 100%|██████████| 6/6 [00:00<00:00, 17073.15it/s]
-2025-09-09 11:58:19,903 - vasa - INFO - 
-=== Creating Window Indices ===
-2025-09-09 11:58:19,903 - vasa - INFO - Window size: 20
-2025-09-09 11:58:19,903 - vasa - INFO - Stride: 10
-2025-09-09 11:58:19,903 - vasa - INFO - Context size: 10
-2025-09-09 11:58:19,903 - vasa - INFO - Total videos to process: 6
-2025-09-09 11:58:19,907 - vasa - INFO - Created 30 windows for video junk/7.mp4
-  First window: 0 -> 20
-  Last window: 290 -> 310
-2025-09-09 11:58:19,911 - vasa - INFO - Created 29 windows for video junk/11.mp4
-  First window: 0 -> 20
-  Last window: 280 -> 300
-2025-09-09 11:58:19,915 - vasa - INFO - Created 36 windows for video junk/3.mp4
-  First window: 0 -> 20
-  Last window: 350 -> 370
-2025-09-09 11:58:19,919 - vasa - INFO - Created 36 windows for video junk/9.mp4
-  First window: 0 -> 20
-  Last window: 350 -> 370
-2025-09-09 11:58:19,923 - vasa - INFO - Created 36 windows for video junk/15.mp4
-  First window: 0 -> 20
-  Last window: 350 -> 370
-2025-09-09 11:58:19,926 - vasa - INFO - Created 149 windows for video junk/l3.mp4
-  First window: 0 -> 20
-  Last window: 1480 -> 1500
-2025-09-09 11:58:19,927 - vasa - INFO - 
-Window Creation Summary:
-  Valid videos: 6/6
-  Total windows: 316
-  Window size: 20
-  Stride: 10
-  Expected overlap: 10
-2025-09-09 11:58:19,927 - vasa - INFO - Created 316 total windows across 6 videos
+2025-09-09 19:39:41,433 - __main__ - INFO - Loading config from overfit_config.yaml
+2025-09-09 19:39:45,076 - vasa - INFO - Using ChunkedWindowCache for flexible window sizes
+2025-09-09 19:39:45,077 - __main__ - INFO - Loading volumetric avatar...
 ╭───────────────────── Traceback (most recent call last) ──────────────────────╮
-│ /media/2TB/VASA-1-hack/train_overfit.py:154 in <module>                      │
+│ /media/2TB/VASA-1-hack/run_inference_overfit.py:192 in <module>              │
 │                                                                              │
-│   151 │   logger.info("Training completed!")                                 │
-│   152                                                                        │
-│   153 if __name__ == "__main__":                                             │
-│ ❱ 154 │   main()                                                             │
-│   155                                                                        │
+│   189 │   logger.info(f"Inference complete. Output saved to {output_dir}")   │
+│   190                                                                        │
+│   191 if __name__ == "__main__":                                             │
+│ ❱ 192 │   main()                                                             │
+│   193                                                                        │
 │                                                                              │
-│ /media/2TB/VASA-1-hack/train_overfit.py:105 in main                          │
+│ /media/2TB/VASA-1-hack/run_inference_overfit.py:45 in main                   │
 │                                                                              │
-│   102 │   │   train_dataset,                                                 │
-│   103 │   │   batch_size=config.train.batch_size,                            │
-│   104 │   │   shuffle=True,                                                  │
-│ ❱ 105 │   │   num_workers=config.dataset.num_workers,                        │
-│   106 │   │   pin_memory=True,                                               │
-│   107 │   │   drop_last=True                                                 │
-│   108 │   )                                                                  │
+│    42 │   model_path = './logs/Retrain_with_17_V1_New_rand_MM_SEC_4_drop_02_ │
+│    43 │   emo_config = OmegaConf.load('./models/stage_1/volumetric_avatar/va │
+│    44 │   volumetric_avatar = importlib.import_module(                       │
+│ ❱  45 │   │   f"models.stage_1.{emo_config.model.name}").Model.load_from_che │
+│    46 │   │   model_path,                                                    │
+│    47 │   │   config=emo_config,                                             │
+│    48 │   │   strict=False,                                                  │
 │                                                                              │
 │ /home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/omegac │
 │ onf/dictconfig.py:355 in __getattr__                                         │
@@ -180,6 +108,6 @@ Window Creation Summary:
 │   482 │   │   │   raise MissingMandatoryValue("Missing mandatory value: $KEY │
 │   483 │   │   return value                                                   │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-ConfigAttributeError: Missing key num_workers
-    full_key: dataset.num_workers
+ConfigAttributeError: Missing key model
+    full_key: model
     object_type=dict
