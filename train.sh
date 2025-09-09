@@ -97,11 +97,17 @@ echo "  Debug: $debug_choice"
 echo "================================"
 echo ""
 
-# Construct the command
-COMMAND="python vasa_trainer.py --config $CONFIG_FILE"
+# Construct the command based on config file
+if [ "$CONFIG_FILE" == "overfit_config.yaml" ]; then
+    # Use dedicated overfit training script
+    COMMAND="python train_overfit.py"
+else
+    # Use regular trainer for other configs
+    COMMAND="python vasa_trainer.py --config $CONFIG_FILE"
+fi
 
 # Note: Resume is handled via config file's resume_from field
-# Debug and fast modes would need to be implemented in vasa_trainer.py
+# Debug and fast modes would need to be implemented in the training scripts
 
 # Show the command being run
 echo "Running: $COMMAND"

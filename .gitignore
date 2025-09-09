@@ -87,3 +87,26 @@ expression_norm_stats.json
 losses/loss_model_weights/mobilefacenet_model_best.pth.tar
 losses/loss_model_weights/PrivateTest_model.t7
 test_cache/
+
+logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dev-debug.log
+# Dependency directories
+node_modules/
+# Environment variables
+.env
+# Editor directories and files
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+# OS specific
+
+# Task files
+# tasks.json
+# tasks/ 

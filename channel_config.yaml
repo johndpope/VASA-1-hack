@@ -28,27 +28,9 @@ landmarks:
     coords: 3
 
 channel_layout:
-  # Previous window context
-  prev_theta:
-    size: 12  # 3x4 matrix flattened
-    description: "Previous frame transformation matrix"
+  # Previous context will be handled directly through transformer attention,
+  # not compressed into the condition embedding
   
-  prev_rotation:
-    size: 3  # 3D angles
-    description: "Previous frame rotation"
-    
-  prev_translation:
-    size: 3  # 3D translation
-    description: "Previous frame translation"
-    
-  prev_expression:
-    size: ${dimensions.prev_expression}
-    description: "Previous frame expression embedding"
-    
-  prev_audio:
-    size: ${dimensions.prev_audio}
-    description: "Previous frame audio features"
-
   # Current window conditions  
   audio_features:
     size: ${dimensions.audio_features}
@@ -96,8 +78,8 @@ channel_layout:
     description: "Blink state embedding"
     
   padding:
-    size: 53
-    description: "Padding to match model_dim (512 - 459 = 53)"
+    size: 149
+    description: "Padding to match model_dim (512 - 363 = 149)"
 
 # Audio model dimensions 
 audio_models:

@@ -4,10 +4,12 @@ from torch.cuda import amp
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 import wandb
+from vasa_sampler import WindowSequenceSampler, create_window_sequence_collate_fn
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 from tqdm import tqdm
 import logging
+import os
 from rich.logging import RichHandler
 from pathlib import Path
 import torch
@@ -29,6 +31,13 @@ if 'nemo' not in sys.path:
 from logger import logger,TorchDebugger
 import traceback
 from vasa_dataset import WorkerState, VASAIntegratedDataset
+# Try to use improved bridge, fall back to original if not available
+try:
+    from vasa_va_bridge_v2 import VASAVolumetricAvatarBridgeV2 as VASAVolumetricAvatarBridge
+    logger.info("Using improved VASAVolumetricAvatarBridgeV2 with normalization and smoothing")
+except ImportError:
+    from vasa_va_bridge import VASAVolumetricAvatarBridge
+    logger.warning("Falling back to original VASAVolumetricAvatarBridge")
 from torch.utils.data import random_split
 import torch.multiprocessing as mp
 import random
@@ -567,6 +576,10 @@ class VASATrainer:
             device=self.accelerator.device
         )
         
+        # Initialize volumetric avatar bridge for proper frame generation
+        self.va_bridge = VASAVolumetricAvatarBridge(model.volumetric_avatar)
+        logger.info("Initialized VASAVolumetricAvatarBridge for proper frame generation")
+        
         # Initialize TDD progressive loss if enabled
         self.tdd_loss_module = None
         if config.loss.get('use_tdd_progressive', False):
@@ -576,6 +589,29 @@ class VASATrainer:
             )
             logger.info("🎯 TDD Progressive Loss System Enabled")
             logger.info("   Losses will unlock progressively based on training milestones")
+        
+        # Load high-quality identity image if specified
+        self.identity_image = None
+        if config.dataset.get('use_identity_image', False):
+            identity_path = config.dataset.get('identity_image_path', None)
+            if identity_path and os.path.exists(identity_path):
+                from PIL import Image
+                import torchvision.transforms as transforms
+                
+                logger.info(f"Loading high-quality identity image from: {identity_path}")
+                
+                # Load and preprocess the identity image
+                img = Image.open(identity_path).convert('RGB')
+                transform = transforms.Compose([
+                    transforms.Resize((512, 512)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+                ])
+                self.identity_image = transform(img).unsqueeze(0)  # [1, C, H, W]
+                logger.info(f"Identity image loaded with shape: {self.identity_image.shape}")
+            else:
+                logger.warning(f"Identity image path not found: {identity_path}")
+                logger.warning("Falling back to using video frames for identity")
         
 
         # Initialize MotionSequenceHandler
@@ -787,6 +823,10 @@ class VASATrainer:
         self.train_metrics.reset()
         num_batches = len(self.train_loader)
         
+        # Clear VA bridge cache at start of epoch
+        if hasattr(self, 'va_bridge'):
+            self.va_bridge.clear_cache()
+        
         logger.info(f"\n=== Starting Epoch {self.current_epoch} ===")
         logger.info(f"Batch size: {self.config.train.batch_size}")
         logger.info(f"Total batches: {num_batches}")
@@ -931,12 +971,27 @@ class VASATrainer:
                             use_sparse_frames = getattr(self.config.loss, 'use_sparse_frames', False)  # Read from config, default to False
                             if (self.config.loss.lambda_consist > 0 or self.config.loss.lambda_cross_id > 0) and target_frames is not None:
                                 try:
-                                    # Get source images (first frame of each video in the batch)
-                                    source_img = target_frames[:, 0]  # [B, C, H, W]
+                                    # Get source images - use high-quality identity image if available
+                                    if self.identity_image is not None:
+                                        # Use the same high-quality identity image for all samples in batch
+                                        source_img = self.identity_image.repeat(B, 1, 1, 1).to(self.accelerator.device)
+                                        logger.info(f"Using high-quality identity image for source, shape: {source_img.shape}, range: [{source_img.min():.2f}, {source_img.max():.2f}]")
+                                        
+                                        # Save debug image on first batch
+                                        if self.global_step == 0:
+                                            from torchvision.utils import save_image
+                                            denorm_img = source_img[0] * 0.5 + 0.5  # Denormalize
+                                            save_image(denorm_img, f"debug_source_img_step{self.global_step}.png")
+                                            logger.info(f"Saved debug source image to debug_source_img_step{self.global_step}.png")
+                                    else:
+                                        # Fall back to first frame of each video in the batch
+                                        source_img = target_frames[:, 0]  # [B, C, H, W]
                                     
                                     # Prepare source params for frame generation
+                                    # Pass target frames so volumetric avatar knows what to generate
                                     source_params = {
-                                        'source_img': source_img
+                                        'source_img': source_img,
+                                        'target_img': target_frames  # Pass the actual target frames
                                     }
                                     
                                     # Generate frames using volumetric avatar
@@ -954,25 +1009,47 @@ class VASATrainer:
                                                 else:
                                                     sparse_outputs[key] = value
                                             
-                                            # Generate only 2 frames instead of T frames
-                                            generated_frames = self.model.volumetric_avatar.generate_frames_from_motion(
-                                                motion_outputs=sparse_outputs,
-                                                source_params=source_params,
-                                                use_black_background=True  # Use black background for training
-                                            )
-                                            generated_frames = generated_frames.detach()
+                                            # Generate only 2 frames instead of T frames using bridge
+                                            # Check if using improved bridge
+                                            if hasattr(self.va_bridge, 'generate_frames_with_viz'):
+                                                result = self.va_bridge.generate_frames_with_viz(
+                                                    motion_outputs=sparse_outputs,
+                                                    source_img=source_img,
+                                                    use_black_background=True,
+                                                    enable_3avatar=False,  # Disable for training to save memory
+                                                    enable_smoothing=True  # Enable smoothing
+                                                )
+                                                generated_frames = result['frames'].detach()
+                                            else:
+                                                generated_frames = self.va_bridge.generate_frames_from_motion(
+                                                    motion_outputs=sparse_outputs,
+                                                    source_img=source_img,
+                                                    use_black_background=True
+                                                )
+                                                generated_frames = generated_frames.detach()
                                             
                                             # Also make target frames sparse to match
                                             sparse_target_frames = torch.stack([target_frames[:, 0], target_frames[:, -1]], dim=1)
                                             target_frames = sparse_target_frames
                                         else:
-                                            # Generate all frames (more faithful to paper but memory intensive)
-                                            generated_frames = self.model.volumetric_avatar.generate_frames_from_motion(
-                                                motion_outputs=outputs,
-                                                source_params=source_params,
-                                                use_black_background=True  # Use black background for training
-                                            )
-                                            generated_frames = generated_frames.detach()
+                                            # Generate all frames (more faithful to paper but memory intensive) using bridge
+                                            # Check if using improved bridge
+                                            if hasattr(self.va_bridge, 'generate_frames_with_viz'):
+                                                result = self.va_bridge.generate_frames_with_viz(
+                                                    motion_outputs=outputs,
+                                                    source_img=source_img,
+                                                    use_black_background=True,
+                                                    enable_3avatar=False,  # Disable for training to save memory
+                                                    enable_smoothing=True  # Enable smoothing
+                                                )
+                                                generated_frames = result['frames'].detach()
+                                            else:
+                                                generated_frames = self.va_bridge.generate_frames_from_motion(
+                                                    motion_outputs=outputs,
+                                                    source_img=source_img,
+                                                    use_black_background=True
+                                                )
+                                                generated_frames = generated_frames.detach()
                                         
                                     frame_type = "sparse (2 frames)" if use_sparse_frames else "full"
                                     logger.debug(f"Generated frames shape ({frame_type}): {generated_frames.shape}")
@@ -981,6 +1058,11 @@ class VASATrainer:
                                     logger.error(f"Failed to generate frames for disentanglement loss: {str(e)}")
                                     generated_frames = None
                            
+                            # Prepare source identity for loss computation
+                            source_identity_for_loss = None
+                            if self.identity_image is not None:
+                                source_identity_for_loss = self.identity_image.repeat(B, 1, 1, 1).to(self.accelerator.device)
+                            
                             # Compute losses including perceptual loss
                             losses, metrics = self.loss_module.compute_losses(
                                 outputs=outputs,
@@ -991,7 +1073,8 @@ class VASATrainer:
                                 current_epoch=self.current_epoch,
                                 step=self.global_step,
                                 generated_frames=generated_frames,
-                                target_frames=target_frames
+                                target_frames=target_frames,
+                                source_identity=source_identity_for_loss  # Pass high-quality identity
                             )
                             
                             # Clean up generated frames immediately after loss computation
@@ -1113,7 +1196,11 @@ class VASATrainer:
                                         # Generate just this one frame
                                         with torch.no_grad():
                                             try:
-                                                source_img = target_frames[:, 0]  # [B, C, H, W]
+                                                # Use high-quality identity image if available
+                                                if self.identity_image is not None:
+                                                    source_img = self.identity_image.repeat(B, 1, 1, 1).to(self.accelerator.device)
+                                                else:
+                                                    source_img = target_frames[:, 0]  # [B, C, H, W]
                                                 
                                                 # Extract single frame motion params
                                                 single_motion = {}
@@ -1125,12 +1212,10 @@ class VASATrainer:
                                                         else:
                                                             single_motion[key] = stored_outputs[key] if not isinstance(stored_outputs[key], torch.Tensor) else stored_outputs[key].to(device)
                                                 
-                                                # Generate single frame only
-                                                # Access the actual model (unwrap from accelerator if needed)
-                                                actual_model = self.accelerator.unwrap_model(self.model) if hasattr(self, 'accelerator') else self.model
-                                                single_frame_generated = actual_model.volumetric_avatar.generate_frames_from_motion(
+                                                # Generate single frame only using bridge
+                                                single_frame_generated = self.va_bridge.generate_frames_from_motion(
                                                     motion_outputs=single_motion,
-                                                    source_params={'source_img': source_img},
+                                                    source_img=source_img,
                                                     use_black_background=True  # Use black background for thumbnails
                                                 ).detach()
                                                 
@@ -2420,41 +2505,36 @@ if __name__ == "__main__":
     logger.info(f"  Total windows: {len(full_dataset.windows)}")
 
 
-    # Split dataset into train/val
-    val_size = int(0.1 * len(full_dataset))  # 10% for validation
-    train_size = len(full_dataset) - val_size
-    
-    train_dataset, val_dataset = random_split(
-        full_dataset, 
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
-    )
-
     # Calculate appropriate batch size based on dataset size
     dataset_size = len(full_dataset)
     batch_size = min(1, dataset_size)  # Use batch size 1 for testing
 
-
-
-    # Worker initialization function for consistency
-    def worker_init_fn(worker_id):
-        import numpy as np
-        np.random.seed(worker_id)
-        
-    # Create data loaders with optimized settings for faster training
+    # Create custom sampler for maintaining window sequences
+    # Use full_dataset for sampler since it needs the windows attribute
+    train_sampler = WindowSequenceSampler(
+        full_dataset,
+        batch_size=batch_size,
+        windows_per_sequence=4,  # Number of consecutive windows
+        shuffle=True
+    )
+    
+    # For validation, we'll use the full dataset but not sample all windows
+    # This is a simplified approach - in production you'd want a proper val split
+    val_dataset = full_dataset
+    train_dataset = full_dataset
+    
+    # Create custom collate function for adding prev_context
+    collate_fn = create_window_sequence_collate_fn(
+        context_size=config.motion.context_size if hasattr(config, 'motion') else 10
+    )
+    
+    # Create data loaders with custom sampler
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=config.get('num_workers', 8),  # Use config num_workers for parallel loading
-        pin_memory=True,  # Pin memory for faster GPU transfer
-        drop_last=True,
-        collate_fn=collate_vasa_batch,
-        # Add these safety settings
-        persistent_workers=True if batch_size > 1 else False,  # Keep workers alive
-        prefetch_factor=2,  # Prefetch 2 batches per worker
-        multiprocessing_context='spawn',  # Use spawn context for safety
-        worker_init_fn=worker_init_fn  # Ensure worker consistency
+        batch_sampler=train_sampler,
+        collate_fn=collate_fn,
+        num_workers=0,  # Set to 0 to avoid CUDA multiprocessing issues
+        pin_memory=True
     )
 
     val_loader = DataLoader(

@@ -63,7 +63,7 @@ motion:
 
 # Training parameters
 train:
-  resume_from: "./checkpoints/best_checkpoint.pt" #  #  # "./checkpoints/checkpoint_epoch_600.pt"  # or specify a path to checkpoint
+  resume_from: "" # Set to checkpoint path to resume training
   # when to add conditional signals
   control_start_epoch: 0 # 👹 this should be 1 or 0 for large video datasets with smaller epochs
 
@@ -226,6 +226,8 @@ dataset:
   max_videos: 100              # Using subset of CelebV-HQ dataset
   min_sequence_length: 15     # Minimum sequence length
   max_sequence_samples: 500   # Limit samples per epoch
+  use_identity_image: false   # Set to true to use high-quality identity image
+  identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image
   augmentation:
     enabled: false             # Disable augmentation initially for stability
     flip_prob: 0.5

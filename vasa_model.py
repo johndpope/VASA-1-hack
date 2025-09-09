@@ -496,42 +496,8 @@ class EfficientConditionEmbedding(nn.Module):
                         
                     output[..., start:end] = curr_emb
 
-            # 5. Previous context if available
-            if prev_context is not None:
-                logger.debug("\nProcessing previous context...")
-                prev_keys = [
-                    ('theta', 12), ('rotation', 3),  ('scale', 3), 
-                    ('translation', 3), ('expression', self.prev_expression_dim),
-                    ('audio', self.prev_audio_dim)
-                ]
-                
-                for name, dim in prev_keys:
-                    context_key = f'prev_{name}'
-                    if context_key not in self.channel_layout:
-                        continue
-                        
-                    start, end = self.channel_layout[context_key]
-                    if context_key in prev_context:
-                        # Reshape if needed and place in output
-                        context_value = prev_context[context_key]
-                        if name == 'theta':
-                            # Flatten 3x4 matrix to 12 elements per timestep
-                            # Input is [B, T, 3, 4], output should be [B, T, 12]
-                            if context_value.dim() == 4:  # [B, T, 3, 4]
-                                B_ctx, T_ctx = context_value.shape[:2]
-                                context_value = context_value.view(B_ctx, T_ctx, -1)  # [B, T, 12]
-                            elif context_value.dim() == 3 and context_value.shape[-1] != 12:  # [B, 3, 4]
-                                context_value = context_value.view(B, T, -1)  # [B, T, 12]
-                        if context_value.shape[-1] != dim:
-                            logger.warning(
-                                f"Context dimension mismatch for {name}: "
-                                f"got {context_value.shape[-1]}, expected {dim}"
-                            )
-                            context_value = torch.zeros(B, T, dim, device=device)
-                        output[..., start:end] = context_value
-                    else:
-                        # Fill with zeros if missing
-                        output[..., start:end] = torch.zeros(B, dim, device=device)
+            # 5. Previous context is now handled directly in the transformer
+            # No need to compress it into the condition embedding
 
             # 6. Final processing
             # Clip to prevent extreme values
@@ -616,10 +582,10 @@ class HolisticMotionTransformer(nn.Module):
         self.window_size = config.motion.window_size
         self.context_size = config.motion.context_size
         
-        # Embedding dimensions
-        self.transformer_dim = 512
-        self.num_heads = 8
-        self.num_layers = 2  # Reduced from 8 to 2 for faster convergence testing
+        # Embedding dimensions from config
+        self.transformer_dim = config.model.hidden_dim
+        self.num_heads = config.model.n_heads
+        self.num_layers = config.model.n_layers  # Configurable via yaml
         
         # Initialize condition embedding
         self.cond_embed = EfficientConditionEmbedding(
@@ -644,15 +610,35 @@ class HolisticMotionTransformer(nn.Module):
             nn.ReLU(),  # Added ReLU for better feature combination
             nn.LayerNorm(self.transformer_dim)
         )
-        # Transformer layers
-        self.transformer = nn.ModuleList([
-            TransformerBlock(
-                dim=self.transformer_dim,
-                num_heads=self.num_heads,
-                mlp_ratio=4,
-                dropout=0.1
-            ) for _ in range(self.num_layers)
-        ])
+        
+        # Initialize positional embeddings for decoder
+        self.pos_emb = VASAPositionalEmbedding(
+            d_model=self.transformer_dim,
+            max_seq_len=self.window_size,
+            max_context_len=self.context_size,
+            dropout=0.1
+        )
+        
+        # Time embedding for diffusion timesteps
+        self.time_emb = nn.Sequential(
+            nn.Linear(1, self.transformer_dim),
+            nn.SiLU(),
+            nn.Linear(self.transformer_dim, self.transformer_dim)
+        )
+        
+        # Replace encoder with decoder architecture
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=self.transformer_dim,
+            nhead=self.num_heads,
+            dim_feedforward=config.model.dim_feedforward,  # From config
+            dropout=config.model.dropout,
+            activation='gelu',
+            batch_first=True  # Use batch_first for consistency
+        )
+        self.transformer = nn.TransformerDecoder(
+            decoder_layer,
+            num_layers=self.num_layers
+        )
         
         # Output projections
         self.output_projections = nn.ModuleDict({
@@ -873,15 +859,25 @@ class HolisticMotionTransformer(nn.Module):
             # Validate input shapes with explicit assertions
             assert motion_data['theta'].shape == (B, T, 3, 4), f"Expected theta shape [B,T,3,4], got {motion_data['theta'].shape}"
             assert motion_data['rotation'].shape == (B, T, 3), f"Expected rotation shape [B,T,3], got {motion_data['rotation'].shape}"
-            assert motion_data['scale'].shape == (B, T, 3), f"Expected scale shape [B,T,3], got {motion_data['scale'].shape}"
+            # Scale is optional during inference
+            if 'scale' in motion_data:
+                assert motion_data['scale'].shape == (B, T, 3), f"Expected scale shape [B,T,3], got {motion_data['scale'].shape}"
             assert motion_data['translation'].shape == (B, T, 3), f"Expected translation shape [B,T,3], got {motion_data['translation'].shape}" 
             assert motion_data['expression_embed'].shape == (B, T, 128), f"Expected expression shape [B,T,128], got {motion_data['expression_embed'].shape}"
             assert noise_level.shape == (B,), f"Expected noise_level shape [B], got {noise_level.shape}"
 
-            # Temporarily disabled for testing - validation has issues
-            # self._validate_context(prev_context)
+            # Handle previous context if provided
+            device = motion_data['theta'].device
+            if prev_context is not None:
+                # Process previous context frames through same motion projections
+                K = prev_context['theta'].shape[1]  # Number of context frames
+                prev_features = self._project_motion_parameters(prev_context, B, K)
+                logger.debug(f"Previous context features shape: {prev_features.shape}")
+            else:
+                prev_features = None
+                K = 0
 
-            self._validate_conditions(conditions,B,T,motion_data['theta'].device)
+            self._validate_conditions(conditions, B, T, device)
 
             # Handle condition embeddings with validation
             if cond_emb is None and conditions is not None:
@@ -937,27 +933,61 @@ class HolisticMotionTransformer(nn.Module):
             logger.debug("\nProjecting motion parameters...")
             motion_features = self._project_motion_parameters(motion_data, B, T)
             logger.debug(f"Motion features shape: {motion_features.shape}")
+            
+            # Concatenate previous context with current features if available
+            if prev_features is not None:
+                # Concatenate along sequence dimension: [B, K+T, D]
+                x = torch.cat([prev_features, motion_features], dim=1)
+                total_seq_len = K + T
+                logger.debug(f"Combined features shape (with context): {x.shape}")
+            else:
+                x = motion_features
+                total_seq_len = T
 
-            # Add time embeddings
-            time_emb = self._time_embedding(noise_level, self.transformer_dim)
-            x = motion_features + time_emb.unsqueeze(1)
+            # Add positional embeddings
+            has_context = prev_features is not None
+            x = self.pos_emb(x, has_context=has_context)
+            
+            # Add time embeddings (expand to match sequence length)
+            time_emb = self.time_emb(noise_level.unsqueeze(-1).float())  # [B, D]
+            x = x + time_emb.unsqueeze(1).expand(-1, total_seq_len, -1)
 
-            # Add condition embeddings if present
+            # Prepare for decoder: x is target (tgt), cond_emb is memory
             if cond_emb is not None:
-                x = x + cond_emb
-                logger.debug("Added condition embeddings")
-
-            # Process through transformer blocks
-            logger.debug("\nProcessing through transformer blocks...")
-            for i, block in enumerate(self.transformer):
-                x = block(x)
-                if not torch.isfinite(x).all():
-                    raise ValueError(f"Non-finite values detected after transformer block {i}")
-                logger.debug(f"Block {i} output shape: {x.shape}")
+                # Generate causal mask for autoregressive self-attention
+                tgt_mask = nn.Transformer.generate_square_subsequent_mask(total_seq_len).to(device)
+                
+                # If context present, allow full attention within context
+                if has_context:
+                    # Create custom mask: non-causal for context, causal for current
+                    custom_mask = torch.zeros(total_seq_len, total_seq_len, device=device)
+                    custom_mask[K:, :K] = 0  # Current can attend to all context
+                    # Make current sequence causal
+                    causal_part = torch.triu(torch.ones(T, T, device=device), diagonal=1) * float('-inf')
+                    custom_mask[K:, K:] = causal_part
+                    tgt_mask = custom_mask
+                
+                # Use decoder with conditions as memory
+                x = self.transformer(
+                    tgt=x,
+                    memory=cond_emb,
+                    tgt_mask=tgt_mask
+                )
+            else:
+                # Fallback to self-attention only if no conditions
+                for layer in self.transformer.layers:
+                    x = layer(x, x, x)  # Self-attention only
+            
+            # Extract predictions for current sequence (exclude context if present)
+            if prev_features is not None:
+                # Take only the last T frames (current window)
+                x_current = x[:, K:, :]  # [B, T, D]
+            else:
+                x_current = x
 
             # Project outputs back to motion parameters
             logger.debug("\nProjecting outputs...")
-            outputs = self._project_outputs(x, B, T)
+            outputs = self._project_outputs(x_current, B, T)
             
             return outputs
 
@@ -994,12 +1024,18 @@ class HolisticMotionTransformer(nn.Module):
 
 
 
-            # scale
-            scale = motion_data['scale']  # [B, T, 3]
-            scale = torch.clamp(scale, -10.0, 10.0)
-            scale = self.motion_projections['scale'](scale)
+            # scale (optional - may not be present during inference)
+            if 'scale' in motion_data:
+                scale = motion_data['scale']  # [B, T, 3]
+                scale = torch.clamp(scale, -10.0, 10.0)
+                scale = self.motion_projections['scale'](scale)
+            else:
+                # Default scale of 1.0 for all dimensions
+                scale = torch.ones(B, T, 3, device=device, dtype=dtype)
+                scale = self.motion_projections['scale'](scale)
+            
             # Combine features with residual connection
-            features = torch.cat([theta,scale, rotation, translation, expression], dim=-1)
+            features = torch.cat([theta, scale, rotation, translation, expression], dim=-1)
             motion_features = self.motion_combine(features)  # Includes residual block
             
             # Final validations
@@ -1071,6 +1107,20 @@ class HolisticMotionTransformer(nn.Module):
         emb = math.log(10000) / (half_dim - 1)
         emb = torch.exp(torch.arange(half_dim, device=timesteps.device) * -emb)
         emb = timesteps[:, None] * emb[None, :]
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
+    
+    def _get_positional_embedding(self, seq_len: int, dim: int, device: torch.device) -> torch.Tensor:
+        """Get standard positional embedding for sequence."""
+        positions = torch.arange(seq_len, device=device)
+        return self._compute_sinusoidal_embedding(positions, dim)
+    
+    def _compute_sinusoidal_embedding(self, positions: torch.Tensor, dim: int) -> torch.Tensor:
+        """Compute sinusoidal positional embeddings."""
+        half_dim = dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=positions.device) * -emb)
+        emb = positions[:, None] * emb[None, :]
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
  

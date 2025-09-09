@@ -1,0 +1,113 @@
+2025-09-09 19:39:41,433 - __main__ - INFO - Loading config from overfit_config.yaml
+2025-09-09 19:39:45,076 - vasa - INFO - Using ChunkedWindowCache for flexible window sizes
+2025-09-09 19:39:45,077 - __main__ - INFO - Loading volumetric avatar...
+╭───────────────────── Traceback (most recent call last) ──────────────────────╮
+│ /media/2TB/VASA-1-hack/run_inference_overfit.py:192 in <module>              │
+│                                                                              │
+│   189 │   logger.info(f"Inference complete. Output saved to {output_dir}")   │
+│   190                                                                        │
+│   191 if __name__ == "__main__":                                             │
+│ ❱ 192 │   main()                                                             │
+│   193                                                                        │
+│                                                                              │
+│ /media/2TB/VASA-1-hack/run_inference_overfit.py:45 in main                   │
+│                                                                              │
+│    42 │   model_path = './logs/Retrain_with_17_V1_New_rand_MM_SEC_4_drop_02_ │
+│    43 │   emo_config = OmegaConf.load('./models/stage_1/volumetric_avatar/va │
+│    44 │   volumetric_avatar = importlib.import_module(                       │
+│ ❱  45 │   │   f"models.stage_1.{emo_config.model.name}").Model.load_from_che │
+│    46 │   │   model_path,                                                    │
+│    47 │   │   config=emo_config,                                             │
+│    48 │   │   strict=False,                                                  │
+│                                                                              │
+│ /home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/omegac │
+│ onf/dictconfig.py:355 in __getattr__                                         │
+│                                                                              │
+│   352 │   │   │   │   key=key, default_value=_DEFAULT_MARKER_, validate_key= │
+│   353 │   │   │   )                                                          │
+│   354 │   │   except ConfigKeyError as e:                                    │
+│ ❱ 355 │   │   │   self._format_and_raise(                                    │
+│   356 │   │   │   │   key=key, value=None, cause=e, type_override=ConfigAttr │
+│   357 │   │   │   )                                                          │
+│   358 │   │   except Exception as e:                                         │
+│                                                                              │
+│ /home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/omegac │
+│ onf/base.py:231 in _format_and_raise                                         │
+│                                                                              │
+│   228 │   │   msg: Optional[str] = None,                                     │
+│   229 │   │   type_override: Any = None,                                     │
+│   230 │   ) -> None:                                                         │
+│ ❱ 231 │   │   format_and_raise(                                              │
+│   232 │   │   │   node=self,                                                 │
+│   233 │   │   │   key=key,                                                   │
+│   234 │   │   │   value=value,                                               │
+│                                                                              │
+│ /home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/omegac │
+│ onf/_utils.py:899 in format_and_raise                                        │
+│                                                                              │
+│    896 │   │   ex.ref_type = ref_type                                        │
+│    897 │   │   ex.ref_type_str = ref_type_str                                │
+│    898 │                                                                     │
+│ ❱  899 │   _raise(ex, cause)                                                 │
+│    900                                                                       │
+│    901                                                                       │
+│    902 def type_str(t: Any, include_module_name: bool = False) -> str:       │
+│                                                                              │
+│ /home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/omegac │
+│ onf/_utils.py:797 in _raise                                                  │
+│                                                                              │
+│    794 │   │   ex.__cause__ = cause                                          │
+│    795 │   else:                                                             │
+│    796 │   │   ex.__cause__ = None                                           │
+│ ❱  797 │   raise ex.with_traceback(sys.exc_info()[2])  # set env var OC_CAUS │
+│    798                                                                       │
+│    799                                                                       │
+│    800 def format_and_raise(                                                 │
+│                                                                              │
+│ /home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/omegac │
+│ onf/dictconfig.py:351 in __getattr__                                         │
+│                                                                              │
+│   348 │   │   │   raise AttributeError()                                     │
+│   349 │   │                                                                  │
+│   350 │   │   try:                                                           │
+│ ❱ 351 │   │   │   return self._get_impl(                                     │
+│   352 │   │   │   │   key=key, default_value=_DEFAULT_MARKER_, validate_key= │
+│   353 │   │   │   )                                                          │
+│   354 │   │   except ConfigKeyError as e:                                    │
+│                                                                              │
+│ /home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/omegac │
+│ onf/dictconfig.py:442 in _get_impl                                           │
+│                                                                              │
+│   439 │   │   self, key: DictKeyType, default_value: Any, validate_key: bool │
+│   440 │   ) -> Any:                                                          │
+│   441 │   │   try:                                                           │
+│ ❱ 442 │   │   │   node = self._get_child(                                    │
+│   443 │   │   │   │   key=key, throw_on_missing_key=True, validate_key=valid │
+│   444 │   │   │   )                                                          │
+│   445 │   │   except (ConfigAttributeError, ConfigKeyError):                 │
+│                                                                              │
+│ /home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/omegac │
+│ onf/basecontainer.py:73 in _get_child                                        │
+│                                                                              │
+│    70 │   │   throw_on_missing_key: bool = False,                            │
+│    71 │   ) -> Union[Optional[Node], List[Optional[Node]]]:                  │
+│    72 │   │   """Like _get_node, passing through to the nearest concrete Nod │
+│ ❱  73 │   │   child = self._get_node(                                        │
+│    74 │   │   │   key=key,                                                   │
+│    75 │   │   │   validate_access=validate_access,                           │
+│    76 │   │   │   validate_key=validate_key,                                 │
+│                                                                              │
+│ /home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/omegac │
+│ onf/dictconfig.py:480 in _get_node                                           │
+│                                                                              │
+│   477 │   │   value: Optional[Node] = self.__dict__["_content"].get(key)     │
+│   478 │   │   if value is None:                                              │
+│   479 │   │   │   if throw_on_missing_key:                                   │
+│ ❱ 480 │   │   │   │   raise ConfigKeyError(f"Missing key {key!s}")           │
+│   481 │   │   elif throw_on_missing_value and value._is_missing():           │
+│   482 │   │   │   raise MissingMandatoryValue("Missing mandatory value: $KEY │
+│   483 │   │   return value                                                   │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ConfigAttributeError: Missing key model
+    full_key: model
+    object_type=dict
