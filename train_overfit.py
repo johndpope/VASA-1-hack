@@ -8,16 +8,15 @@ import torch
 from pathlib import Path
 from omegaconf import OmegaConf
 import sys
-import logging
 import os
 import wandb
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Add nemo to path before importing logger
+if 'nemo' not in sys.path:
+    sys.path.insert(0, 'nemo')
+from logger import logger
+
+# The nemo logger is already configured with RichHandler and file logging
 
 def main():
     """Main training function for overfitting."""

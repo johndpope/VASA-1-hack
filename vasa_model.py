@@ -582,10 +582,10 @@ class HolisticMotionTransformer(nn.Module):
         self.window_size = config.motion.window_size
         self.context_size = config.motion.context_size
         
-        # Embedding dimensions
-        self.transformer_dim = 512
-        self.num_heads = 8
-        self.num_layers = 2  # Reduced from 8 to 2 for faster convergence testing
+        # Embedding dimensions from config
+        self.transformer_dim = config.model.hidden_dim
+        self.num_heads = config.model.n_heads
+        self.num_layers = config.model.n_layers  # Configurable via yaml
         
         # Initialize condition embedding
         self.cond_embed = EfficientConditionEmbedding(
@@ -610,15 +610,35 @@ class HolisticMotionTransformer(nn.Module):
             nn.ReLU(),  # Added ReLU for better feature combination
             nn.LayerNorm(self.transformer_dim)
         )
-        # Transformer layers
-        self.transformer = nn.ModuleList([
-            TransformerBlock(
-                dim=self.transformer_dim,
-                num_heads=self.num_heads,
-                mlp_ratio=4,
-                dropout=0.1
-            ) for _ in range(self.num_layers)
-        ])
+        
+        # Initialize positional embeddings for decoder
+        self.pos_emb = VASAPositionalEmbedding(
+            d_model=self.transformer_dim,
+            max_seq_len=self.window_size,
+            max_context_len=self.context_size,
+            dropout=0.1
+        )
+        
+        # Time embedding for diffusion timesteps
+        self.time_emb = nn.Sequential(
+            nn.Linear(1, self.transformer_dim),
+            nn.SiLU(),
+            nn.Linear(self.transformer_dim, self.transformer_dim)
+        )
+        
+        # Replace encoder with decoder architecture
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=self.transformer_dim,
+            nhead=self.num_heads,
+            dim_feedforward=config.model.dim_feedforward,  # From config
+            dropout=config.model.dropout,
+            activation='gelu',
+            batch_first=True  # Use batch_first for consistency
+        )
+        self.transformer = nn.TransformerDecoder(
+            decoder_layer,
+            num_layers=self.num_layers
+        )
         
         # Output projections
         self.output_projections = nn.ModuleDict({
@@ -924,45 +944,41 @@ class HolisticMotionTransformer(nn.Module):
                 x = motion_features
                 total_seq_len = T
 
+            # Add positional embeddings
+            has_context = prev_features is not None
+            x = self.pos_emb(x, has_context=has_context)
+            
             # Add time embeddings (expand to match sequence length)
-            time_emb = self._time_embedding(noise_level, self.transformer_dim)
+            time_emb = self.time_emb(noise_level.unsqueeze(-1).float())  # [B, D]
             x = x + time_emb.unsqueeze(1).expand(-1, total_seq_len, -1)
 
-            # Add condition embeddings if present (only to current frames, not context)
+            # Prepare for decoder: x is target (tgt), cond_emb is memory
             if cond_emb is not None:
-                if prev_features is not None:
-                    # Only add conditions to current frames, not context
-                    # Pad conditions with zeros for context frames
-                    cond_emb_padded = torch.cat([
-                        torch.zeros(B, K, self.transformer_dim, device=device),
-                        cond_emb
-                    ], dim=1)
-                    x = x + cond_emb_padded
-                else:
-                    x = x + cond_emb
-                logger.debug("Added condition embeddings")
-            
-            # Add positional embeddings to distinguish context from current
-            pos_emb = self._get_positional_embedding(total_seq_len, self.transformer_dim, device)
-            if prev_features is not None:
-                # Use negative positions for context, positive for current
-                context_positions = torch.arange(-K, 0, device=device)
-                current_positions = torch.arange(0, T, device=device)
-                all_positions = torch.cat([context_positions, current_positions])
-                pos_emb = self._compute_sinusoidal_embedding(all_positions, self.transformer_dim)
-                x = x + pos_emb.unsqueeze(0).expand(B, -1, -1)
+                # Generate causal mask for autoregressive self-attention
+                tgt_mask = nn.Transformer.generate_square_subsequent_mask(total_seq_len).to(device)
+                
+                # If context present, allow full attention within context
+                if has_context:
+                    # Create custom mask: non-causal for context, causal for current
+                    custom_mask = torch.zeros(total_seq_len, total_seq_len, device=device)
+                    custom_mask[K:, :K] = 0  # Current can attend to all context
+                    # Make current sequence causal
+                    causal_part = torch.triu(torch.ones(T, T, device=device), diagonal=1) * float('-inf')
+                    custom_mask[K:, K:] = causal_part
+                    tgt_mask = custom_mask
+                
+                # Use decoder with conditions as memory
+                x = self.transformer(
+                    tgt=x,
+                    memory=cond_emb,
+                    tgt_mask=tgt_mask
+                )
             else:
-                x = x + pos_emb.unsqueeze(0).expand(B, -1, -1)
-
-            # Process through transformer blocks
-            logger.debug("\nProcessing through transformer blocks...")
-            for i, block in enumerate(self.transformer):
-                x = block(x)
-                if not torch.isfinite(x).all():
-                    raise ValueError(f"Non-finite values detected after transformer block {i}")
-                logger.debug(f"Block {i} output shape: {x.shape}")
-
-            # Extract only the current frame outputs (not context)
+                # Fallback to self-attention only if no conditions
+                for layer in self.transformer.layers:
+                    x = layer(x, x, x)  # Self-attention only
+            
+            # Extract predictions for current sequence (exclude context if present)
             if prev_features is not None:
                 # Take only the last T frames (current window)
                 x_current = x[:, K:, :]  # [B, T, D]

@@ -42,21 +42,27 @@ def main():
     model_path = './logs/Retrain_with_17_V1_New_rand_MM_SEC_4_drop_02_stm_10_CV_05_1_1/checkpoints/328_model.pth'
     emo_config = OmegaConf.load('./models/stage_1/volumetric_avatar/va.yaml')
     volumetric_avatar = importlib.import_module(
-        f"models.stage_1.{emo_config.model.name}").Model.load_from_checkpoint(
-        model_path, 
-        config=emo_config, 
-        strict=False, 
-        output_path='./va', 
-        use_wandb=False,
-        verbose=True
-    )
+        'models.stage_1.volumetric_avatar.va'
+    ).Model(emo_config, training=False)
+    
+    # Load EMO weights
+    try:
+        checkpoint = torch.load(model_path, map_location='cpu')
+        if 'model' in checkpoint:
+            state_dict = checkpoint['model']
+        else:
+            state_dict = checkpoint
+        volumetric_avatar.load_state_dict(state_dict, strict=False)
+        logger.info(f"Loaded volumetric avatar weights from {model_path}")
+    except Exception as e:
+        logger.warning(f"Could not load volumetric avatar weights: {e}")
+    
     volumetric_avatar.eval()
     logger.info("Volumetric avatar loaded successfully")
     
     # Initialize VASA model
     logger.info("Initializing VASA model...")
-    model = VASAModel(config)
-    model.volumetric_avatar = volumetric_avatar
+    model = VASAModel(config, volumetric_avatar)
     model.eval()
     
     # Load checkpoint
@@ -73,7 +79,8 @@ def main():
     # Create dataset for inference
     logger.info("Creating dataset...")
     dataset = VASAIntegratedDataset(
-        root_dir=config.dataset.root_dir,
+        video_folder='junk',  # Use the test videos directory
+        emo_model=volumetric_avatar,
         window_size=config.motion.window_size,
         stride=config.motion.stride,
         context_size=config.motion.context_size,
@@ -83,7 +90,8 @@ def main():
         cache_audio=True,
         preextract_audio=True,
         random_seed=42,
-        cache_dir=config.paths.cache_dir
+        cache_dir='cache_overfit',
+        device=config.device
     )
     
     # Create sampler and dataloader

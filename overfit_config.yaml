@@ -6,7 +6,7 @@ defaults:
 model:
   hidden_dim: 512
   n_heads: 8
-  n_layers: 2                  # Reduced from 8 to 2 for faster training
+  n_layers: 1                  # Reduced to 1 for ultra-fast training (change to 2 or more for better quality)
   dim_feedforward: 2048
   dropout: 0.1
   motion_dim: 256
@@ -168,8 +168,8 @@ loss:
   
   # NEW VASA-1 inspired losses
   use_score_matching: true    # Use VASA-1 style clean signal prediction (not noise)
-  lambda_consist: 1.0         # Pairwise transfer loss for disentanglement
-  lambda_cross_id: 0.1        # Cross-identity similarity loss
+  lambda_consist: 0.0         # Pairwise transfer loss for disentanglement
+  lambda_cross_id: 0.0        # Cross-identity similarity loss
   lambda_velocity: 1.0        # Velocity matching regularization (GREATLY increased to enforce motion)
   lambda_smoothness: 0.01     # Acceleration smoothness regularization (increased for temporal consistency)
   

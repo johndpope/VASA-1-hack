@@ -216,7 +216,8 @@ class VASAInference:
         input_video: str,
         output_path: str,
         fps: float = 25.0,
-        neutral_expression: bool = True
+        neutral_expression: bool = True,
+        target_image_path: str = None
     ):
         """Generate animated sequence from input video with background preservation."""
         try:
@@ -227,8 +228,13 @@ class VASAInference:
                     self.asset_dir
                 )
                 
-                # Load source image
-                source_img = Image.open(source_image_path).convert('RGB')
+                # Use target image if provided, otherwise use extracted source
+                if target_image_path and Path(target_image_path).exists():
+                    logger.info(f"Using target identity image: {target_image_path}")
+                    source_img = Image.open(target_image_path).convert('RGB')
+                else:
+                    logger.info(f"Using extracted source frame: {source_image_path}")
+                    source_img = Image.open(source_image_path).convert('RGB')
                 source_tensor = self.transform(source_img).unsqueeze(0).to(self.device)
 
                 # Load and process audio first to determine frame count
@@ -1585,7 +1591,8 @@ if __name__ == "__main__":
             input_video=args.input,
             output_path=args.output,
             fps=args.fps,
-            neutral_expression=args.neutral
+            neutral_expression=args.neutral,
+            target_image_path=args.target_image
         )
 
     # inferencer.visualize_inference_outputs(
