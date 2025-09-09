@@ -2342,16 +2342,16 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         return self._get_zero_sample()
 
                     # Create window data with correct key names
+                    # Squeeze batch dimension from EMO features (they come as [1, T, ...])
                     window_data = {
                         'frames': torch.stack(frames),
-                        'theta': emo_features['theta'],
-                        'scale': emo_features['scale'],
-                        'rotation': emo_features['rotation'],
-                        'translation': emo_features['translation'],
-                        'expression_embed': emo_features['expression_embed'],
-                        'scale': emo_features['scale'],
-                        'audio_features': wav2vec_features,
-                        'audio_mfcc': mfcc_features,
+                        'theta': emo_features['theta'].squeeze(0),  # [1, T, 3, 4] -> [T, 3, 4]
+                        'scale': emo_features['scale'].squeeze(0),  # [1, T, 3] -> [T, 3]
+                        'rotation': emo_features['rotation'].squeeze(0),  # [1, T, 3] -> [T, 3]
+                        'translation': emo_features['translation'].squeeze(0),  # [1, T, 3] -> [T, 3]
+                        'expression_embed': emo_features['expression_embed'].squeeze(0),  # [1, T, 128] -> [T, 128]
+                        'audio_features': wav2vec_features.squeeze(0) if wav2vec_features.ndim == 3 else wav2vec_features,  # [1, T, 768] -> [T, 768]
+                        'audio_mfcc': mfcc_features.squeeze(0) if mfcc_features.ndim == 3 else mfcc_features,  # [1, T, 13] -> [T, 13]
                         'gaze': torch.tensor(np.stack(gaze_angles), dtype=torch.float32),
                         'emotion': torch.tensor(np.stack(emotion_logits), dtype=torch.float32),
                         'head_distance': torch.tensor(np.stack(distances), dtype=torch.float32),
@@ -2420,14 +2420,13 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             'scale': torch.zeros((self.sequence_length, 3)),  
             'rotation': torch.zeros((self.sequence_length, 3)),
             'translation': torch.zeros((self.sequence_length, 3)),
-            'audio_features': torch.zeros((1, self.sequence_length, 768)),   # wav2vec
-            'audio_mfcc': torch.zeros((1, self.sequence_length, 13)),       # mfcc for syncnet
+            'audio_features': torch.zeros((self.sequence_length, 768)),   # wav2vec - no batch dim
+            'audio_mfcc': torch.zeros((self.sequence_length, 13)),       # mfcc for syncnet - no batch dim
             'gaze': torch.zeros((self.sequence_length, 2)),
             'head_distance': torch.zeros((self.sequence_length, 1)),
             'emotion': torch.zeros((self.sequence_length, 2)),
             'speed_bucket': torch.zeros((self.sequence_length, 1), dtype=torch.long),
-            'expression_embed': torch.zeros((1, self.sequence_length, 128)),
-            'scale': torch.zeros((1, self.sequence_length, 3)),
+            'expression_embed': torch.zeros((self.sequence_length, 128)),  # No batch dim
             
             # Facial landmarks
             'lips': torch.zeros((self.sequence_length, 20, 3)),
