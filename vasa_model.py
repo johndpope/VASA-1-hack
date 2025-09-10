@@ -588,6 +588,7 @@ class HolisticMotionTransformer(nn.Module):
         self.num_layers = config.model.n_layers  # Configurable via yaml
         
         # Initialize condition embedding
+        logger.info(f"Creating EfficientConditionEmbedding with window_size={self.window_size}")
         self.cond_embed = EfficientConditionEmbedding(
             model_dim=self.transformer_dim,
             max_seq_len=self.window_size
@@ -1988,22 +1989,18 @@ class MotionSequenceHandler:
         window_size: int = 50,       # Main sequence length (T)
         stride: int = 25,            # Window stride
         context_size: int = 10,      # Context length (K)
-        min_window_size: int = 15,   # For curriculum learning
-        max_window_size: int = 50    # Max window size
     ):
         self.window_size = window_size
         self.stride = stride
         self.context_size = context_size
-        self.min_window_size = min_window_size
-        self.max_window_size = max_window_size
+
         self.overlap_size = window_size - stride
         
         logger.info(f"Initialized MotionSequenceHandler:")
         logger.info(f"  window_size: {window_size}")
         logger.info(f"  stride: {stride}")
         logger.info(f"  context_size: {context_size}")
-        logger.info(f"  min_window_size: {min_window_size}")
-        logger.info(f"  max_window_size: {max_window_size}")
+
         logger.info(f"  overlap_size: {self.overlap_size}")
 
 
@@ -2023,7 +2020,8 @@ class MotionSequenceHandler:
             if T < min_frames:
                 logger.warning(
                     f"Sequence too short: {T} frames, need minimum {min_frames}\n"
-                    f"window_size={window_size}"
+                    f"window_size={window_size}, self.window_size={self.window_size}\n"
+                    f"Config check: {hasattr(self, 'window_size')}"
                 )
                 return []
 

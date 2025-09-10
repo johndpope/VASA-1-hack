@@ -168,18 +168,14 @@ def test_data_loading():
     original_handler = MotionSequenceHandler(
         window_size=50,
         stride=25,
-        context_size=10,
-        min_window_size=15,
-        max_window_size=30
+        context_size=10
     )
     
     # Optimized configuration
     optimized_handler = MotionSequenceHandler(
         window_size=20,  # Smaller window
         stride=10,       # Smaller stride
-        context_size=10,
-        min_window_size=10,
-        max_window_size=20
+        context_size=10
     )
     
     # Create dummy batch

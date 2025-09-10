@@ -17,9 +17,7 @@ def test_context_handling():
     config = OmegaConf.create({
         'motion': {
             'window_size': 20,
-            'context_size': 10,
-            'min_window_size': 10,
-            'max_window_size': 20
+            'context_size': 10
         },
         'training': {
             'context_size': 10

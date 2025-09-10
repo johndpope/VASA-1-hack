@@ -31,13 +31,7 @@ if 'nemo' not in sys.path:
 from logger import logger,TorchDebugger
 import traceback
 from vasa_dataset import WorkerState, VASAIntegratedDataset
-# Try to use improved bridge, fall back to original if not available
-try:
-    from vasa_va_bridge_v2 import VASAVolumetricAvatarBridgeV2 as VASAVolumetricAvatarBridge
-    logger.info("Using improved VASAVolumetricAvatarBridgeV2 with normalization and smoothing")
-except ImportError:
-    from vasa_va_bridge import VASAVolumetricAvatarBridge
-    logger.warning("Falling back to original VASAVolumetricAvatarBridge")
+from vasa_va_bridge import VASAVolumetricAvatarBridge
 from torch.utils.data import random_split
 import torch.multiprocessing as mp
 import random
@@ -618,9 +612,7 @@ class VASATrainer:
         self.motion_handler = MotionSequenceHandler(
             window_size=config.motion.window_size,
             stride=config.motion.stride,
-            context_size=config.motion.context_size,
-            min_window_size=config.motion.min_window_size,
-            max_window_size=config.motion.max_window_size,
+            context_size=config.motion.context_size
             
         )
 

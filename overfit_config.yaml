@@ -6,7 +6,7 @@ defaults:
 model:
   hidden_dim: 512
   n_heads: 8
-  n_layers: 1                  # Reduced to 1 for ultra-fast training (change to 2 or more for better quality)
+  n_layers: 8                  # Reduced to 1 for ultra-fast training (change to 2 or more for better quality)
   dim_feedforward: 2048
   dropout: 0.1
   motion_dim: 256
@@ -18,11 +18,11 @@ model:
 
 # Diffusion parameters - SIMPLIFIED
 diffusion:
-  num_steps: 100               # Reduced from 1000 to 100
+  num_steps: 1000               # Reduced from 1000 to 100
   beta_start: 1e-4
   beta_end: 0.02
-  cfg_start_epoch: 5  # When to start using CFG
-  cfg_ramp_epochs: 10  # Epochs to ramp up CFG scales
+  cfg_start_epoch: 0  # When to start using CFG
+
 
   schedule_mode: 'cosine'  # One of: linear, quadratic, sigmoid, cosine
   schedule_s: 0.008  # Schedule parameters (for cosine schedule)
@@ -30,15 +30,11 @@ diffusion:
 # Motion generation parameters - SMALLER WINDOWS
 motion:
   num_speed_buckets: 9
-  window_size: 20              # Reduced from 50 to 20 for faster training
-  stride: 10                   # Reduced from 25 to 10 for better overlap
+  window_size: 50              # Reduced from 50 to 20 for faster training
+  stride: 25                   # Reduced from 25 to 10 for better overlap
   context_size: 10
-  overlap_smooth: true
   # Add these:
-  min_window_size: 10          # Reduced minimum window size
-  max_window_size: 20          # Reduced maximum window size
-  smooth_window: 5             # Temporal smoothing window size
-  use_motion_prior: true       # Whether to use motion prior
+
 
   warmup_steps: 500          # Extended warmup for VASA-1 alignment
   scheduler:
@@ -63,21 +59,21 @@ train:
   # when to add conditional signals
   control_start_epoch: 0      # Start control immediately for overfitting
 
-  lr: 5e-3 # Increased base learning rate for faster convergence
-  motion_proj_lr: 0.5 # Increased motion projection LR multiplier
-  expression_lr: 0.5   # Increased expression LR multiplier 
+  lr: 1e-5 # Reduced 500x to prevent NaN with 50-frame windows
+  motion_proj_lr: 0.1 # Reduced motion projection LR multiplier
+  expression_lr: 0.1   # Reduced expression LR multiplier 
 
   turn_off_noise: false # no noise signal / no drop out
   learning_rates:
-    condition_embedding: 1e-3  # 5x increase
-    motion_projections: 5e-4   # 5x increase
-    transformer_early: 7.5e-4  # 5x increase
-    transformer_late: 2.5e-4   # 5x increase
-    output_projections: 1e-3   # 5x increase
+    condition_embedding: 2e-5  # Reduced for stability
+    motion_projections: 1e-5   # Reduced for stability
+    transformer_early: 1.5e-5  # Reduced for stability
+    transformer_late: 5e-6   # Reduced for stability
+    output_projections: 2e-5   # Reduced for stability
 
-  batch_size: 28                # Increased from 16 to maximize 32GB VRAM utilization
-  windows_per_batch: 64         # Number of consecutive windows per sequence
-  gradient_accumulation_steps: 2  # Increase effective batch size to break plateau
+  batch_size: 1                # Increased from 16 to maximize 32GB VRAM utilization
+  windows_per_batch: 4         # Number of consecutive windows per sequence
+  gradient_accumulation_steps: 4  # Increase effective batch size to break plateau
   num_epochs: 1000            # Reduced for quick testing
 
   beta1: 0.9
@@ -203,7 +199,7 @@ inference:
   cfg_scale: 0.5  # Aligned with paper default (was 3.0)
   eta: 0.5  # Increased from 0.1 for more stochasticity to prevent static output
   output_size: [512, 512]
-  num_inference_steps: 100    # Number of DDIM steps (increased from 50 for better quality)
+  num_inference_steps: 50    # Number of DDIM steps (increased from 50 for better quality)
   temperature: 1.0            # Sampling temperature
   top_k: 50                   # Top-k sampling parameter
   top_p: 0.9                 # Nucleus sampling parameter
@@ -211,13 +207,13 @@ inference:
 
 # Dataset parameters - SINGLE VIDEO for overfitting
 dataset:
-  sequence_length: 20         # Match window size
+  sequence_length: 50         # Match window size
   frame_size: [512, 512]
   preextract_audio: true
   cache_audio: true
   hop_length: 10
   max_videos: null             # Use all available videos in junk folder
-  min_sequence_length: 15    # Minimum sequence length
+  min_sequence_length: 50    # Minimum sequence length (match window_size)
   max_sequence_samples: 1000 # Maximum samples per epoch
   use_identity_image: true    # Use high-quality identity image instead of video frame
   identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image

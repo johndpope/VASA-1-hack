@@ -25,7 +25,7 @@ diffusion:
   num_steps: 1000
   beta_start: 1e-4
   beta_end: 0.02
-  cfg_start_epoch: 5  # When to start using CFG
+  cfg_start_epoch: 0  # When to start using CFG
   cfg_ramp_epochs: 10  # Epochs to ramp up CFG scales
 
   schedule_mode: 'cosine'  # One of: linear, quadratic, sigmoid, cosine
@@ -38,9 +38,7 @@ motion:
   stride: 25                   # Original stride
   context_size: 10             # Original context size
   overlap_smooth: true
-  # Add these:
-  min_window_size: 15          # Minimum window size for curriculum
-  max_window_size: 30          # Maximum window size
+
   smooth_window: 5             # Temporal smoothing window size
   use_motion_prior: true       # Whether to use motion prior
 
@@ -211,7 +209,7 @@ inference:
   cfg_scale: 0.5  # Aligned with paper default (was 3.0)
   eta: 0.5  # Increased from 0.0 for stochasticity to prevent static output
   output_size: [512, 512]
-  num_inference_steps: 100    # Number of DDIM steps (increased from 50 for better quality)
+  num_inference_steps: 50    # Number of DDIM steps (increased from 50 for better quality)
   temperature: 1.0            # Sampling temperature
   top_k: 50                   # Top-k sampling parameter
   top_p: 0.9                 # Nucleus sampling parameter

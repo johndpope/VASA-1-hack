@@ -174,7 +174,7 @@ class VASAInference:
                     initial_pose=motion_data,
                     initial_dynamics=motion_data['expression_embed'],
                     conditions=conditions,
-                    num_steps=50  
+                    num_steps=self.config.inference.get('num_inference_steps', 50)  
                 )
                 
                 # For subsequent windows, only keep the non-overlapping portion
@@ -521,7 +521,7 @@ class VASAInference:
                     initial_pose=motion_data,
                     initial_dynamics=motion_data['expression_embed'],
                     conditions=conditions,
-                    num_steps=self.config.get('inference', {}).get('num_inference_steps', 100),  # Use config value
+                    num_steps=self.config.inference.num_inference_steps ,  # Use config value
                     eta=self.config.get('inference', {}).get('eta', 0.5),  # Use config value for stochasticity
                     cfg_scales=cfg_scales,
                     prev_context=prev_context  # Now enabled with proper dimension handling

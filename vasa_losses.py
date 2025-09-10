@@ -2036,7 +2036,23 @@ class VASALossModule:
                         target_gaze = target_gaze.unsqueeze(1).expand(-1, pred_gaze.shape[1], -1)
                         logger.debug(f"  Expanded target gaze shape: {target_gaze.shape}")
                     
-                    gaze_loss = (1 - torch.cos(pred_gaze - target_gaze)).mean()
+                    # Compute gaze loss with NaN protection
+                    diff = pred_gaze - target_gaze
+                    # Clamp difference to prevent extreme values in cos
+                    diff = torch.clamp(diff, -3.14, 3.14)
+                    cos_sim = torch.cos(diff)
+                    # Check for NaN before mean
+                    if torch.isnan(cos_sim).any() or torch.isinf(cos_sim).any():
+                        logger.warning("NaN/Inf in gaze cosine similarity, using zero loss")
+                        gaze_loss = torch.tensor(0.0, device=device)
+                    else:
+                        gaze_loss = (1 - cos_sim).mean()
+                    
+                    # Final NaN check
+                    if torch.isnan(gaze_loss) or torch.isinf(gaze_loss):
+                        logger.warning("NaN/Inf in final gaze loss, using zero")
+                        gaze_loss = torch.tensor(0.0, device=device)
+                    
                     losses['control_gaze'] = gaze_loss * self.lambda_gaze
                     total_loss = total_loss + losses['control_gaze']
                     logger.debug(f"  Gaze loss: {losses['control_gaze'].item():.6f}")
