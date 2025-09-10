@@ -81,6 +81,7 @@ train:
     output_projections: 1e-3   # 5x increase
 
   batch_size: 4                # Back to 4 with larger dataset
+  windows_per_batch: 64         # Number of consecutive windows per sequence  
   gradient_accumulation_steps: 4  # Effective batch size of 16
   num_epochs: 1000            # Reduced for quick testing
 

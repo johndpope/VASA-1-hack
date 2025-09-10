@@ -108,12 +108,15 @@ def main():
     )
     
     # Create custom sampler for maintaining window sequences
+    # Use windows_per_batch from config if available, otherwise default to 4
+    windows_per_sequence = config.train.get('windows_per_batch', 4)
     train_sampler = WindowSequenceSampler(
         train_dataset,
         batch_size=config.train.batch_size,
-        windows_per_sequence=4,  # Number of consecutive windows
+        windows_per_sequence=windows_per_sequence,  # Number of consecutive windows from config
         shuffle=True
     )
+    logger.info(f"Using {windows_per_sequence} consecutive windows per sequence")
     
     # Create custom collate function for adding prev_context
     collate_fn = create_window_sequence_collate_fn(

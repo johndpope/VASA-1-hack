@@ -59,7 +59,7 @@ motion:
 
 # Training parameters - OVERFITTING FOCUSED
 train:
-  resume_from: "checkpoints_overfit/best_checkpoint.pt" # Resume from best checkpoint
+  resume_from: "" # Resume from best checkpoint
   # when to add conditional signals
   control_start_epoch: 0      # Start control immediately for overfitting
 
@@ -76,6 +76,7 @@ train:
     output_projections: 1e-3   # 5x increase
 
   batch_size: 28                # Increased from 16 to maximize 32GB VRAM utilization
+  windows_per_batch: 64         # Number of consecutive windows per sequence
   gradient_accumulation_steps: 2  # Increase effective batch size to break plateau
   num_epochs: 1000            # Reduced for quick testing
 

@@ -223,9 +223,17 @@ class VASALossModule:
                 # Compute EAR with stability term
                 return (A + B) / (2.0 * C.clamp(min=1e-6))
 
-            # Get predicted eye openness
+            # Get predicted eye openness with NaN protection
             left_ear = compute_ear(left_eye)    # [B, T]
             right_ear = compute_ear(right_eye)   # [B, T]
+            
+            # Check for NaN in EAR values
+            if torch.isnan(left_ear).any() or torch.isinf(left_ear).any():
+                logger.warning("NaN/Inf detected in left EAR - using default")
+                left_ear = torch.nan_to_num(left_ear, nan=0.15, posinf=0.3, neginf=0.0)
+            if torch.isnan(right_ear).any() or torch.isinf(right_ear).any():
+                logger.warning("NaN/Inf detected in right EAR - using default")
+                right_ear = torch.nan_to_num(right_ear, nan=0.15, posinf=0.3, neginf=0.0)
             
             # Normalize to [0,1] range
             left_openness = torch.clamp(left_ear / 0.3, 0, 1)   # [B, T]
@@ -2240,17 +2248,27 @@ class VASALossModule:
             # Compute pitch (x-axis rotation)
             pitch = torch.asin(torch.clamp(-R[..., 2, 0], -1, 1))
             
-            # Compute yaw (y-axis rotation)
+            # Compute yaw (y-axis rotation) with safe division
             cos_pitch = torch.cos(pitch)
-            yaw = torch.atan2(R[..., 2, 1] / cos_pitch, R[..., 2, 2] / cos_pitch)
+            eps = 1e-6
+            safe_cos_pitch = torch.where(torch.abs(cos_pitch) < eps, 
+                                        torch.ones_like(cos_pitch) * eps, 
+                                        cos_pitch)
+            yaw = torch.atan2(R[..., 2, 1] / safe_cos_pitch, R[..., 2, 2] / safe_cos_pitch)
+            
+            # Clamp angles before stacking to avoid inplace operations
+            # Pitch: -90 to 90 degrees (-π/2 to π/2)
+            # Yaw: -180 to 180 degrees (-π to π)
+            pitch_clamped = torch.clamp(pitch, -1.57, 1.57)
+            yaw_clamped = torch.clamp(yaw, -3.14, 3.14)
             
             # Stack gaze angles
-            gaze = torch.stack([pitch, yaw], dim=-1)  # [B, T, 2]
+            gaze = torch.stack([pitch_clamped, yaw_clamped], dim=-1)  # [B, T, 2]
             
             # Validate outputs
             if torch.isnan(gaze).any() or torch.isinf(gaze).any():
-                logger.warning("Invalid values in gaze angles")
-                return None
+                logger.warning("Invalid values in gaze angles after clamping - returning zeros")
+                return torch.zeros_like(gaze)
                 
             return gaze
             

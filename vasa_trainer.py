@@ -2511,12 +2511,14 @@ if __name__ == "__main__":
 
     # Create custom sampler for maintaining window sequences
     # Use full_dataset for sampler since it needs the windows attribute
+    windows_per_sequence = config.train.get('windows_per_batch', 4) if hasattr(config, 'train') else 4
     train_sampler = WindowSequenceSampler(
         full_dataset,
         batch_size=batch_size,
-        windows_per_sequence=4,  # Number of consecutive windows
+        windows_per_sequence=windows_per_sequence,  # Number of consecutive windows from config
         shuffle=True
     )
+    logger.info(f"Using {windows_per_sequence} consecutive windows per sequence")
     
     # For validation, we'll use the full dataset but not sample all windows
     # This is a simplified approach - in production you'd want a proper val split
