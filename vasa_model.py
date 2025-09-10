@@ -8,8 +8,8 @@ from tqdm import tqdm
 from typing import *
 from omegaconf import OmegaConf
 from facenet_pytorch import InceptionResnetV1
-from ibug.face_detection import RetinaFacePredictor
-from ibug.face_parsing import FaceParser as RTNetPredictor
+# from ibug.face_detection import RetinaFacePredictor
+# from ibug.face_parsing import FaceParser as RTNetPredictor
 import sys
 if 'nemo' not in sys.path:
     sys.path.insert(0, 'nemo')
@@ -1651,6 +1651,7 @@ class VASAModel(nn.Module):
         return transform(image)
 
 
+
     # overlapping windows for training
     def generate_sequence(
         self,
@@ -1659,8 +1660,7 @@ class VASAModel(nn.Module):
         conditions: Dict[str, torch.Tensor],
         num_steps: int = 50,
         eta: float = 0.0,  # DDIM stochasticity parameter
-        cfg_scales: Optional[Dict[str, float]] = None,
-        prev_context: Optional[Dict[str, torch.Tensor]] = None
+        cfg_scales: Optional[Dict[str, float]] = None
     ) -> Dict[str, torch.Tensor]:
         """Generate sequence using DDIM sampling."""
         self.eval()
@@ -1678,50 +1678,28 @@ class VASAModel(nn.Module):
                 self.scheduler.set_timesteps(num_steps, device=device)
 
                 # Initialize motion sequence with random noise
-                # Add stronger noise to encourage variation
-                noise_scale = 2.0  # Increase initial noise to prevent collapse
-                
-                # Add temporal structure to noise to encourage motion
-                base_noise = torch.randn(B, T, 1, device=device)
-                temporal_modulation = torch.linspace(0, 1, T, device=device).unsqueeze(0).unsqueeze(-1)
-                temporal_noise = base_noise * (1 + temporal_modulation * 0.5)  # Gradual increase
-                
                 motion_sequence = {
-                    'theta': torch.randn(B, T, 3, 4, device=device) * noise_scale,
-                    'scale': torch.randn(B, T, 3, device=device) * 0.1,  # Keep scale small
-                    'rotation': torch.randn(B, T, 3, device=device) * noise_scale,
-                    'translation': torch.randn(B, T, 3, device=device) * 0.1,  # Keep translation small
-                    'expression_embed': torch.randn(B, T, 128, device=device) * noise_scale * (1 + temporal_modulation)
+                    'theta': torch.randn(B, T, 3, 4, device=device),
+                    'scale': torch.randn(B, T, 3, device=device),
+                    'rotation': torch.randn(B, T, 3, device=device),
+                    'translation': torch.randn(B, T, 3, device=device),
+                    'expression_embed': torch.randn(B, T, 128, device=device)
                 }
 
                 # Set initial frame values
-                # Handle both single frame [B, ...] and sequence [B, T, ...] inputs
-                if initial_pose['theta'].dim() == 3:  # [B, 3, 4]
-                    motion_sequence['theta'][:, 0] = initial_pose['theta']
-                    motion_sequence['rotation'][:, 0] = initial_pose['rotation']
-                    motion_sequence['scale'][:, 0] = initial_pose['scale']
-                    motion_sequence['translation'][:, 0] = initial_pose['translation']
-                else:  # [B, T, 3, 4] - take first frame
-                    motion_sequence['theta'][:, 0] = initial_pose['theta'][:, 0]
-                    motion_sequence['rotation'][:, 0] = initial_pose['rotation'][:, 0]
-                    motion_sequence['scale'][:, 0] = initial_pose['scale'][:, 0]
-                    motion_sequence['translation'][:, 0] = initial_pose['translation'][:, 0]
-                
-                # Handle initial dynamics shape
-                if initial_dynamics.dim() == 2:  # [B, D]
-                    motion_sequence['expression_embed'][:, 0] = initial_dynamics
-                else:  # [B, T, D] - take first frame
-                    motion_sequence['expression_embed'][:, 0] = initial_dynamics[:, 0]
+                motion_sequence['theta'][:, 0] = initial_pose['theta']
+                motion_sequence['rotation'][:, 0] = initial_pose['rotation']
+                motion_sequence['scale'][:, 0] = initial_pose['scale']
+                motion_sequence['translation'][:, 0] = initial_pose['translation']
+                motion_sequence['expression_embed'][:, 0] = initial_dynamics
 
                 # DDIM sampling loop
                 for i, t in enumerate(self.scheduler.timesteps):
-                    # Get model prediction with CFG
-                    model_output = self.forward_with_cfg(
+                    # Get model prediction
+                    model_output = self.forward(
                         motion_data=motion_sequence,
                         noise_level=t.expand(B),
-                        conditions=conditions,
-                        cfg_scales=cfg_scales,
-                        prev_context=prev_context  # Pass prev_context for temporal consistency
+                        conditions=conditions
                     )
 
                     # DDIM step for each motion parameter
@@ -1744,96 +1722,7 @@ class VASAModel(nn.Module):
                 raise
 
 
-    def generate_sequence_inference(
-        self,
-        initial_pose: Dict[str, torch.Tensor],
-        initial_dynamics: torch.Tensor,
-        conditions: Dict[str, torch.Tensor],
-        prev_context: Optional[Dict[str, torch.Tensor]] = None
-    ) -> Dict[str, torch.Tensor]:
-        """Generate sequence without overlapping windows for inference."""
-        self.eval()
-        with torch.no_grad():
-            try:
-                # Get batch size and sequence length from audio features
-                audio_features = conditions['audio_features']
-                B, T = audio_features.shape[:2]
-                device = initial_pose['theta'].device
 
-                logger.debug("\n=== Starting VASA Inference Generation ===")
-                logger.debug(f"Batch size: {B}, Sequence length: {T}")
-
-                # Initialize motion sequence with first frame
-                motion_sequence = {
-                    'theta': initial_pose['theta'].expand(-1, T, -1, -1),
-                    'scale': initial_pose['scale'].expand(-1, T, -1),
-                    'rotation': initial_pose['rotation'].expand(-1, T, -1),
-                    'translation': initial_pose['translation'].expand(-1, T, -1),
-                    'expression_embed': initial_dynamics.unsqueeze(1).expand(-1, T, -1)
-                }
-
-                # Set up DDIM sampler
-                self.scheduler.set_timesteps(50, device=device)
-
-                # Get eta from config for stochasticity (VASA-1 uses mild randomness)
-                eta = getattr(self.config.inference, 'eta', 0.1)  # Default 0.1 for mild stochasticity
-                logger.info(f"Using eta={eta} for DDIM sampling (0=deterministic, 1=full stochastic)")
-                
-                # Generate frames sequentially
-                for i, t in enumerate(self.scheduler.timesteps):
-                    # Get model prediction
-                    model_output = self.forward(
-                        motion_data=motion_sequence,
-                        noise_level=t.expand(B),
-                        conditions=conditions,
-                        prev_context=prev_context
-                    )
-
-                    # DDIM step for each motion parameter
-                    for key in motion_sequence.keys():
-                        if key in model_output:
-                            # Use scheduler step with stochasticity
-                            scheduler_output = self.scheduler.step(
-                                model_output=model_output[key],
-                                timestep=t,
-                                sample=motion_sequence[key],
-                                eta=eta  # Add randomness per VASA-1
-                            )
-                            motion_sequence[key] = scheduler_output.prev_sample
-
-                # Log variance to detect mode collapse
-                logger.info("=== Motion Variance Analysis ===")
-                for key in ['theta', 'rotation', 'translation', 'expression_embed']:
-                    if key in motion_sequence:
-                        motion = motion_sequence[key]
-                        # Compute variance across time
-                        temporal_var = motion.var(dim=1).mean().item()
-                        # Compute frame-to-frame differences
-                        if motion.shape[1] > 1:
-                            frame_diffs = motion[:, 1:] - motion[:, :-1]
-                            diff_norm = torch.norm(frame_diffs.reshape(B, -1), dim=-1).mean().item()
-                        else:
-                            diff_norm = 0.0
-                        
-                        logger.info(f"  {key}: temporal_var={temporal_var:.6f}, frame_diff_norm={diff_norm:.6f}")
-                        
-                        # WARNING if variance is too low (mode collapse)
-                        if temporal_var < 1e-4:
-                            logger.warning(f"  ⚠️ LOW VARIANCE in {key} - possible mode collapse!")
-                        if diff_norm < 1e-3:
-                            logger.warning(f"  ⚠️ STATIC MOTION in {key} - frames are too similar!")
-                
-                logger.debug("=== Generation Complete ===")
-                for k, v in motion_sequence.items():
-                    logger.debug(f"{k} shape: {v.shape}")
-
-                return motion_sequence
-
-            except Exception as e:
-                logger.error(f"Error in sequence generation: {str(e)}")
-                logger.error(traceback.format_exc())
-                raise
-            
     def _process_vasa_conditions(
         self,
         conditions: Dict[str, torch.Tensor],

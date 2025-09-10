@@ -2238,141 +2238,141 @@ class VASATrainer:
         except Exception as e:
             logger.warning(f"Error in visualization logging: {str(e)}")
 
-    def _generate_sample_video(self, outputs: Dict[str, torch.Tensor], max_frames: int = 50):
-        """Generate a sample video for visualization using VASAInference."""
-        try:
-            # Try to use VASAInference to generate actual avatar video
-            from vi import VASAInference
-            import random
-            import os
+    # def _generate_sample_video(self, outputs: Dict[str, torch.Tensor], max_frames: int = 50):
+    #     """Generate a sample video for visualization using VASAInference."""
+    #     try:
+    #         # Try to use VASAInference to generate actual avatar video
+    #         from vi import VASAInference
+    #         import random
+    #         import os
             
-            # Get list of available videos
-            video_folder = self.config.paths.video_folder
-            video_files = [f for f in os.listdir(video_folder) if f.endswith('.mp4')]
+    #         # Get list of available videos
+    #         video_folder = self.config.paths.video_folder
+    #         video_files = [f for f in os.listdir(video_folder) if f.endswith('.mp4')]
             
-            if video_files:
-                # Select a random video for generation
-                sample_video = os.path.join(video_folder, random.choice(video_files))
+    #         if video_files:
+    #             # Select a random video for generation
+    #             sample_video = os.path.join(video_folder, random.choice(video_files))
                 
-                # Determine checkpoint path based on config
-                if 'overfit' in str(self.config_path):
-                    checkpoint_dir = "./checkpoints_overfit"
-                    config_file = 'overfit_config.yaml'
-                else:
-                    checkpoint_dir = "./checkpoints"
-                    config_file = 'vasa_config.yaml'
+    #             # Determine checkpoint path based on config
+    #             if 'overfit' in str(self.config_path):
+    #                 checkpoint_dir = "./checkpoints_overfit"
+    #                 config_file = 'overfit_config.yaml'
+    #             else:
+    #                 checkpoint_dir = "./checkpoints"
+    #                 config_file = 'vasa_config.yaml'
                 
-                # Check if we have a saved checkpoint
-                checkpoint_path = None
-                if os.path.exists(f"{checkpoint_dir}/best_checkpoint.pt"):
-                    checkpoint_path = f"{checkpoint_dir}/best_checkpoint.pt"
-                elif self.current_epoch > 0:
-                    # Try to find latest checkpoint
-                    epoch_checkpoint = f"{checkpoint_dir}/checkpoint_epoch_{self.current_epoch}.pt"
-                    if os.path.exists(epoch_checkpoint):
-                        checkpoint_path = epoch_checkpoint
+    #             # Check if we have a saved checkpoint
+    #             checkpoint_path = None
+    #             if os.path.exists(f"{checkpoint_dir}/best_checkpoint.pt"):
+    #                 checkpoint_path = f"{checkpoint_dir}/best_checkpoint.pt"
+    #             elif self.current_epoch > 0:
+    #                 # Try to find latest checkpoint
+    #                 epoch_checkpoint = f"{checkpoint_dir}/checkpoint_epoch_{self.current_epoch}.pt"
+    #                 if os.path.exists(epoch_checkpoint):
+    #                     checkpoint_path = epoch_checkpoint
                 
-                if checkpoint_path and os.path.exists(checkpoint_path):
-                    try:
-                        logger.info(f"Generating sample video using checkpoint: {checkpoint_path}")
+    #             if checkpoint_path and os.path.exists(checkpoint_path):
+    #                 try:
+    #                     logger.info(f"Generating sample video using checkpoint: {checkpoint_path}")
                         
-                        # Initialize inference model
-                        inferencer = VASAInference(
-                            checkpoint_path=checkpoint_path,
-                            config_path=config_file
-                        )
+    #                     # Initialize inference model
+    #                     inferencer = VASAInference(
+    #                         checkpoint_path=checkpoint_path,
+    #                         config_path=config_file
+    #                     )
                         
-                        # Generate output video
-                        video_path = self.output_dir / f"vasa_epoch_{self.current_epoch}_step_{self.global_step}.mp4"
-                        video_path.parent.mkdir(parents=True, exist_ok=True)
+    #                     # Generate output video
+    #                     video_path = self.output_dir / f"vasa_epoch_{self.current_epoch}_step_{self.global_step}.mp4"
+    #                     video_path.parent.mkdir(parents=True, exist_ok=True)
                         
-                        inferencer.generate_from_video(
-                            input_video=sample_video,
-                            output_path=str(video_path),
-                            fps=25.0,
-                            neutral_expression=False
-                        )
+    #                     inferencer.generate_from_video(
+    #                         input_video=sample_video,
+    #                         output_path=str(video_path),
+    #                         fps=25.0,
+    #                         neutral_expression=False
+    #                     )
                         
-                        logger.info(f"Generated VASA video: {video_path}")
-                        return video_path
+    #                     logger.info(f"Generated VASA video: {video_path}")
+    #                     return video_path
                         
-                    except Exception as e:
-                        logger.warning(f"Failed to generate VASA video: {str(e)}")
-                        # Fall back to gradient visualization
-                        pass
+    #                 except Exception as e:
+    #                     logger.warning(f"Failed to generate VASA video: {str(e)}")
+    #                     # Fall back to gradient visualization
+    #                     pass
             
-            # Fallback: gradient visualization if VASA generation fails
-            with torch.no_grad():
-                # Limit to max_frames
-                actual_frames = min(outputs['theta'].shape[1], max_frames) if 'theta' in outputs else 20
+    #         # Fallback: gradient visualization if VASA generation fails
+    #         with torch.no_grad():
+    #             # Limit to max_frames
+    #             actual_frames = min(outputs['theta'].shape[1], max_frames) if 'theta' in outputs else 20
                 
-                frames = []
+    #             frames = []
                 
-                # Get motion parameters for visualization
-                if 'expression' in outputs:
-                    expression = outputs['expression'][0, :actual_frames]  # [T, 256]
-                    # Normalize expression to [0, 1] for visualization
-                    expr_min = expression.min()
-                    expr_max = expression.max()
-                    if expr_max > expr_min:
-                        expression = (expression - expr_min) / (expr_max - expr_min)
-                else:
-                    expression = None
+    #             # Get motion parameters for visualization
+    #             if 'expression' in outputs:
+    #                 expression = outputs['expression'][0, :actual_frames]  # [T, 256]
+    #                 # Normalize expression to [0, 1] for visualization
+    #                 expr_min = expression.min()
+    #                 expr_max = expression.max()
+    #                 if expr_max > expr_min:
+    #                     expression = (expression - expr_min) / (expr_max - expr_min)
+    #             else:
+    #                 expression = None
                 
-                for i in range(actual_frames):
-                    # Create visualization frame showing motion parameters
-                    frame = torch.zeros(3, 512, 512)
+    #             for i in range(actual_frames):
+    #                 # Create visualization frame showing motion parameters
+    #                 frame = torch.zeros(3, 512, 512)
                     
-                    # Red channel: time progress
-                    frame[0] = i / actual_frames
+    #                 # Red channel: time progress
+    #                 frame[0] = i / actual_frames
                     
-                    # Green channel: expression magnitude if available
-                    if expression is not None:
-                        # Average expression values for this frame
-                        expr_mag = expression[i].mean().item()
-                        frame[1] = expr_mag
-                    else:
-                        frame[1] = 0.5
+    #                 # Green channel: expression magnitude if available
+    #                 if expression is not None:
+    #                     # Average expression values for this frame
+    #                     expr_mag = expression[i].mean().item()
+    #                     frame[1] = expr_mag
+    #                 else:
+    #                     frame[1] = 0.5
                     
-                    # Blue channel: inverse time
-                    frame[2] = 1.0 - (i / actual_frames)
+    #                 # Blue channel: inverse time
+    #                 frame[2] = 1.0 - (i / actual_frames)
                     
-                    frames.append(frame)
+    #                 frames.append(frame)
                 
-                frames = torch.stack(frames)  # [T, C, H, W]
+    #             frames = torch.stack(frames)  # [T, C, H, W]
                 
-                # Save as MP4 video
-                import cv2
+    #             # Save as MP4 video
+    #             import cv2
                 
-                video_path = self.output_dir / f"gradient_epoch_{self.current_epoch}_step_{self.global_step}.mp4"
-                video_path.parent.mkdir(parents=True, exist_ok=True)
+    #             video_path = self.output_dir / f"gradient_epoch_{self.current_epoch}_step_{self.global_step}.mp4"
+    #             video_path.parent.mkdir(parents=True, exist_ok=True)
                 
-                # Convert to numpy and ensure proper format
-                frames_np = frames.permute(0, 2, 3, 1).cpu().numpy()
+    #             # Convert to numpy and ensure proper format
+    #             frames_np = frames.permute(0, 2, 3, 1).cpu().numpy()
                 
-                if frames_np.max() <= 1.0:
-                    frames_np = (frames_np * 255).astype(np.uint8)
+    #             if frames_np.max() <= 1.0:
+    #                 frames_np = (frames_np * 255).astype(np.uint8)
                 
-                # Use mp4v codec for better compatibility
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                out = cv2.VideoWriter(
-                    str(video_path),
-                    fourcc,
-                    25.0,
-                    (frames_np.shape[2], frames_np.shape[1])
-                )
+    #             # Use mp4v codec for better compatibility
+    #             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    #             out = cv2.VideoWriter(
+    #                 str(video_path),
+    #                 fourcc,
+    #                 25.0,
+    #                 (frames_np.shape[2], frames_np.shape[1])
+    #             )
                 
-                for frame in frames_np:
-                    out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-                out.release()
+    #             for frame in frames_np:
+    #                 out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+    #             out.release()
                 
-                return video_path
+    #             return video_path
                 
-        except Exception as e:
-            logger.error(f"Error generating sample video: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return None
+    #     except Exception as e:
+    #         logger.error(f"Error generating sample video: {str(e)}")
+    #         import traceback
+    #         logger.error(traceback.format_exc())
+    #         return None
 
     def _log_gradient_stats(self, step: int):
         """Log gradient statistics to WandB - DISABLED for performance."""
