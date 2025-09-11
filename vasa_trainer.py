@@ -1287,12 +1287,12 @@ class VASATrainer:
                                                 single_frame_generated = None
                                     
                                     # Pass single frames to thumbnail generator
-                                    thumbnail = generate_window_thumbnail(
-                                        generated_frames=single_frame_generated,  # Just one frame
-                                        target_frames=single_frame_target,        # Just one frame
-                                        motion_outputs=stored_outputs,            # For motion stats overlay (using stored)
-                                        size=(1024, 512)  # Wide format for side-by-side comparison
-                                    )
+                                    # thumbnail = generate_window_thumbnail(
+                                    #     generated_frames=single_frame_generated,  # Just one frame
+                                    #     target_frames=single_frame_target,        # Just one frame
+                                    #     motion_outputs=stored_outputs,            # For motion stats overlay (using stored)
+                                    #     size=(1024, 512)  # Wide format for side-by-side comparison
+                                    # )
                                     
                                     # Log to wandb with more descriptive caption
                                     if thumbnail is not None:
@@ -1362,6 +1362,12 @@ class VASATrainer:
                                 if not torch.isfinite(torch.tensor(grad_norm)):
                                     logger.error(f"Skipping optimizer step due to infinite gradient at step {self.global_step}")
                                     self.optimizer.zero_grad()
+                                    
+                                    # Reset scaler state if using mixed precision
+                                    if use_amp and hasattr(self.accelerator, 'scaler') and self.accelerator.scaler is not None:
+                                        self.accelerator.scaler.update()  # Reset scaler state
+                                        logger.info("Reset gradient scaler state after infinite gradient")
+                                    
                                     continue  # Skip to next batch
                         else:
                             # If grad_norm is None but we have gradients, compute it manually
@@ -1375,6 +1381,13 @@ class VASATrainer:
                             if not torch.isfinite(torch.tensor(grad_norm)) or grad_norm > 1e6:
                                 logger.error(f"Computed gradient norm is invalid: {grad_norm}. Skipping optimizer step.")
                                 self.optimizer.zero_grad()
+                                
+                                # Reset scaler state if using mixed precision
+                                use_amp = getattr(self.config.motion, 'amp', False)
+                                if use_amp and hasattr(self.accelerator, 'scaler') and self.accelerator.scaler is not None:
+                                    self.accelerator.scaler.update()  # Reset scaler state
+                                    logger.info("Reset gradient scaler state after invalid computed gradient norm")
+                                
                                 continue
                     
                     # Optimizer step after ALL windows processed
@@ -1385,8 +1398,19 @@ class VASATrainer:
                 except Exception as e:
                     logger.error(f"Error during optimizer step: {str(e)}")
                     logger.error(traceback.format_exc())
+                    
                     # Clear gradients and continue training
                     self.optimizer.zero_grad()
+                    
+                    # Reset scaler state if using mixed precision and an error occurred
+                    use_amp = getattr(self.config.motion, 'amp', False)
+                    if use_amp and hasattr(self.accelerator, 'scaler') and self.accelerator.scaler is not None:
+                        try:
+                            self.accelerator.scaler.update()  # Reset scaler state
+                            logger.info("Reset gradient scaler state after optimizer error")
+                        except Exception as scaler_error:
+                            logger.warning(f"Could not reset scaler: {scaler_error}")
+                    
                     continue
                 
                 # Average metrics across windows and immediately convert to scalars
