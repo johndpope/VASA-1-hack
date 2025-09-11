@@ -1321,6 +1321,10 @@ class VASATrainer:
 
                 # After processing all windows in the batch, do gradient clipping and optimizer step
                 try:
+                    # Update gradient monitor if enabled (before clipping to see raw gradients)
+                    if self.config.train.gradient_monitoring.enabled and self.accelerator.sync_gradients:
+                        self.grad_monitor.update()
+                    
                     # Compute gradient norm and clip gradients
                     grad_norm = None
                     if self.accelerator.sync_gradients:
@@ -1437,11 +1441,19 @@ class VASATrainer:
                         
                 # Log metrics and gradients
                 if batch_idx % self.config.train.gradient_monitoring.log_freq == 0:
+                    # Get gradient statistics from monitor
+                    grad_stats = {}
+                    if self.config.train.gradient_monitoring.enabled:
+                        grad_stats = self.grad_monitor.get_stats()
+                        # Reset monitor for next logging period
+                        self.grad_monitor.reset()
+                    
                     self._log_training_stats(
                         batch_idx, 
                         num_batches,
                         avg_metrics,
-                        grad_norms
+                        grad_norms,
+                        grad_stats
                     )
                 
                 # Periodic CUDA cache clearing to prevent memory fragmentation
@@ -1668,7 +1680,8 @@ class VASATrainer:
         batch_idx: int,
         num_batches: int,
         metrics: Dict[str, float],
-        grad_norms: Dict[str, List[float]]
+        grad_norms: Dict[str, List[float]],
+        grad_stats: Optional[Dict[str, float]] = None
     ):
         """Log detailed training statistics."""
         if not self.config.wandb.enabled or not self.accelerator.is_local_main_process:
@@ -1693,17 +1706,31 @@ class VASATrainer:
             if k.startswith('control_') or k.startswith('metric_'):
                 step_metrics[f'train/{k}'] = v
                 
-        # Add gradient statistics
+        # Add gradient statistics from manual tracking
         if grad_norms:
-            grad_stats = {
+            grad_norm_summary = {
                 'min': min(min(norms) for norms in grad_norms.values()),
                 'max': max(max(norms) for norms in grad_norms.values()),
                 'mean': np.mean([np.mean(norms) for norms in grad_norms.values()]),
                 'std': np.std([np.std(norms) for norms in grad_norms.values()])
             }
             
-            for k, v in grad_stats.items():
+            for k, v in grad_norm_summary.items():
                 step_metrics[f'train/grad_{k}'] = v
+        
+        # Add detailed gradient statistics from GradientMonitor
+        if grad_stats:
+            # Log overall gradient statistics
+            for k, v in grad_stats.items():
+                if not k.startswith('grad_norm_') and not k.startswith('grad_mean_') and not k.startswith('grad_var_'):
+                    step_metrics[f'gradients/{k}'] = v
+            
+            # Log per-layer statistics (only for key layers to avoid too many metrics)
+            key_layers = ['motion_transformer', 'condition_embedding', 'output_projection']
+            for layer in key_layers:
+                for k, v in grad_stats.items():
+                    if layer in k:
+                        step_metrics[f'gradients/layers/{k}'] = v
                 
         # Log to wandb
         wandb.log(step_metrics, step=self.global_step)
