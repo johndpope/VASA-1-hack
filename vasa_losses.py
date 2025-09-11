@@ -1390,7 +1390,8 @@ class VASALossModule:
          
                 should_visualize = step is not None and step > 0 and step % self.vis_freq == 0
                 if should_visualize:
-                    self.visualize_sequence(pred['expression_embed'],target['expression_embed'],step,0)
+                    # Use comparison_target which is the actual target being used for loss
+                    self.visualize_sequence(pred['expression_embed'], comparison_target['expression_embed'], step, 0)
 
 
             # Apply timestep weighting for VASA-1 score matching
