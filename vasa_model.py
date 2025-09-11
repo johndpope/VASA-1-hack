@@ -878,6 +878,22 @@ class HolisticMotionTransformer(nn.Module):
                 prev_features = None
                 K = 0
 
+            # Handle null conditions for CFG (classifier-free guidance)
+            if conditions is not None:
+                # For CFG, some conditions might be None (dropped)
+                # Create zero tensors for dropped conditions
+                for key in ['audio_features', 'gaze', 'head_distance', 'emotion']:
+                    if key in conditions and conditions[key] is None:
+                        # Create zero tensor with appropriate shape
+                        if key == 'audio_features':
+                            conditions[key] = torch.zeros(B, T, 768, device=device)  # wav2vec2 dim
+                        elif key == 'gaze':
+                            conditions[key] = torch.zeros(B, T, 2, device=device)
+                        elif key == 'head_distance':
+                            conditions[key] = torch.zeros(B, T, 1, device=device)
+                        elif key == 'emotion':
+                            conditions[key] = torch.zeros(B, T, 2, device=device)
+            
             self._validate_conditions(conditions, B, T, device)
 
             # Handle condition embeddings with validation
@@ -1875,6 +1891,154 @@ class VASAModel(nn.Module):
         
         refined['expression_embed'] = expr
         return refined
+    
+    def sample_with_cfg(
+        self,
+        conditions: Dict[str, torch.Tensor],
+        shape: Tuple[int, ...],
+        num_steps: int = 50,
+        eta: float = 0.0,
+        cfg_scales: Optional[Dict[str, float]] = None,
+        device: str = 'cuda',
+        prev_context: Optional[Dict[str, torch.Tensor]] = None,
+        config: Optional[OmegaConf] = None
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Sample motion sequence with VASA-1 style per-condition CFG.
+        
+        Args:
+            conditions: Full conditions dict (including prev_ if applicable)
+            shape: Shape of the initial motion dict (B, T, ...)
+            num_steps: Number of denoising steps
+            eta: DDIM eta (0 for deterministic DDIM)
+            cfg_scales: Dict of scales per condition (e.g., {'audio': 0.5, 'gaze': 1.0})
+                        Defaults to config values if None.
+            device: Device to run on
+            prev_context: Previous window context for seamless transitions
+            config: Optional config to get cfg_scales from
+        
+        Returns:
+            Generated motion dict
+        """
+        if cfg_scales is None:
+            # Try to get from config first
+            if config is not None and hasattr(config, 'train') and hasattr(config.train, 'cfg_scales'):
+                cfg_scales = dict(config.train.cfg_scales)
+                logger.info(f"Using CFG scales from config: {cfg_scales}")
+            elif hasattr(self, 'config') and hasattr(self.config, 'train') and hasattr(self.config.train, 'cfg_scales'):
+                # Try to get from model's stored config
+                cfg_scales = dict(self.config.train.cfg_scales)
+                logger.info(f"Using CFG scales from model config: {cfg_scales}")
+            else:
+                # Fall back to VASA-1 paper defaults
+                cfg_scales = {
+                    'audio': 0.5,      # Paper default
+                    'gaze': 1.0,       # Paper default  
+                    'head_distance': 0.8,
+                    'emotion': 0.5
+                }
+                logger.info(f"Using default VASA-1 CFG scales: {cfg_scales}")
+        
+        logger.info(f"Sampling with CFG scales: {cfg_scales}")
+        
+        # Guided conditions (as per VASA-1 paper)
+        guided_conditions = ['audio_features', 'gaze', 'head_distance', 'emotion']
+        
+        # Initialize with random motion
+        B = shape[0]
+        T = shape[1] if len(shape) > 1 else self.config.window_size
+        
+        # Create initial random motion
+        motion_data = {
+            'theta': torch.randn(B, T, 3, 4, device=device) * 0.1,
+            'rotation': torch.randn(B, T, 3, device=device) * 0.1,
+            'scale': torch.ones(B, T, 3, device=device),
+            'translation': torch.randn(B, T, 3, device=device) * 0.01,
+            'expression_embed': torch.randn(B, T, 128, device=device) * 0.5
+        }
+        
+        # DDIM sampling with CFG
+        timesteps = torch.linspace(self.num_steps - 1, 0, num_steps, device=device).long()
+        
+        for i, t in enumerate(tqdm(timesteps, desc="Sampling with CFG")):
+            noise_level = t.unsqueeze(0).repeat(B)
+            
+            # 1. Compute full conditioned prediction
+            full_conditions = conditions.copy()
+            with torch.no_grad():
+                full_pred = self.forward(
+                    motion_data=motion_data,
+                    noise_level=noise_level,
+                    conditions=full_conditions,
+                    prev_context=prev_context
+                )
+            
+            # 2. Compute CFG adjustments for each guided condition
+            cfg_adjustment = {}
+            for key in full_pred.keys():
+                cfg_adjustment[key] = torch.zeros_like(full_pred[key])
+            
+            for cond_name in guided_conditions:
+                scale = cfg_scales.get(cond_name.replace('_features', ''), 0.0)  # Handle audio_features -> audio
+                if scale > 0 and cond_name in conditions:
+                    # Create conditions with this one dropped
+                    dropped_conditions = conditions.copy()
+                    dropped_conditions[cond_name] = None  # Will be replaced with zeros in forward
+                    
+                    with torch.no_grad():
+                        drop_pred = self.forward(
+                            motion_data=motion_data,
+                            noise_level=noise_level,
+                            conditions=dropped_conditions,
+                            prev_context=prev_context
+                        )
+                    
+                    # Add CFG adjustment: scale * (full - drop)
+                    for key in full_pred.keys():
+                        cfg_adjustment[key] += scale * (full_pred[key] - drop_pred[key])
+            
+            # 3. Apply CFG: final = full + sum(scale_c * (full - drop_c))
+            guided_pred = {}
+            for key in full_pred.keys():
+                guided_pred[key] = full_pred[key] + cfg_adjustment[key]
+            
+            # 4. DDIM update step
+            # In score matching mode, model predicts clean X0 directly
+            x0_pred = guided_pred  # Model output is X0 prediction
+            
+            # Get variance schedule values
+            alpha_prod_t = self.scheduler.alphas_cumprod[t]
+            alpha_prod_t_prev = self.scheduler.alphas_cumprod[t - 1] if t > 0 else torch.tensor(1.0)
+            
+            # DDIM update
+            for key in motion_data.keys():
+                if key in x0_pred:
+                    # Predict x_{t-1}
+                    pred_sample_direction = (1 - alpha_prod_t_prev).sqrt() * (
+                        (motion_data[key] - alpha_prod_t.sqrt() * x0_pred[key]) / (1 - alpha_prod_t).sqrt()
+                    )
+                    
+                    # Compute x_{t-1}
+                    motion_data[key] = alpha_prod_t_prev.sqrt() * x0_pred[key] + pred_sample_direction
+                    
+                    # Add noise if eta > 0 (stochastic DDIM)
+                    if eta > 0 and t > 0:
+                        variance = (1 - alpha_prod_t_prev) / (1 - alpha_prod_t) * (1 - alpha_prod_t / alpha_prod_t_prev)
+                        noise = torch.randn_like(motion_data[key])
+                        motion_data[key] += (variance * eta).sqrt() * noise
+        
+        # Apply final refinements
+        if 'audio_features' in conditions:
+            motion_data = self._refine_expressions(
+                motion_data, 
+                conditions['audio_features'],
+                prev_context
+            )
+        
+        # Apply temporal smoothing
+        motion_data = self._apply_temporal_coherence(motion_data)
+        
+        return motion_data
       
 class MotionSequenceHandler:
     """Handles motion sequence processing for VASA."""

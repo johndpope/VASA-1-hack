@@ -785,6 +785,28 @@ class VASATrainer:
                 num_warmup_steps=warmup_steps,
                 num_training_steps=num_training_steps
             )
+        
+        # Initialize gradients to zero to ensure clean state
+        self.optimizer.zero_grad()
+        
+        # Check for any NaN/Inf in model parameters at initialization
+        self._check_model_parameters()
+
+    def _check_model_parameters(self):
+        """Check model parameters for NaN/Inf values."""
+        for name, param in self.model.named_parameters():
+            if param is not None:
+                if torch.isnan(param).any() or torch.isinf(param).any():
+                    logger.error(f"NaN/Inf detected in parameter {name} at initialization!")
+                    logger.error(f"  Shape: {param.shape}, dtype: {param.dtype}")
+                    logger.error(f"  Has NaN: {torch.isnan(param).any()}, Has Inf: {torch.isinf(param).any()}")
+                    # Try to fix by reinitializing
+                    if 'weight' in name:
+                        nn.init.xavier_uniform_(param)
+                        logger.info(f"  Reinitialized {name} with xavier_uniform")
+                    elif 'bias' in name:
+                        nn.init.zeros_(param)
+                        logger.info(f"  Reinitialized {name} with zeros")
 
     def train(self):
         """Main training loop."""
@@ -859,6 +881,10 @@ class VASATrainer:
             disable=not self.accelerator.is_local_main_process,
             desc=f"Epoch {self.current_epoch}"
         )
+        
+        # Zero gradients at the start of epoch to ensure clean state
+        self.optimizer.zero_grad()
+        logger.info("Zeroed gradients at start of epoch")
         
         # Get current CFG scales based on epoch
         cfg_scales = self._get_cfg_scales()
@@ -1126,6 +1152,14 @@ class VASATrainer:
                                 # Skip this window
                                 continue
                             
+                            # Check loss before backward to catch issues early
+                            if not torch.isfinite(losses['total']):
+                                logger.error(f"Non-finite loss detected before backward: {losses['total'].item()}")
+                                logger.error(f"Loss components: {[(k, v.item() if torch.is_tensor(v) else v) for k, v in losses.items()]}")
+                                # Skip this window
+                                self.optimizer.zero_grad()
+                                continue
+                            
                             # Backward pass for this window (accumulate gradients)
                             try:
                                 self.accelerator.backward(losses['total'])
@@ -1290,11 +1324,21 @@ class VASATrainer:
                     # Compute gradient norm and clip gradients
                     grad_norm = None
                     if self.accelerator.sync_gradients:
-                        # Clip gradients to prevent explosions
-                        grad_norm = self.accelerator.clip_grad_norm_(
-                            self.model.parameters(),
-                            self.config.train.max_grad_norm
-                        )
+                        # Check if mixed precision is enabled
+                        use_amp = getattr(self.config.motion, 'amp', False)
+                        
+                        if use_amp:
+                            # Use accelerator's clipping for mixed precision
+                            grad_norm = self.accelerator.clip_grad_norm_(
+                                self.model.parameters(),
+                                self.config.train.max_grad_norm
+                            )
+                        else:
+                            # Use direct gradient clipping when mixed precision is off
+                            grad_norm = torch.nn.utils.clip_grad_norm_(
+                                self.model.parameters(),
+                                self.config.train.max_grad_norm
+                            )
                         
                         # Log gradient norm for monitoring
                         if grad_norm is not None and wandb.run is not None:
@@ -1303,21 +1347,35 @@ class VASATrainer:
                             }, step=self.global_step)
                         
                         # Check for gradient explosion
-                        if grad_norm is not None and (grad_norm > 1e6 or not torch.isfinite(torch.tensor(grad_norm))):
-                            logger.warning(f"Large/infinite gradient norm detected: {grad_norm:.2e}")
+                        if grad_norm is not None:
+                            if grad_norm > 1e6 or not torch.isfinite(torch.tensor(grad_norm)):
+                                logger.warning(f"Large/infinite gradient norm detected: {grad_norm:.2e}")
+                                
+                                # Log explosion event to wandb
+                                if wandb.run is not None:
+                                    wandb.log({
+                                        'gradient_explosion/large_grad_norm': grad_norm,
+                                        'gradient_explosion/event': 1.0,
+                                    }, step=self.global_step)
+                                
+                                # Skip optimizer step if gradient is infinite/nan
+                                if not torch.isfinite(torch.tensor(grad_norm)):
+                                    logger.error(f"Skipping optimizer step due to infinite gradient at step {self.global_step}")
+                                    self.optimizer.zero_grad()
+                                    continue  # Skip to next batch
+                        else:
+                            # If grad_norm is None but we have gradients, compute it manually
+                            total_norm = 0.0
+                            for p in self.model.parameters():
+                                if p.grad is not None:
+                                    param_norm = p.grad.data.norm(2).item()
+                                    total_norm += param_norm ** 2
+                            grad_norm = total_norm ** 0.5
                             
-                            # Log explosion event to wandb
-                            if wandb.run is not None:
-                                wandb.log({
-                                    'gradient_explosion/large_grad_norm': grad_norm,
-                                    'gradient_explosion/event': 1.0,
-                                }, step=self.global_step)
-                            
-                            # Skip optimizer step if gradient is infinite/nan
-                            if not torch.isfinite(torch.tensor(grad_norm)):
-                                logger.error(f"Skipping optimizer step due to infinite gradient at step {self.global_step}")
+                            if not torch.isfinite(torch.tensor(grad_norm)) or grad_norm > 1e6:
+                                logger.error(f"Computed gradient norm is invalid: {grad_norm}. Skipping optimizer step.")
                                 self.optimizer.zero_grad()
-                                continue  # Skip to next batch
+                                continue
                     
                     # Optimizer step after ALL windows processed
                     self.optimizer.step()
