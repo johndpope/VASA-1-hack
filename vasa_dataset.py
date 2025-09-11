@@ -1196,7 +1196,9 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             Euler angles [3] in radians
         """
         # Handle singularity at pitch = ±90°
-        pitch = torch.asin(torch.clamp(-matrix[2, 0], -1, 1))
+        # Clamp to slightly inside [-1, 1] to avoid gradient explosion in asin backward
+        sin_pitch = torch.clamp(-matrix[2, 0], -0.9999, 0.9999)  # Safer bounds
+        pitch = torch.asin(sin_pitch)
         
         if torch.abs(matrix[2, 0]) < 0.9999:
             # Regular case

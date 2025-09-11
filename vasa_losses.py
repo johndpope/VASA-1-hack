@@ -21,6 +21,47 @@ from logger import logger
 from syncnet import SyncNetInstance
 
 
+def safe_matrix_to_euler(R: torch.Tensor) -> torch.Tensor:
+    """
+    Safe extraction of Euler angles from rotation matrix with clamping to avoid NaN in backward.
+    
+    Args:
+        R: Rotation matrix of shape [..., 3, 3]
+    
+    Returns:
+        Euler angles of shape [..., 3] (pitch, yaw, roll)
+    """
+    # Store original shape
+    original_shape = R.shape[:-2]
+    R = R.reshape(-1, 3, 3)
+    
+    # Check for gimbal lock
+    sy = torch.sqrt(R[:, 0, 0]**2 + R[:, 1, 0]**2)
+    singular = sy < 1e-6
+    
+    # Safe extraction with clamping to avoid gradient explosion
+    # The backward of asin(x) is 1/sqrt(1-x^2) which explodes at x=±1
+    sin_pitch = torch.clamp(-R[:, 2, 0], -0.9999, 0.9999)
+    
+    pitch = torch.asin(sin_pitch)
+    
+    # Non-singular case
+    yaw = torch.atan2(R[:, 2, 1], R[:, 2, 2])
+    roll = torch.atan2(R[:, 1, 0], R[:, 0, 0])
+    
+    # Singular case (gimbal lock)
+    yaw_singular = torch.atan2(-R[:, 1, 2], R[:, 1, 1])
+    roll_singular = torch.zeros_like(roll)
+    
+    # Select based on singularity
+    yaw = torch.where(singular.unsqueeze(-1), yaw_singular.unsqueeze(-1), yaw.unsqueeze(-1)).squeeze(-1)
+    roll = torch.where(singular.unsqueeze(-1), roll_singular.unsqueeze(-1), roll.unsqueeze(-1)).squeeze(-1)
+    
+    # Stack and reshape
+    euler = torch.stack([pitch, yaw, roll], dim=-1)
+    return euler.reshape(*original_shape, 3)
+
+
 class SpeedLossHandler:
     """Handler for speed bucket classification loss."""
     
@@ -309,136 +350,6 @@ class VASALossModule:
             logger.error(traceback.format_exc())
             return torch.tensor(0.0, device=device), {}
     
-    def visualize_sequence(self, pred_embed, target_embed, step, window_idx):
-        """Visualize embedding sequences for debugging"""
-        try:
-            if step % self.vis_freq != 0:
-                return
-                
-            # Convert tensors to numpy and get first sample
-            pred = pred_embed[0].detach().cpu()  # [T, 128]
-            target = target_embed[0].detach().cpu()  # [T, 128]
-            
-            # Create visualization
-            fig, axes = plt.subplots(3, 1, figsize=(15, 10))
-            
-            # Plot predicted sequence
-            axes[0].imshow(pred.T, aspect='auto', cmap='viridis')
-            axes[0].set_title(f'Predicted Expression Embed (Step {step}, Window {window_idx})')
-            axes[0].set_xlabel('Time')
-            axes[0].set_ylabel('Dimension')
-            
-            # Plot target sequence
-            axes[1].imshow(target.T, aspect='auto', cmap='viridis')
-            axes[1].set_title('Target Expression Embed')
-            axes[1].set_xlabel('Time')
-            axes[1].set_ylabel('Dimension')
-            
-            # Plot difference
-            diff = (pred - target).abs()
-            im = axes[2].imshow(diff.T, aspect='auto', cmap='hot')
-            axes[2].set_title('Absolute Difference')
-            axes[2].set_xlabel('Time')
-            axes[2].set_ylabel('Dimension')
-            
-            plt.colorbar(im, ax=axes[2])
-            plt.tight_layout()
-            
-            # Save to wandb
-            if wandb.run is not None:
-                wandb.log({
-                    f"expression_sequence/window_{window_idx}": wandb.Image(fig),
-                    "step": step
-                })
-            
-            plt.close(fig)
-            
-        except Exception as e:
-            logger.warning(f"Could not visualize sequence: {e}")
-
-    # Continue with rest of VASALossModule methods...
-    # [The rest of the VASALossModule class methods would continue here]
-    # Due to length constraints, I'll create a continuation pattern            right_ear = compute_ear(right_eye)   # [B, T]
-            
-            # Normalize to [0,1] range
-            left_openness = torch.clamp(left_ear / 0.3, 0, 1)   # [B, T]
-            right_openness = torch.clamp(right_ear / 0.3, 0, 1) # [B, T]
-
-            # Get target values
-            target_phase = target_blinks[..., 0]      # [B, T]
-            target_left = target_blinks[..., 1]       # [B, T]
-            target_right = target_blinks[..., 2]      # [B, T]
-
-            # Phase matching loss
-            pred_phase = torch.zeros((B, T, 4), device=device)  # 4 phases
-            
-            # Fix: Pad the diff results to match sequence length
-            is_closed = (left_openness < 0.2) | (right_openness < 0.2)
-            
-            # Compute diffs and pad
-            left_diff = F.pad(left_openness.diff(dim=1), (0, 1))  # Pad right
-            right_diff = F.pad(right_openness.diff(dim=1), (0, 1))  # Pad right
-            
-            is_opening = ~is_closed & (left_diff > 0.1)
-            is_closing = ~is_closed & (left_diff < -0.1)
-
-            pred_phase[..., 0] = ~(is_closed | is_opening | is_closing)  # Open
-            pred_phase[..., 1] = is_closing
-            pred_phase[..., 2] = is_closed
-            pred_phase[..., 3] = is_opening
-            
-            phase_loss = F.cross_entropy(
-                pred_phase.view(-1, 4),
-                target_phase.long().view(-1)
-            )
-            
-            # Openness matching loss
-            left_loss = F.mse_loss(left_openness, target_left)
-            right_loss = F.mse_loss(right_openness, target_right)
-            
-            # Symmetry loss to encourage eyes to blink together
-            symmetry_loss = F.mse_loss(left_openness, right_openness)
-            
-            # Temporal smoothness loss
-            if T > 1:
-                temp_loss = F.mse_loss(
-                    left_openness[:, 1:] - left_openness[:, :-1],
-                    target_left[:, 1:] - target_left[:, :-1]
-                ) + F.mse_loss(
-                    right_openness[:, 1:] - right_openness[:, :-1],
-                    target_right[:, 1:] - target_right[:, :-1]
-                )
-            else:
-                temp_loss = torch.tensor(0.0, device=device)
-                
-            # Combine losses
-            total_loss = (
-                phase_loss + 
-                left_loss + 
-                right_loss + 
-                0.5 * symmetry_loss +
-                0.2 * temp_loss
-            ) * lambda_blink
-            
-            # Record metrics
-            metrics.update({
-                'blink_phase_loss': phase_loss.item(),
-                'blink_left_loss': left_loss.item(),
-                'blink_right_loss': right_loss.item(),
-                'blink_symmetry_loss': symmetry_loss.item(),
-                'blink_temporal_loss': temp_loss.item(),
-                'blink_total': total_loss.item()
-            })
-            
-            return total_loss, metrics
-            
-        except Exception as e:
-            logger.error(f"Error computing blink loss: {str(e)}")
-            logger.error(traceback.format_exc())
-            return torch.tensor(0.0, device=device), {
-                'blink_total': 0.0,
-                'blink_error': str(e)
-            }
     
 
     def plot_to_wandb_image(self,fig):
@@ -1382,11 +1293,22 @@ class VASALossModule:
             # 5. Expression loss 
             if 'expression_embed' in pred:
                 # Apply dimension weights
-
                 losses['expression_loss'] = F.mse_loss(
-                            pred['expression_embed'],
-                            comparison_target['expression_embed']
-                        )
+                    pred['expression_embed'],
+                    comparison_target['expression_embed']
+                )
+                
+                # Log statistics to detect collapse
+                if step is not None and step % 100 == 0:
+                    pred_std = pred['expression_embed'].std().item()
+                    target_std = comparison_target['expression_embed'].std().item()
+                    pred_mean = pred['expression_embed'].mean().item()
+                    target_mean = comparison_target['expression_embed'].mean().item()
+                    logger.info(f"Expression stats - Pred: mean={pred_mean:.3f}, std={pred_std:.3f} | Target: mean={target_mean:.3f}, std={target_std:.3f}")
+                    
+                    # Warn if prediction variance is collapsing
+                    if pred_std < target_std * 0.1:
+                        logger.warning(f"⚠️ Prediction variance collapse detected! pred_std={pred_std:.3f} << target_std={target_std:.3f}")
          
                 should_visualize = step is not None and step > 0 and step % self.vis_freq == 0
                 if should_visualize:
@@ -2257,23 +2179,19 @@ class VASALossModule:
         self,
         motion: Dict[str, torch.Tensor]
     ) -> Optional[torch.Tensor]:
-        """Extract gaze angles from motion parameters."""
+        """Extract gaze angles from motion parameters using safe Euler extraction."""
         try:
             theta = motion['theta']  # [B, T, 3, 4]
             R = theta[..., :3, :3]  # Extract rotation part [B, T, 3, 3]
             
-            # Compute pitch (x-axis rotation)
-            pitch = torch.asin(torch.clamp(-R[..., 2, 0], -1, 1))
+            # Use safe Euler extraction to avoid NaN in backward pass
+            euler_angles = safe_matrix_to_euler(R)  # [B, T, 3] (pitch, yaw, roll)
             
-            # Compute yaw (y-axis rotation) with safe division
-            cos_pitch = torch.cos(pitch)
-            eps = 1e-6
-            safe_cos_pitch = torch.where(torch.abs(cos_pitch) < eps, 
-                                        torch.ones_like(cos_pitch) * eps, 
-                                        cos_pitch)
-            yaw = torch.atan2(R[..., 2, 1] / safe_cos_pitch, R[..., 2, 2] / safe_cos_pitch)
+            # Extract pitch and yaw for gaze (ignore roll)
+            pitch = euler_angles[..., 0]
+            yaw = euler_angles[..., 1]
             
-            # Clamp angles before stacking to avoid inplace operations
+            # Clamp angles to reasonable ranges
             # Pitch: -90 to 90 degrees (-π/2 to π/2)
             # Yaw: -180 to 180 degrees (-π to π)
             pitch_clamped = torch.clamp(pitch, -1.57, 1.57)
@@ -2284,7 +2202,7 @@ class VASALossModule:
             
             # Validate outputs
             if torch.isnan(gaze).any() or torch.isinf(gaze).any():
-                logger.warning("Invalid values in gaze angles after clamping - returning zeros")
+                logger.warning("Invalid values in gaze angles after safe extraction - returning zeros")
                 return torch.zeros_like(gaze)
                 
             return gaze
@@ -2806,35 +2724,63 @@ class VASALossModule:
     ) -> torch.Tensor:
         """
         Compute velocity and smoothness regularization losses for temporal consistency.
+        SMOOTHNESS LOSS DISABLED to avoid numerical instability.
         """
         try:
             device = self.device
             vel_loss = torch.tensor(0.0, device=device)
-            smooth_loss = torch.tensor(0.0, device=device)
+            smooth_loss = torch.tensor(0.0, device=device)  # Disabled
             
             # Process each motion component
             for key in ['theta', 'expression', 'scale', 'rotation', 'translation']:
-                if key in pred and key in target and pred[key].shape[1] > 2:
+                if key in pred and key in target and pred[key].shape[1] > 1:  # Need at least 2 frames for velocity
                     pred_val = pred[key]
                     target_val = target[key]
                     
-                    # Flatten if needed
-                    if len(pred_val.shape) > 3:
-                        pred_val = pred_val.view(pred_val.shape[0], pred_val.shape[1], -1)
-                        target_val = target_val.view(target_val.shape[0], target_val.shape[1], -1)
+                    # Special handling for theta (rotation matrix) - use safe Euler extraction
+                    if key == 'theta' and pred_val.shape[-2:] == (3, 4):
+                        # Extract rotation part and convert to Euler angles for stable gradients
+                        pred_R = pred_val[..., :3, :3]
+                        target_R = target_val[..., :3, :3]
+                        
+                        # Use safe Euler extraction
+                        pred_euler = safe_matrix_to_euler(pred_R)  # [B, T, 3]
+                        target_euler = safe_matrix_to_euler(target_R)  # [B, T, 3]
+                        
+                        # Also handle translation part
+                        pred_trans = pred_val[..., :3, 3]  # [B, T, 3]
+                        target_trans = target_val[..., :3, 3]  # [B, T, 3]
+                        
+                        # Compute velocity on Euler angles (more stable than matrix differences)
+                        pred_euler_vel = pred_euler[:, 1:] - pred_euler[:, :-1]
+                        target_euler_vel = target_euler[:, 1:] - target_euler[:, :-1]
+                        vel_loss += F.mse_loss(pred_euler_vel, target_euler_vel) * self.lambda_velocity
+                        
+                        # Compute velocity on translation
+                        pred_trans_vel = pred_trans[:, 1:] - pred_trans[:, :-1]
+                        target_trans_vel = target_trans[:, 1:] - target_trans[:, :-1]
+                        vel_loss += F.mse_loss(pred_trans_vel, target_trans_vel) * self.lambda_velocity
+                        
+                    else:
+                        # For other parameters, flatten if needed
+                        if len(pred_val.shape) > 3:
+                            pred_val = pred_val.view(pred_val.shape[0], pred_val.shape[1], -1)
+                            target_val = target_val.view(target_val.shape[0], target_val.shape[1], -1)
+                        
+                        # Velocity matching loss (first derivative)
+                        pred_vel = pred_val[:, 1:] - pred_val[:, :-1]
+                        target_vel = target_val[:, 1:] - target_val[:, :-1]
+                        vel_loss += F.mse_loss(pred_vel, target_vel) * self.lambda_velocity
                     
-                    # Velocity matching loss (first derivative)
-                    pred_vel = pred_val[:, 1:] - pred_val[:, :-1]
-                    target_vel = target_val[:, 1:] - target_val[:, :-1]
-                    vel_loss += F.mse_loss(pred_vel, target_vel) * self.lambda_velocity
-                    
-                    # Smoothness loss (second derivative/acceleration)
-                    if pred_val.shape[1] > 2:
-                        pred_acc = pred_val[:, 2:] - 2*pred_val[:, 1:-1] + pred_val[:, :-2]
-                        target_acc = target_val[:, 2:] - 2*target_val[:, 1:-1] + target_val[:, :-2]
-                        smooth_loss += F.mse_loss(pred_acc, target_acc) * self.lambda_smoothness
+                    # SMOOTHNESS LOSS DISABLED - causes numerical instability
+                    # Second derivatives can amplify noise and cause gradient explosions
+                    # if pred_val.shape[1] > 2:
+                    #     pred_acc = pred_val[:, 2:] - 2*pred_val[:, 1:-1] + pred_val[:, :-2]
+                    #     target_acc = target_val[:, 2:] - 2*target_val[:, 1:-1] + target_val[:, :-2]
+                    #     smooth_loss += F.mse_loss(pred_acc, target_acc) * self.lambda_smoothness
             
-            return vel_loss + smooth_loss
+            # Return only velocity loss (smoothness is disabled)
+            return vel_loss  # smooth_loss is always 0
             
         except Exception as e:
             import traceback

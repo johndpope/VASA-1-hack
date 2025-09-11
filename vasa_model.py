@@ -1602,9 +1602,16 @@ class VASAModel(nn.Module):
             motion_keys = ['theta', 'rotation', 'scale', 'translation', 'expression_embed']
             noised_motion = {}
             
-            # Get variance for current timestep
+            # Get variance for current timestep (for debugging only now)
             timestep = noise_level[0].item()
             variance = self.scheduler._get_variance(timestep, max(timestep - 1, 0))
+            
+            # Get alpha values for debugging
+            alpha_prod = self.scheduler.alphas_cumprod[timestep]
+            
+            # Log noise schedule info periodically
+            if timestep % 100 == 0:
+                logger.debug(f"Noise schedule at t={timestep}: alpha_prod={alpha_prod:.4f}, variance={variance:.4f}")
             
             self.scheduler.alphas_cumprod = self.scheduler.alphas_cumprod.to(device=noise_level.device)
 
@@ -1615,9 +1622,7 @@ class VASAModel(nn.Module):
                         noise=noise[key], 
                         timesteps=noise_level
                     )
-                    # Apply variance scaling
-                    if variance > 0:
-                        noised_motion[key] = noised_motion[key] * (1 + variance).sqrt()
+                    # REMOVED incorrect variance scaling - scheduler.add_noise already handles this
                 else:
                     noised_motion[key] = value
 

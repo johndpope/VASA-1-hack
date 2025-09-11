@@ -552,14 +552,26 @@ class VASATrainer:
         self.output_dir = Path(output_dir) if output_dir else None
         self.train_loader = train_loader
 
-        # Initialize accelerator with mixed precision enabled for faster training
+        # Initialize accelerator - respect config for mixed precision
+        # Check if mixed precision should be enabled from config
+        use_amp = getattr(config.motion, 'amp', False)  # Default to False if not specified
+        mixed_precision = "fp16" if use_amp else "no"
+        
         self.accelerator = Accelerator(
             gradient_accumulation_steps=config.train.gradient_accumulation_steps,
-            mixed_precision="fp16"  # Force FP16 for faster convergence
+            mixed_precision=mixed_precision
         )
         
-        logger.info(f"Mixed precision training: ENABLED (fp16)")
+        logger.info(f"Mixed precision training: {'ENABLED (fp16)' if use_amp else 'DISABLED'}")
         logger.info(f"Gradient accumulation steps: {config.train.gradient_accumulation_steps}")
+        
+        # Only enable gradient anomaly detection in debug mode (it's slow)
+        if getattr(config, 'debug', False):
+            torch.autograd.set_detect_anomaly(True)
+            logger.info("Gradient anomaly detection: ENABLED (debug mode)")
+        else:
+            torch.autograd.set_detect_anomaly(False)
+            logger.info("Gradient anomaly detection: DISABLED (normal mode)")
 
      
             
@@ -1086,27 +1098,48 @@ class VASATrainer:
                             if not torch.isfinite(losses['total']):
                                 logger.error(f"NaN/Inf detected in loss at epoch {self.current_epoch}, batch {batch_idx}, window {window_idx}")
                                 logger.error(f"Loss components: {losses}")
+                                
+                                # Log detailed info about the NaN
+                                for key, value in losses.items():
+                                    if isinstance(value, torch.Tensor) and not torch.isfinite(value):
+                                        logger.error(f"  NaN/Inf in {key}: {value.item()}")
+                                
+                                # Check motion outputs for NaN
+                                if 'outputs' in locals():
+                                    for key, value in outputs.items():
+                                        if isinstance(value, torch.Tensor):
+                                            if torch.isnan(value).any():
+                                                logger.error(f"  NaN in output {key}, shape {value.shape}")
+                                            if torch.isinf(value).any():
+                                                logger.error(f"  Inf in output {key}, shape {value.shape}")
+                                
+                                # Log to wandb for tracking
+                                if wandb.run is not None:
+                                    wandb.log({
+                                        'gradient_explosion/nan_loss_detected': 1.0,
+                                        'gradient_explosion/step': self.global_step,
+                                        'gradient_explosion/epoch': self.current_epoch,
+                                        'gradient_explosion/batch': batch_idx,
+                                        'gradient_explosion/window': window_idx,
+                                    }, step=self.global_step)
+                                
                                 # Skip this window
                                 continue
                             
-                            # Backward pass for this window
-                            self.accelerator.backward(losses['total'])
-                            
-                            if self.accelerator.sync_gradients:
-                                # Clip gradients to prevent explosions
-                                grad_norm = self.accelerator.clip_grad_norm_(
-                                    self.model.parameters(),
-                                    self.config.train.max_grad_norm
-                                )
-                                
-                                # Log gradient norm for monitoring
-                                if grad_norm > 1e6:
-                                    logger.warning(f"Large gradient norm detected: {grad_norm:.2e}")
-                                
-                            # Optimizer step after each window
-                            self.optimizer.step()
-                            self.scheduler.step()
-                            self.optimizer.zero_grad()
+                            # Backward pass for this window (accumulate gradients)
+                            try:
+                                self.accelerator.backward(losses['total'])
+                            except RuntimeError as e:
+                                if "Function" in str(e) and "returned nan values" in str(e):
+                                    logger.error(f"NaN in backward pass: {str(e)}")
+                                    logger.error(f"This typically indicates numerical instability in operations like asin, log, or sqrt")
+                                    logger.error(f"Window {window_idx}, Batch {batch_idx}, Step {self.global_step}")
+                                    
+                                    # Clear gradients and skip
+                                    self.optimizer.zero_grad()
+                                    continue
+                                else:
+                                    raise
                             
                             # Store loss value before cleanup
                             window_loss = losses['total'].item()
@@ -1252,6 +1285,52 @@ class VASATrainer:
                             logger.error(traceback.format_exc())
                             continue
 
+                # After processing all windows in the batch, do gradient clipping and optimizer step
+                try:
+                    # Compute gradient norm and clip gradients
+                    grad_norm = None
+                    if self.accelerator.sync_gradients:
+                        # Clip gradients to prevent explosions
+                        grad_norm = self.accelerator.clip_grad_norm_(
+                            self.model.parameters(),
+                            self.config.train.max_grad_norm
+                        )
+                        
+                        # Log gradient norm for monitoring
+                        if grad_norm is not None and wandb.run is not None:
+                            wandb.log({
+                                'gradients/norm': grad_norm,
+                            }, step=self.global_step)
+                        
+                        # Check for gradient explosion
+                        if grad_norm is not None and (grad_norm > 1e6 or not torch.isfinite(torch.tensor(grad_norm))):
+                            logger.warning(f"Large/infinite gradient norm detected: {grad_norm:.2e}")
+                            
+                            # Log explosion event to wandb
+                            if wandb.run is not None:
+                                wandb.log({
+                                    'gradient_explosion/large_grad_norm': grad_norm,
+                                    'gradient_explosion/event': 1.0,
+                                }, step=self.global_step)
+                            
+                            # Skip optimizer step if gradient is infinite/nan
+                            if not torch.isfinite(torch.tensor(grad_norm)):
+                                logger.error(f"Skipping optimizer step due to infinite gradient at step {self.global_step}")
+                                self.optimizer.zero_grad()
+                                continue  # Skip to next batch
+                    
+                    # Optimizer step after ALL windows processed
+                    self.optimizer.step()
+                    self.scheduler.step()
+                    self.optimizer.zero_grad()
+                    
+                except Exception as e:
+                    logger.error(f"Error during optimizer step: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    # Clear gradients and continue training
+                    self.optimizer.zero_grad()
+                    continue
+                
                 # Average metrics across windows and immediately convert to scalars
                 avg_metrics = {}
                 for k, v in batch_metrics.items():
