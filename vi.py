@@ -11,7 +11,8 @@ import cv2
 import subprocess
 import imageio
 from typing import *
-from transformers import Wav2Vec2Model, Wav2Vec2Processor
+from transformers import Wav2Vec2Processor
+from wav2vec_module import AlignedWav2Vec2Model
 from logger import logger
 from tqdm import tqdm
 import torch.nn.functional as F
@@ -49,10 +50,13 @@ class VASAInference:
             # transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         
-        # Initialize audio processors first
-        logger.info("Initializing audio processors...")
+        # Initialize audio processors with aligned wav2vec
+        logger.info("Initializing aligned audio processors...")
         self.audio_processor = Wav2Vec2Processor.from_pretrained('facebook/wav2vec2-base')
-        self.audio_model = Wav2Vec2Model.from_pretrained('facebook/wav2vec2-base').to(device).eval()
+        self.audio_model = AlignedWav2Vec2Model(
+            'facebook/wav2vec2-base',
+            freeze_feature_extractor=True
+        ).to(device).eval()
         
         # Load EMO model with proper initialization
         logger.info("Loading EMO model...")
@@ -844,37 +848,40 @@ class VASAInference:
             for start_sample in range(0, waveform.size(1) - samples_per_window + 1, stride_samples):
                 window = waveform[:, start_sample:start_sample + samples_per_window]
                 
-                # Process through wav2vec
+                # Process through aligned wav2vec with JoyVASA's approach
                 inputs = self.audio_processor(window.squeeze().numpy(), 
                                             sampling_rate=sr,
                                             return_tensors="pt")
                 
                 with torch.no_grad():
-                    outputs = self.audio_model(**inputs.to(self.device))
-                    features = outputs.last_hidden_state
+                    # Use aligned model with BackResample strategy for better temporal info
+                    features = self.audio_model(
+                        inputs.input_values.to(self.device),
+                        output_fps=25,  # Target FPS
+                        frame_num=self.config.motion.window_size,  # Target frames
+                        use_back_resample=True  # JoyVASA's strategy
+                    )
                     
                     # Add normalization and variance checking
-                    logger.info(f"Raw Wav2Vec features shape: {features.shape}")
+                    logger.info(f"Aligned Wav2Vec features shape: {features.shape}")
                     logger.info(f"Raw features variance: {features.var().item():.6f}")
                     logger.info(f"Raw features mean: {features.mean().item():.6f}")
                     
-                    # Normalize features to improve conditioning
+                    # Apply variance preservation (like in training)
+                    original_var = features.var().item()
                     features = (features - features.mean(dim=-1, keepdim=True)) / (features.std(dim=-1, keepdim=True) + 1e-8)
+                    current_var = features.var().item()
                     
-                    # Apply additional scaling to increase variance
-                    features = features * 2.0  # Scale up the normalized features
+                    if current_var > 0:
+                        scale_factor = (original_var / current_var) ** 0.5
+                        scale_factor = min(scale_factor, 3.0)  # Cap scaling
+                        features = features * scale_factor
                     
-                    logger.info(f"Normalized features variance: {features.var().item():.6f}")
-                    logger.info(f"Normalized features mean: {features.mean().item():.6f}")
+                    logger.info(f"Preserved variance features: {features.var().item():.6f}")
+                    logger.info(f"Features mean: {features.mean().item():.6f}")
                     
-                    # Interpolate to match window size
-                    features = F.interpolate(
-                        features.transpose(1, 2),  # -> [1, D, L]
-                        size=self.window_size,
-                        mode='linear'
-                    ).transpose(1, 2)  # -> [1, T, D]
-                    
-                    logger.info(f"Interpolated features shape: {features.shape}")
+                    # Aligned model already outputs correct size [1, window_size, 768]
+                    logger.info(f"Final features shape: {features.shape}")
                     logger.info(f"Final features variance: {features.var().item():.6f}")
                     logger.info(f"Final features mean: {features.mean().item():.6f}")
                     
