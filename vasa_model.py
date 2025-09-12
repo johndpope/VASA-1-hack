@@ -415,10 +415,23 @@ class EfficientConditionEmbedding(nn.Module):
                 #     audio = audio.squeeze(1)
                 audio = self._ensure_float_tensor(audio, dtype)
                 audio_emb = self.audio_proj(audio)
+                
+                # Apply lighter normalization to preserve variance
+                # Store original variance before normalization
+                original_var = audio_emb.var().item()
                 audio_emb = self.audio_norm(audio_emb)
+                
+                # Scale back up to preserve some of the original variance
+                current_var = audio_emb.var().item()
+                if current_var > 0:
+                    scale_factor = (original_var / current_var) ** 0.5  # Square root to get std scale
+                    scale_factor = min(scale_factor, 3.0)  # Cap the scaling
+                    audio_emb = audio_emb * scale_factor
+                    logger.debug(f"Audio processing: original_var={original_var:.6f}, current_var={current_var:.6f}, scale_factor={scale_factor:.3f}")
+                
                 start, end = self.channel_layout['audio_features']
                 output[..., start:end] = audio_emb
-                logger.debug(f"Processed audio features shape: {audio_emb.shape}")
+                logger.debug(f"Processed audio features shape: {audio_emb.shape}, final variance: {audio_emb.var().item():.6f}")
 
             # 2. Process control signals
             control_tensors = []
