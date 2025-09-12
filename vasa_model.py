@@ -891,21 +891,21 @@ class HolisticMotionTransformer(nn.Module):
                 prev_features = None
                 K = 0
 
-            # Handle null conditions for CFG (classifier-free guidance)
-            if conditions is not None:
-                # For CFG, some conditions might be None (dropped)
-                # Create zero tensors for dropped conditions
-                for key in ['audio_features', 'gaze', 'head_distance', 'emotion']:
-                    if key in conditions and conditions[key] is None:
-                        # Create zero tensor with appropriate shape
-                        if key == 'audio_features':
-                            conditions[key] = torch.zeros(B, T, 768, device=device)  # wav2vec2 dim
-                        elif key == 'gaze':
-                            conditions[key] = torch.zeros(B, T, 2, device=device)
-                        elif key == 'head_distance':
-                            conditions[key] = torch.zeros(B, T, 1, device=device)
-                        elif key == 'emotion':
-                            conditions[key] = torch.zeros(B, T, 2, device=device)
+            # # Handle null conditions for CFG (classifier-free guidance) - review
+            # if conditions is not None:
+            #     # For CFG, some conditions might be None (dropped)
+            #     # Create zero tensors for dropped conditions
+            #     for key in ['audio_features', 'gaze', 'head_distance', 'emotion']:
+            #         if key in conditions and conditions[key] is None:
+            #             # Create zero tensor with appropriate shape
+            #             if key == 'audio_features':
+            #                 conditions[key] = torch.zeros(B, T, 768, device=device)  # wav2vec2 dim
+            #             elif key == 'gaze':
+            #                 conditions[key] = torch.zeros(B, T, 2, device=device)
+            #             elif key == 'head_distance':
+            #                 conditions[key] = torch.zeros(B, T, 1, device=device)
+            #             elif key == 'emotion':
+            #                 conditions[key] = torch.zeros(B, T, 2, device=device)
             
             self._validate_conditions(conditions, B, T, device)
 
@@ -963,10 +963,9 @@ class HolisticMotionTransformer(nn.Module):
             logger.debug("\nProjecting motion parameters...")
             motion_features = self._project_motion_parameters(motion_data, B, T)
             logger.debug(f"Motion features shape: {motion_features.shape}")
-            
+                     
             # Concatenate previous context with current features if available
             if prev_features is not None:
-                # Concatenate along sequence dimension: [B, K+T, D]
                 x = torch.cat([prev_features, motion_features], dim=1)
                 total_seq_len = K + T
                 logger.debug(f"Combined features shape (with context): {x.shape}")
@@ -977,37 +976,30 @@ class HolisticMotionTransformer(nn.Module):
             # Add positional embeddings
             has_context = prev_features is not None
             x = self.pos_emb(x, has_context=has_context)
-            
+
             # Add time embeddings (expand to match sequence length)
             time_emb = self.time_emb(noise_level.unsqueeze(-1).float())  # [B, D]
             x = x + time_emb.unsqueeze(1).expand(-1, total_seq_len, -1)
 
-            # Prepare for decoder: x is target (tgt), cond_emb is memory
-            if cond_emb is not None:
-                # Generate causal mask for autoregressive self-attention
-                tgt_mask = nn.Transformer.generate_square_subsequent_mask(total_seq_len).to(device)
-                
-                # If context present, allow full attention within context
-                if has_context:
-                    # Create custom mask: non-causal for context, causal for current
-                    custom_mask = torch.zeros(total_seq_len, total_seq_len, device=device)
-                    custom_mask[K:, :K] = 0  # Current can attend to all context
-                    # Make current sequence causal
-                    causal_part = torch.triu(torch.ones(T, T, device=device), diagonal=1) * float('-inf')
-                    custom_mask[K:, K:] = causal_part
-                    tgt_mask = custom_mask
-                
-                # Use decoder with conditions as memory
-                x = self.transformer(
-                    tgt=x,
-                    memory=cond_emb,
-                    tgt_mask=tgt_mask
-                )
-            else:
-                # Fallback to self-attention only if no conditions
-                for layer in self.transformer.layers:
-                    x = layer(x, x, x)  # Self-attention only
-            
+            # Prepare for decoder: x is target, cond_emb is memory
+            device = x.device
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(total_seq_len).to(device)
+
+            # If context is present, adjust mask to allow full attention within context
+            if has_context:
+                custom_mask = torch.zeros(total_seq_len, total_seq_len, device=device)
+                custom_mask[K:, :K] = 0  # Current can attend to all context
+                causal_part = torch.triu(torch.ones(T, T, device=device), diagonal=1) * float('-inf')
+                custom_mask[K:, K:] = causal_part
+                tgt_mask = custom_mask
+
+            # Use decoder with conditions as memory
+            x = self.transformer(
+                tgt=x,
+                memory=cond_emb if cond_emb is not None else torch.zeros_like(x),  # Default to zeros if no cond_emb
+                tgt_mask=tgt_mask
+            )
+
             # Extract predictions for current sequence (exclude context if present)
             if prev_features is not None:
                 # Take only the last T frames (current window)
@@ -1018,7 +1010,7 @@ class HolisticMotionTransformer(nn.Module):
             # Project outputs back to motion parameters
             logger.debug("\nProjecting outputs...")
             outputs = self._project_outputs(x_current, B, T)
-            
+
             return outputs
 
         except Exception as e:
@@ -1047,8 +1039,9 @@ class HolisticMotionTransformer(nn.Module):
             translation = torch.clamp(translation, -10.0, 10.0)
             translation = self.motion_projections['translation'](translation)
             
-            # Process expression with residual path
-            expression = motion_data['expression_embed']  # [B, T, 128]
+            # Process expression with residual path (handle both key names)
+            expression_key = 'expression_embed' if 'expression_embed' in motion_data else 'expression'
+            expression = motion_data[expression_key]  # [B, T, 128]
             expression = torch.clamp(expression, -10.0, 10.0)
             expression = self.motion_projections['expression'](expression)
 
@@ -1269,16 +1262,15 @@ class VASAModel(nn.Module):
         expression_dim = 128  # Based on motion_projections['expression'] input size
         
         # Initialize with small random values to avoid exploding gradients
-        self.start_prev_theta = nn.Parameter(torch.randn(1, self.context_size, 3, 4) * 0.02)
-        self.start_prev_rotation = nn.Parameter(torch.randn(1, self.context_size, 3) * 0.02)
-        self.start_prev_translation = nn.Parameter(torch.randn(1, self.context_size, 3) * 0.02)
-        self.start_prev_scale = nn.Parameter(torch.randn(1, self.context_size, 3) * 0.02)
-        self.start_prev_expression = nn.Parameter(torch.randn(1, self.context_size, expression_dim) * 0.02)
+        self.start_prev_theta = nn.Parameter(torch.randn(1, self.context_size, 3, 4) * 0.01)
+        self.start_prev_rotation = nn.Parameter(torch.randn(1, self.context_size, 3) * 0.01)
+        self.start_prev_translation = nn.Parameter(torch.randn(1, self.context_size, 3) * 0.01)
+        # Scale should be near 1.0, not near 0
+        self.start_prev_scale = nn.Parameter(torch.ones(1, self.context_size, 3) + torch.randn(1, self.context_size, 3) * 0.01)
+        self.start_prev_expression = nn.Parameter(torch.randn(1, self.context_size, expression_dim) * 0.01)
         
-        # Learnable starting for audio context if needed
-        # Always use 768 for wav2vec features (as per dataset)
-        audio_dim = 768  # Wav2vec dimension
-        self.start_prev_audio = nn.Parameter(torch.randn(1, self.context_size, audio_dim) * 0.02)
+        # Note: We don't use learnable starting audio since audio is input-dependent
+        # Audio context should come from actual audio features, not learned parameters
 
         # Initialize diffusion parameters
         self._init_diffusion_params(
@@ -1321,6 +1313,12 @@ class VASAModel(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         self.scheduler.config.prediction_type = "sample"  # Add this line
         try:
+            # Validate and sanitize motion_data inputs to prevent NaN propagation
+            for key, tensor in motion_data.items():
+                if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+                    logger.warning(f"Non-finite values in motion_data['{key}'], replacing with safe values")
+                    motion_data[key] = torch.nan_to_num(tensor, nan=0.0, posinf=1.0, neginf=-1.0)
+            
             # Get batch and sequence dimensions from theta
             B, T = motion_data['theta'].shape[:2]
             device = motion_data['theta'].device
@@ -1418,7 +1416,8 @@ class VASAModel(nn.Module):
                     'translation': self.start_prev_translation.repeat(B, 1, 1),  # [B, context_size, 3]
                     'scale': self.start_prev_scale.repeat(B, 1, 1),  # [B, context_size, 3]
                     'expression': self.start_prev_expression.repeat(B, 1, 1),  # [B, context_size, 128]
-                    'audio': self.start_prev_audio.repeat(B, 1, 1)  # [B, context_size, 768/256]
+                    # Audio should be zeros initially - it's input-dependent, not learned
+                    'audio': torch.zeros(B, self.context_size, 768, device=device, dtype=torch.float32)
                 }
                 # Move to correct device
                 prev_context = {k: v.to(device) for k, v in prev_context.items()}
@@ -1434,6 +1433,18 @@ class VASAModel(nn.Module):
                 cond_emb=cond_emb,
                 prev_context=prev_context
             )
+            
+            # Check for NaN values and clamp if necessary
+            for key, tensor in outputs.items():
+                if isinstance(tensor, torch.Tensor):
+                    if torch.isnan(tensor).any():
+                        logger.warning(f"NaN detected in output {key}, clamping values")
+                        tensor = torch.nan_to_num(tensor, nan=0.0, posinf=10.0, neginf=-10.0)
+                        outputs[key] = tensor
+                    elif torch.isinf(tensor).any():
+                        logger.warning(f"Inf detected in output {key}, clamping values")
+                        tensor = torch.clamp(tensor, min=-10.0, max=10.0)
+                        outputs[key] = tensor
 
             if noise is not None:
                 outputs['noise'] = noise 
