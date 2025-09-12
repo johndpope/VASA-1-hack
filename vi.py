@@ -536,23 +536,44 @@ class VASAInference:
             for window_idx, window_data in enumerate(audio_windows):
                 logger.info(f"Processing window {window_idx}/{len(audio_windows)}")
 
-                # Prepare conditions for the model
-                cond_signals = {}  # Empty dict for now, can add gaze, emotion, etc. later
+                # Debug: Check audio feature variation
+                audio_features = window_data['audio_features']
+                audio_var = audio_features.var(dim=1).mean().item()  # Variation across time
+                audio_mean = audio_features.mean().item()
+                logger.info(f"Window {window_idx} audio stats: mean={audio_mean:.4f}, variance={audio_var:.6f}")
 
-                cond_signals['audio_features'] = window_data['audio_features'].to(device)
+                # Prepare conditions for the model - match training conditions
+                cond_signals = {
+                    'audio_features': window_data['audio_features'].to(device),
+                    # Add default values for conditions used in training
+                    'gaze': torch.zeros(B, T, 2, device=device),  # [B, T, 2]
+                    'head_distance': torch.zeros(B, T, 1, device=device),  # [B, T, 1] 
+                    'emotion': torch.zeros(B, T, 2, device=device),  # [B, T, 2]
+                    'speed_bucket': torch.ones(B, T, 1, device=device) * 4,  # Middle speed bucket
+                }
 
-            # Generate sequence using the corrected method signature
+                # Generate sequence using the corrected method signature
                 motion_sequence = self.model.generate_sequence(
                     initial_pose=motion_data,
                     initial_dynamics=motion_data['expression_embed'],
                     conditions=cond_signals,
                     eta=0.0,  # Deterministic generation
                     num_steps=50,
-                    cfg_scales=7.5,
-                    
+                    cfg_scales={
+                        'audio': 0.5,      # From config
+                        'gaze': 1.0,       # From config  
+                        'head_distance': 0.8,
+                        'emotion': 0.5
+                    }
                 )
                 
                 logger.info(f"Generated sequence shape: {motion_sequence['expression_embed'].shape}")
+                
+                # Debug: Check motion parameter variation
+                expr_var = motion_sequence['expression_embed'].var(dim=1).mean().item()
+                theta_var = motion_sequence['theta'].var(dim=1).mean().item()
+                rot_var = motion_sequence['rotation'].var(dim=1).mean().item()
+                logger.info(f"Motion variation - Expression: {expr_var:.6f}, Theta: {theta_var:.6f}, Rotation: {rot_var:.6f}")
 
                 # Generate frames for this window
                 for t in range(motion_sequence['expression_embed'].size(1)):
@@ -572,14 +593,39 @@ class VASAInference:
                         trans_diff = (curr_translation - prev_motion['translation']).abs().mean().item()
                         
                         logger.info(f"Frame {window_idx * 50 + t} differences:")
-                        logger.info(f"  Expression diff: {expr_diff:.4f}")
-                        logger.info(f"  Theta diff: {theta_diff:.4f}")
-                        logger.info(f"  Rotation diff: {rot_diff:.4f}")
-                        logger.info(f"  Scale diff: {scale_diff:.4f}")
-                        logger.info(f"  Translation diff: {trans_diff:.4f}")
+                        logger.info(f"  Expression diff: {expr_diff:.6f}")
+                        logger.info(f"  Theta diff: {theta_diff:.6f}")
+                        logger.info(f"  Rotation diff: {rot_diff:.6f}")
+                        logger.info(f"  Scale diff: {scale_diff:.6f}")
+                        logger.info(f"  Translation diff: {trans_diff:.6f}")
+                        
+                        # Check if motion is too static
+                        total_motion = expr_diff + theta_diff + rot_diff + scale_diff + trans_diff
+                        if total_motion < 1e-4:
+                            logger.warning(f"Very low motion detected! Total motion: {total_motion:.8f}")
+                            logger.warning("This may result in static output")
+                    else:
+                        logger.info(f"First frame of window {window_idx}")
 
                     # Generate the frame
-                    frame = self._generate_frame(source_params, curr_expression, device)
+                    frame = self._generate_frame(
+                        source_params, 
+                        curr_expression, 
+                        curr_theta,
+                        curr_rotation,
+                        curr_scale,
+                        curr_translation,
+                        device
+                    )
+                    
+                    # Debug: Check frame differences
+                    if generated_frames:
+                        prev_frame = generated_frames[-1]
+                        frame_diff = (frame - prev_frame).abs().mean().item()
+                        logger.info(f"Frame {window_idx * 50 + t} visual difference: {frame_diff:.6f}")
+                        if frame_diff < 1e-4:
+                            logger.warning("Generated frame is nearly identical to previous frame!")
+                    
                     generated_frames.append(frame)
 
                     # Update previous motion parameters
@@ -807,12 +853,30 @@ class VASAInference:
                     outputs = self.audio_model(**inputs.to(self.device))
                     features = outputs.last_hidden_state
                     
+                    # Add normalization and variance checking
+                    logger.info(f"Raw Wav2Vec features shape: {features.shape}")
+                    logger.info(f"Raw features variance: {features.var().item():.6f}")
+                    logger.info(f"Raw features mean: {features.mean().item():.6f}")
+                    
+                    # Normalize features to improve conditioning
+                    features = (features - features.mean(dim=-1, keepdim=True)) / (features.std(dim=-1, keepdim=True) + 1e-8)
+                    
+                    # Apply additional scaling to increase variance
+                    features = features * 2.0  # Scale up the normalized features
+                    
+                    logger.info(f"Normalized features variance: {features.var().item():.6f}")
+                    logger.info(f"Normalized features mean: {features.mean().item():.6f}")
+                    
                     # Interpolate to match window size
                     features = F.interpolate(
                         features.transpose(1, 2),  # -> [1, D, L]
                         size=self.window_size,
                         mode='linear'
                     ).transpose(1, 2)  # -> [1, T, D]
+                    
+                    logger.info(f"Interpolated features shape: {features.shape}")
+                    logger.info(f"Final features variance: {features.var().item():.6f}")
+                    logger.info(f"Final features mean: {features.mean().item():.6f}")
                     
                     speed_bucket = torch.ones(1, self.window_size, 1).to(self.device) * 4
 
@@ -836,17 +900,37 @@ class VASAInference:
             logger.error(f"Error in process_audio: {str(e)}")
             logger.error(traceback.format_exc())
             raise
-    def _generate_frame(self, source_params, curr_expression, device):
-        """Generate a single frame using EMO decoder with given expression."""
+    def _generate_frame(self, source_params, curr_expression, curr_theta, curr_rotation, curr_scale, curr_translation, device):
+        """Generate a single frame using EMO decoder with given expression and motion parameters."""
         try:
             # Get dimensions from EMO model
             c = self.volumetric_avatar.args.latent_volume_channels
             d = self.volumetric_avatar.args.latent_volume_depth
             s = self.volumetric_avatar.args.latent_volume_size
 
+            # Create rotation matrix from current motion parameters
+            # Convert rotation angles to rotation matrix
+            pitch, yaw, roll = curr_rotation
+            Rx = torch.tensor([[1, 0, 0], [0, torch.cos(pitch), -torch.sin(pitch)], [0, torch.sin(pitch), torch.cos(pitch)]], device=device)
+            Ry = torch.tensor([[torch.cos(yaw), 0, torch.sin(yaw)], [0, 1, 0], [-torch.sin(yaw), 0, torch.cos(yaw)]], device=device)
+            Rz = torch.tensor([[torch.cos(roll), -torch.sin(roll), 0], [torch.sin(roll), torch.cos(roll), 0], [0, 0, 1]], device=device)
+            current_rotation_matrix = Rz @ Ry @ Rx
+            
+            # Create transformation matrix from current motion parameters
+            current_theta = torch.eye(4, device=device)
+            current_theta[:3, :3] = current_rotation_matrix
+            current_theta[:3, 3] = curr_translation
+            
+            # Apply scaling
+            scale_matrix = torch.eye(4, device=device)
+            scale_matrix[0, 0] = curr_scale[0]
+            scale_matrix[1, 1] = curr_scale[1] 
+            scale_matrix[2, 2] = curr_scale[2]
+            current_theta = current_theta @ scale_matrix
+
             # Create identity grid first
             grid = self.volumetric_avatar.identity_grid_3d.repeat_interleave(1, dim=0)
-            target_rotation_warp = grid.bmm(source_params['theta'][:, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+            target_rotation_warp = grid.bmm(current_theta[:3].transpose(0, 1)).view(-1, d, s, s, 3)
 
             # Create source tensor with correct shape for RGB image (B, C, H, W)
             dummy_rgb = torch.zeros(1, 3, 512, 512).to(device)  # Create dummy RGB image 
@@ -858,7 +942,7 @@ class VASAInference:
                 'source_mask': source_params['source_mask'],
                 'target_mask': source_params['source_mask'],
                 'source_theta': source_params['theta'],
-                'target_theta': source_params['theta'],
+                'target_theta': current_theta.unsqueeze(0),  # Use current motion parameters
                 'idt_embed': source_params['idt_embed'],
                 'source_pose_embed': source_params['expression_embed'],
                 'target_pose_embed': curr_expression,
@@ -1263,7 +1347,7 @@ class VASAInference:
     #             target_latent_volume = target_latents.view(1, c, d, s, s)
     #             if self.volumetric_avatar.args.source_volume_num_blocks > 0:
     #                 target_latent_volume = self.volumetric_avatar.volume_source_nw(target_latent_volume)
-                    
+                
     #             # Get canonical volume
     #             canonical_volume = self.volumetric_avatar.volume_process_nw(target_latent_volume)
                 

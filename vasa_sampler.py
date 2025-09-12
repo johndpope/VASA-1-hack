@@ -58,7 +58,21 @@ class WindowSequenceSampler(Sampler):
         
         # Create sequences of consecutive windows
         self.sequences = []
+        max_available_windows = max(len(windows) for windows in self.video_windows.values())
+        
+        # Warn if requested windows exceed available
+        if windows_per_sequence > max_available_windows:
+            logger.warning(f"⚠️ Requested windows_per_sequence ({windows_per_sequence}) exceeds maximum available ({max_available_windows})")
+            logger.warning(f"⚠️ Adjusting windows_per_sequence to {max_available_windows}")
+            self.windows_per_sequence = max_available_windows
+            windows_per_sequence = max_available_windows
+        
         for video_path, windows in self.video_windows.items():
+            # Skip videos with insufficient windows
+            if len(windows) < windows_per_sequence:
+                logger.debug(f"Skipping video {video_path}: only {len(windows)} windows, need {windows_per_sequence}")
+                continue
+                
             # Create overlapping sequences
             for start_idx in range(len(windows) - windows_per_sequence + 1):
                 sequence = windows[start_idx:start_idx + windows_per_sequence]
@@ -72,6 +86,12 @@ class WindowSequenceSampler(Sampler):
             batch = self.sequences[i]
             if len(batch) == windows_per_sequence or not drop_last:
                 self.batches.append(batch)
+        
+        # Ensure we have at least some sequences
+        if len(self.sequences) == 0:
+            logger.error(f"❌ No valid sequences created! Check your data and windows_per_sequence setting.")
+            logger.error(f"   Available windows per video: {[(path, len(wins)) for path, wins in self.video_windows.items()]}")
+            raise ValueError(f"No valid sequences could be created with windows_per_sequence={windows_per_sequence}")
         
         logger.info(f"Created {len(self.sequences)} window sequences from {len(self.video_windows)} videos")
         logger.info(f"Created {len(self.batches)} batches")

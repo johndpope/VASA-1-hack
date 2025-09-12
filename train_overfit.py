@@ -148,7 +148,6 @@ def main():
     
     # Start training
     logger.info(f"Starting training from epoch {start_epoch}")
-    logger.info(f"Using improved VASAVolumetricAvatarBridgeV2: {hasattr(trainer, 'va_bridge') and hasattr(trainer.va_bridge, 'generate_frames_with_viz')}")
     logger.info(f"Configuration:")
     logger.info(f"  - Batch size: {config.train.batch_size}")
     logger.info(f"  - Learning rate: {config.train.lr}")

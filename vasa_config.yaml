@@ -206,10 +206,16 @@ loss:
 # Inference parameters
 inference:
   batch_size: 1
-  cfg_scale: 0.5  # Aligned with paper default (was 3.0)
+  cfg_scale: 0.5  # Global scale (legacy, use cfg_scales below for per-condition)
+  # Per-condition CFG scales for inference (can override train values)
+  cfg_scales:
+    audio: 0.5      # Paper default: 0.5
+    gaze: 1.0       # Paper default: 1.0
+    head_distance: 0.8
+    emotion: 0.5
   eta: 0.5  # Increased from 0.0 for stochasticity to prevent static output
   output_size: [512, 512]
-  num_inference_steps: 50    # Number of DDIM steps (increased from 50 for better quality)
+  num_inference_steps: 50    # Number of DDIM steps
   temperature: 1.0            # Sampling temperature
   top_k: 50                   # Top-k sampling parameter
   top_p: 0.9                 # Nucleus sampling parameter

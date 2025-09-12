@@ -107,8 +107,9 @@ node_modules/
 *.sw?
 # OS specific
 
+roi_tanh_warping/
+face_detection/
+
 # Task files
 # tasks.json
 # tasks/ 
-roi_tanh_warping/
-face_detection/

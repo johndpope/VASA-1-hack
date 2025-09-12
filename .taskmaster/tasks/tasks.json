@@ -68,6 +68,41 @@
         "dependencies": [],
         "priority": "medium",
         "subtasks": []
+      },
+      {
+        "id": 7,
+        "title": "Fix infinite gradient norm and optimizer skipping",
+        "description": "Fix the issue where gradient norm becomes inf at step 0, causing optimizer.step() to be skipped. This happens during windows_per_batch processing and needs proper gradient handling.",
+        "details": "The training crashes with 'Large gradient norm detected: inf. Skipping optimizer step.' at step 0. This occurs when processing 4 windows per batch. Need to ensure proper gradient initialization and clipping.",
+        "testStrategy": "",
+        "status": "done",
+        "dependencies": [],
+        "priority": "high",
+        "subtasks": []
+      },
+      {
+        "id": 8,
+        "title": "Fix gradient scaler unscale error",
+        "description": "Fix RuntimeError: unscale_() has already been called on this optimizer since the last update(). This occurs during batch processing with multiple windows.",
+        "details": "The error happens when processing multiple windows in a batch with gradient accumulation. The scaler.unscale_() is being called multiple times before optimizer.step(). Need to restructure the gradient accumulation loop to only unscale once per batch.",
+        "testStrategy": "",
+        "status": "done",
+        "dependencies": [
+          7
+        ],
+        "priority": "high",
+        "subtasks": []
+      },
+      {
+        "id": 9,
+        "title": "Disable mixed precision training to avoid scaler issues",
+        "description": "Since overfit_config.yaml has amp: false, ensure mixed precision is properly disabled in the training loop to avoid gradient scaler errors.",
+        "details": "The config shows amp: false but the code is still using gradient scaler. Need to ensure the training loop respects the amp setting and disables scaler when amp is false.",
+        "testStrategy": "",
+        "status": "done",
+        "dependencies": [],
+        "priority": "high",
+        "subtasks": []
       }
     ],
     "metadata": {
@@ -82,7 +117,7 @@
       },
       "created": "2025-09-09T01:31:02.525Z",
       "description": "Tasks for master context",
-      "updated": "2025-09-09T19:59:22.186Z"
+      "updated": "2025-09-11T19:59:32.233Z"
     }
   }
 }
