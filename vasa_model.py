@@ -1263,6 +1263,22 @@ class VASAModel(nn.Module):
             height=self.volumetric_avatar.args.latent_volume_size,
             width=self.volumetric_avatar.args.latent_volume_size,
         )
+        
+        # Learnable starting parameters for previous motion context (when not provided)
+        # These are used when there's no previous context (e.g., first window of sequence)
+        expression_dim = 128  # Based on motion_projections['expression'] input size
+        
+        # Initialize with small random values to avoid exploding gradients
+        self.start_prev_theta = nn.Parameter(torch.randn(1, self.context_size, 3, 4) * 0.02)
+        self.start_prev_rotation = nn.Parameter(torch.randn(1, self.context_size, 3) * 0.02)
+        self.start_prev_translation = nn.Parameter(torch.randn(1, self.context_size, 3) * 0.02)
+        self.start_prev_scale = nn.Parameter(torch.randn(1, self.context_size, 3) * 0.02)
+        self.start_prev_expression = nn.Parameter(torch.randn(1, self.context_size, expression_dim) * 0.02)
+        
+        # Learnable starting for audio context if needed
+        # Always use 768 for wav2vec features (as per dataset)
+        audio_dim = 768  # Wav2vec dimension
+        self.start_prev_audio = nn.Parameter(torch.randn(1, self.context_size, audio_dim) * 0.02)
 
         # Initialize diffusion parameters
         self._init_diffusion_params(
@@ -1392,6 +1408,23 @@ class VASAModel(nn.Module):
             logger.debug("\nFinal validated conditions:")
             for k, v in validated_conditions.items():
                 logger.debug(f"  {k}: shape={v.shape}")
+            
+            # Use learnable starting parameters if prev_context is None
+            if prev_context is None:
+                logger.debug("No prev_context provided, using learnable starting parameters")
+                prev_context = {
+                    'theta': self.start_prev_theta.repeat(B, 1, 1, 1),  # [B, context_size, 3, 4]
+                    'rotation': self.start_prev_rotation.repeat(B, 1, 1),  # [B, context_size, 3]
+                    'translation': self.start_prev_translation.repeat(B, 1, 1),  # [B, context_size, 3]
+                    'scale': self.start_prev_scale.repeat(B, 1, 1),  # [B, context_size, 3]
+                    'expression': self.start_prev_expression.repeat(B, 1, 1),  # [B, context_size, 128]
+                    'audio': self.start_prev_audio.repeat(B, 1, 1)  # [B, context_size, 768/256]
+                }
+                # Move to correct device
+                prev_context = {k: v.to(device) for k, v in prev_context.items()}
+                logger.debug("Created learnable prev_context with shapes:")
+                for k, v in prev_context.items():
+                    logger.debug(f"  {k}: {v.shape}")
 
             # Process conditions through transformer
             outputs = self.motion_transformer(
