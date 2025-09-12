@@ -2387,6 +2387,44 @@ class VASATrainer:
                 plt.tight_layout()
                 wandb.log({"visuals/expression_comparison": wandb.Image(fig)}, step=step)
                 plt.close(fig)
+                
+                # Add new candle-like expression visualization
+                from visualize_expression import create_expression_candles, create_expression_difference_map
+                from visualize_audio_expression import create_audio_expression_visualization
+                
+                # Create candle visualization for entire window
+                if outputs['expression_embed'].shape[1] > 1:  # If we have temporal dimension
+                    fig_candles = create_expression_candles(
+                        target_expression=targets['expression_embed'][0],  # First batch item, all frames
+                        predicted_expression=outputs['expression_embed'][0],
+                        window_idx=step // 100,  # Use step to create window index
+                        reduce_to=32
+                    )
+                    wandb.log({"visuals/expression_candles": wandb.Image(fig_candles)}, step=step)
+                    plt.close(fig_candles)
+                    
+                    # Create difference map
+                    fig_diff = create_expression_difference_map(
+                        target_expression=targets['expression_embed'][0],
+                        predicted_expression=outputs['expression_embed'][0],
+                        window_idx=step // 100,
+                        reduce_to=32
+                    )
+                    wandb.log({"visuals/expression_diff_map": wandb.Image(fig_diff)}, step=step)
+                    plt.close(fig_diff)
+                    
+                    # Add audio-to-expression visualization if audio features are available
+                    if 'audio_features' in batch:
+                        fig_audio_expr = create_audio_expression_visualization(
+                            audio_features=batch['audio_features'][0],  # First batch item
+                            target_expression=targets['expression_embed'][0],
+                            predicted_expression=outputs['expression_embed'][0],
+                            window_idx=step // 100,
+                            audio_reduce_to=32,
+                            expr_reduce_to=32
+                        )
+                        wandb.log({"visuals/audio_to_expression": wandb.Image(fig_audio_expr)}, step=step)
+                        plt.close(fig_audio_expr)
             
             # Log motion parameter comparison
             motion_params = ['theta', 'rotation', 'translation', 'scale']

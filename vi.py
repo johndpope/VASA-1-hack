@@ -592,9 +592,9 @@ class VASAInference:
                     # Get current motion parameters
                     curr_expression = motion_sequence['expression_embed'][:, t]
                     curr_theta = motion_sequence['theta'][:, t]
-                    curr_scale = motion_sequence['scale'][:, t]
-                    curr_rotation = motion_sequence['rotation'][:, t]
-                    curr_translation = motion_sequence['translation'][:, t]
+                    curr_scale = motion_sequence['scale'][:, t].squeeze(0)  # Remove batch dim to get [3]
+                    curr_rotation = motion_sequence['rotation'][:, t].squeeze(0)  # Remove batch dim to get [3]
+                    curr_translation = motion_sequence['translation'][:, t].squeeze(0)  # Remove batch dim to get [3]
 
                     # Calculate and log differences if previous values exist
                     if prev_motion['expression'] is not None:
@@ -945,7 +945,9 @@ class VASAInference:
 
             # Create identity grid first
             grid = self.volumetric_avatar.identity_grid_3d.repeat_interleave(1, dim=0)
-            target_rotation_warp = grid.bmm(current_theta[:3].transpose(0, 1)).view(-1, d, s, s, 3)
+            # Add batch dimension to current_theta and extract rotation part
+            current_theta_batch = current_theta.unsqueeze(0)[:, :3]  # Shape: [1, 3, 4]
+            target_rotation_warp = grid.bmm(current_theta_batch.transpose(1, 2)).view(-1, d, s, s, 3)
 
             # Create source tensor with correct shape for RGB image (B, C, H, W)
             dummy_rgb = torch.zeros(1, 3, 512, 512).to(device)  # Create dummy RGB image 
@@ -1001,7 +1003,8 @@ class VASAInference:
             logger.error(f"Error generating frame: {str(e)}")
             logger.error(traceback.format_exc())
             logger.error(f"Available source_params keys: {list(source_params.keys())}")
-            logger.error(f"Data dict keys: {list(data_dict.keys())}")
+            if 'data_dict' in locals():
+                logger.error(f"Data dict keys: {list(data_dict.keys())}")
             raise
     
     def extract_video_assets(self,video_path: str, output_dir: Path) -> Tuple[str, str]:
