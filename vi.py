@@ -546,9 +546,17 @@ class VASAInference:
                 audio_mean = audio_features.mean().item()
                 logger.info(f"Window {window_idx} audio stats: mean={audio_mean:.4f}, variance={audio_var:.6f}")
 
+                # Get batch size and sequence length from audio features
+                B = audio_features.shape[0] if audio_features.dim() >= 2 else 1
+                T = audio_features.shape[1] if audio_features.dim() >= 2 else audio_features.shape[0]
+                
+                # Ensure audio features have correct shape [B, T, D]
+                if audio_features.dim() == 2:
+                    audio_features = audio_features.unsqueeze(0)  # Add batch dimension
+
                 # Prepare conditions for the model - match training conditions
                 cond_signals = {
-                    'audio_features': window_data['audio_features'].to(device),
+                    'audio_features': audio_features.to(device),
                     # Add default values for conditions used in training
                     'gaze': torch.zeros(B, T, 2, device=device),  # [B, T, 2]
                     'head_distance': torch.zeros(B, T, 1, device=device),  # [B, T, 1] 
