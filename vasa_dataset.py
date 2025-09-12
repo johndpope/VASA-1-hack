@@ -188,11 +188,12 @@ class WorkerState:
     
     @property
     def audio_model(self):
-        """Lazy initialization of audio model"""
+        """Lazy initialization of aligned wav2vec model"""
         if self._audio_model is None:
-            from transformers import Wav2Vec2Model
-            self._audio_model = Wav2Vec2Model.from_pretrained(
-                'facebook/wav2vec2-base'
+            from wav2vec_module import AlignedWav2Vec2Model
+            self._audio_model = AlignedWav2Vec2Model(
+                'facebook/wav2vec2-base',
+                freeze_feature_extractor=True
             ).eval()
         return self._audio_model
     
@@ -1430,22 +1431,22 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     outputs = self.whisper_model(**inputs)
                     features = outputs.last_hidden_state  # [1, T, 384]
                 else:
-                    # Process with wav2vec
+                    # Process with aligned wav2vec using JoyVASA's approach
                     inputs = self.audio_processor(
                         audio_segment.squeeze(0),
                         sampling_rate=sample_rate,
                         return_tensors="pt",
                         padding=True
                     )
-                    outputs = self.audio_model(**inputs)
-                    features = outputs.last_hidden_state  # [1, T, 768]
-
-                # Ensure exactly window_size features through interpolation
-                features = F.interpolate(
-                    features.transpose(1, 2),
-                    size=self.window_size,
-                    mode='linear'
-                ).transpose(1, 2)
+                    
+                    # Use aligned model with BackResample strategy (like JoyVASA)
+                    # This extracts at 2x frame rate then downsamples for better temporal info
+                    features = self.audio_model(
+                        inputs.input_values,
+                        output_fps=25,  # Target FPS
+                        frame_num=self.window_size,  # Target number of frames
+                        use_back_resample=True  # JoyVASA's strategy
+                    )  # [1, window_size, 768]
 
             # Extract MFCC features for SyncNet
  

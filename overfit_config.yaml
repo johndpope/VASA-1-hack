@@ -6,7 +6,7 @@ defaults:
 model:
   hidden_dim: 512
   n_heads: 8
-  n_layers: 2                  # Reduced to 1 for ultra-fast training (change to 2 or more for better quality)
+  n_layers: 8                 # Reduced to 1 for ultra-fast training (change to 2 or more for better quality)
   dim_feedforward: 2048
   dropout: 0.1
   motion_dim: 256
@@ -59,17 +59,17 @@ train:
   # when to add conditional signals
   control_start_epoch: 0      # Start control immediately for overfitting
 
-  lr: 1e-5 # Further reduced to prevent gradient explosions
+  lr: 1e-4 # Further reduced to prevent gradient explosions
   motion_proj_lr: 0.1 # Reduced motion projection LR multiplier
   expression_lr: 0.1   # Reduced expression LR multiplier 
 
   turn_off_noise: false # no noise signal / no drop out
   learning_rates:
-    condition_embedding: 1e-5  # Further reduced for stability
-    motion_projections: 1e-5   # Further reduced for stability
-    transformer_early: 1e-5  # Further reduced for stability
-    transformer_late: 1e-5  # Further reduced for stability
-    output_projections: 1e-5   # Further reduced for stability
+    condition_embedding: 1e-4  # Further reduced for stability
+    motion_projections: 1e-4   # Further reduced for stability
+    transformer_early: 1e-4  # Further reduced for stability
+    transformer_late: 1e-4  # Further reduced for stability
+    output_projections: 1e-4   # Further reduced for stability
 
   batch_size: 1                # Increased from 16 to maximize 32GB VRAM utilization
   windows_per_batch: 4         # Number of consecutive windows per sequence (auto-adjusts if too large)
