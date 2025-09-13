@@ -114,3 +114,13 @@ face_detection/
 # tasks.json
 # tasks/ 
 training_log.txt
+.taskmaster/tasks/task_001.txt
+.taskmaster/tasks/task_002.txt
+.taskmaster/tasks/task_003.txt
+.taskmaster/tasks/task_004.txt
+.taskmaster/tasks/task_005.txt
+.taskmaster/tasks/task_006.txt
+.taskmaster/tasks/task_007.txt
+.taskmaster/tasks/task_008.txt
+.taskmaster/tasks/task_009.txt
+.taskmaster/tasks/task_010.txt

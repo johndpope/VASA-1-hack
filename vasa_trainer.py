@@ -1110,12 +1110,23 @@ class VASATrainer:
                             if self.identity_image is not None:
                                 source_identity_for_loss = self.identity_image.repeat(B, 1, 1, 1).to(self.accelerator.device)
                             
+                            # Add lip_metrics to targets if available
+                            targets_with_lip = motion_data.copy()
+                            if 'lip_metrics' in window:
+                                targets_with_lip['lip_metrics'] = window['lip_metrics']
+                                logger.debug(f"Added lip_metrics to targets - keys: {list(window['lip_metrics'].keys())}")
+                                # Log the shape of openness metric for verification
+                                if 'openness' in window['lip_metrics']:
+                                    logger.debug(f"  lip_metrics['openness'] shape: {window['lip_metrics']['openness'].shape}")
+                            else:
+                                logger.warning(f"lip_metrics not found in window! Available keys: {list(window.keys())}")
+
                             # Compute losses including perceptual loss
                             losses, metrics = self.loss_module.compute_losses(
                                 outputs=outputs,
-                                targets=motion_data,  # Original motion data
+                                targets=targets_with_lip,  # Motion data with lip_metrics
                                 conditions=control_signals,
-                                noise=outputs['noise'],    
+                                noise=outputs['noise'],
                                 return_metrics=True,
                                 current_epoch=self.current_epoch,
                                 step=self.global_step,

@@ -506,7 +506,10 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         self.hop_length = hop_length
         self.device = device
         self.model_device = next(emo_model.parameters()).device
-        
+
+        # Initialize LipStateAnalyzer for lip metrics computation
+        self.lip_analyzer = LipStateAnalyzer()
+
         # Use chunked cache if available for flexible window support
         if USE_CHUNKED_CACHE and ChunkedWindowCache:
             cache_path = Path(cache_dir) if cache_dir else Path(video_folder) / "window_cache_chunked"
@@ -1111,12 +1114,12 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     'expression_embed': []
                 }
 
-                logger.debug("\nProcessing frames in sequence...")
+                # logger.debug("\nProcessing frames in sequence...")
                 
                 for t in range(T):
                     frame = frames[:, t]  # [1,C,H,W]
-                    logger.debug(f"\nFrame {t}:")
-                    logger.debug(f"  Current frame shape: {frame.shape}")
+                    # logger.debug(f"\nFrame {t}:")
+                    # logger.debug(f"  Current frame shape: {frame.shape}")
 
                     input_dict = {
                         'source_img': frame,
@@ -1143,12 +1146,12 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     assert translation.shape == (1, 3), f"Wrong translation shape: {translation.shape}"
                     assert expression_embed.shape == (1, 128), f"Wrong expression shape: {expression_embed.shape}"
                     
-                    logger.debug("  Feature shapes for current frame:")
-                    logger.debug(f"    theta: {theta.shape} on {theta.device}")
-                    logger.debug(f"    scale: {scale.shape} on {scale.device}")
-                    logger.debug(f"    rotation: {rotation.shape} on {rotation.device}")
-                    logger.debug(f"    translation: {translation.shape} on {translation.device}")
-                    logger.debug(f"    expression_embed: {expression_embed.shape} on {expression_embed.device}")
+                    # logger.debug("  Feature shapes for current frame:")
+                    # logger.debug(f"    theta: {theta.shape} on {theta.device}")
+                    # logger.debug(f"    scale: {scale.shape} on {scale.device}")
+                    # logger.debug(f"    rotation: {rotation.shape} on {rotation.device}")
+                    # logger.debug(f"    translation: {translation.shape} on {translation.device}")
+                    # logger.debug(f"    expression_embed: {expression_embed.shape} on {expression_embed.device}")
                     
                     # Store outputs
                     outputs['theta'].append(theta)
@@ -2348,6 +2351,9 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         logger.warning(f"Skipping window - no valid lip motion")
                         return self._get_zero_sample()
 
+                    # Compute lip metrics using LipStateAnalyzer
+                    lip_metrics = self.lip_analyzer.analyze_sequence(np.array(lips_landmarks))
+
                     # Create window data with correct key names
                     # Squeeze batch dimension from EMO features (they come as [1, T, ...])
                     window_data = {
@@ -2374,7 +2380,16 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         'lip_motion': torch.tensor(lip_motion_sequence, dtype=torch.float32),
 
                         'blink_state': torch.tensor(np.stack(blink_states), dtype=torch.float32),
-                        
+
+                        # Add lip metrics for audio-lip correlation loss
+                        'lip_metrics': {
+                            'openness': torch.tensor(lip_metrics['openness'], dtype=torch.float32),
+                            'symmetry': torch.tensor(lip_metrics['symmetry'], dtype=torch.float32),
+                            'aspect_ratio': torch.tensor(lip_metrics['aspect_ratio'], dtype=torch.float32),
+                            'area': torch.tensor(lip_metrics['area'], dtype=torch.float32),
+                            'perimeter': torch.tensor(lip_metrics['perimeter'], dtype=torch.float32),
+                        },
+
                         'metadata': {
                             'video_path': str(video_path),
                             'start_frame': window['start_frame'],
@@ -2447,6 +2462,15 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             
             # Blink state: [phase, left_openness, right_openness]
             'blink_state': torch.zeros((self.sequence_length, 3)),
+
+            # Lip metrics for audio-lip correlation
+            'lip_metrics': {
+                'openness': torch.zeros(self.sequence_length),
+                'symmetry': torch.ones(self.sequence_length),  # Default to perfect symmetry
+                'aspect_ratio': torch.ones(self.sequence_length),  # Default to 1.0
+                'area': torch.zeros(self.sequence_length),
+                'perimeter': torch.zeros(self.sequence_length),
+            },
 
             'metadata': {
                 'video_path': '',

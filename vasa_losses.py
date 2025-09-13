@@ -208,6 +208,9 @@ class VASALossModule:
         self.lambda_cross_id = getattr(config.loss, 'lambda_cross_id', 0.1)
         self.lambda_velocity = getattr(config.loss, 'lambda_velocity', 1e-4)
         self.lambda_smoothness = getattr(config.loss, 'lambda_smoothness', 1e-4)
+
+        # Audio-lip correlation loss weight
+        self.lambda_audio_lip = getattr(config.loss, 'lambda_audio_lip', 2.0)
         
         # Initialize identity feature extractor for cross-id loss
         try:
@@ -349,6 +352,102 @@ class VASALossModule:
 
 
 
+
+    def compute_audio_lip_correlation(self, pred_motion, audio_features, lip_metrics):
+        """
+        Compute audio-lip correlation loss to enforce synchronization between
+        audio energy and lip motion.
+
+        Args:
+            pred_motion: Predicted motion parameters (not used in basic version)
+            audio_features: Audio features [B, T, D] from wav2vec2
+            lip_metrics: Dictionary containing lip motion metrics from dataset
+
+        Returns:
+            Audio-lip correlation loss scaled by lambda_audio_lip
+        """
+        try:
+            logger.debug("\n=== Audio-Lip Correlation Loss Computation ===")
+
+            # Extract lip openness metric from dataset
+            # This should be provided by the dataset (e.g., computed from landmarks)
+            lip_openness = lip_metrics.get('openness')  # [B, T]
+
+            logger.debug(f"Lip metrics keys available: {lip_metrics.keys() if isinstance(lip_metrics, dict) else 'Not a dict'}")
+
+            if lip_openness is None:
+                logger.debug("Lip openness not directly provided, attempting to compute from landmarks")
+                # If lip openness not provided, try to compute from lip landmarks
+                if 'lips' in lip_metrics:
+                    # Compute openness as vertical distance between upper and lower lips
+                    lips = lip_metrics['lips']  # Expected shape: [B, T, num_lip_points, 2]
+                    logger.debug(f"Lips shape: {lips.shape}")
+                    # Simple approximation: use mean vertical distance
+                    upper_lips = lips[:, :, :lips.shape[2]//2, 1]  # Upper lip y-coords
+                    lower_lips = lips[:, :, lips.shape[2]//2:, 1]  # Lower lip y-coords
+                    lip_openness = (lower_lips.mean(dim=-1) - upper_lips.mean(dim=-1)).abs()
+                    logger.debug(f"Computed lip openness from landmarks, shape: {lip_openness.shape}")
+                else:
+                    # No lip metrics available, return zero loss
+                    logger.warning("No lip metrics available, returning zero loss")
+                    return torch.tensor(0.0, device=audio_features.device)
+            else:
+                logger.debug(f"Using provided lip openness, shape: {lip_openness.shape}")
+
+            # Log lip openness statistics
+            logger.debug(f"Lip openness stats - min: {lip_openness.min():.6f}, max: {lip_openness.max():.6f}, "
+                        f"mean: {lip_openness.mean():.6f}, std: {lip_openness.std():.6f}")
+
+            # Compute audio energy/magnitude
+            audio_energy = torch.norm(audio_features, dim=-1)  # [B, T] audio magnitude
+            logger.debug(f"Audio features shape: {audio_features.shape}, Audio energy shape: {audio_energy.shape}")
+            logger.debug(f"Audio energy stats - min: {audio_energy.min():.6f}, max: {audio_energy.max():.6f}, "
+                        f"mean: {audio_energy.mean():.6f}, std: {audio_energy.std():.6f}")
+
+            # Check for silence vs speech
+            silence_threshold = 0.1
+            is_silent = audio_energy.mean() < silence_threshold
+            logger.debug(f"Audio type: {'SILENT' if is_silent else 'SPEECH'} (mean energy: {audio_energy.mean():.6f})")
+
+            # Normalize both signals for better correlation
+            # Normalize to [0, 1] range
+            lip_openness_norm = (lip_openness - lip_openness.min()) / (lip_openness.max() - lip_openness.min() + 1e-8)
+            audio_energy_norm = (audio_energy - audio_energy.min()) / (audio_energy.max() - audio_energy.min() + 1e-8)
+
+            logger.debug(f"Normalized lip openness - min: {lip_openness_norm.min():.6f}, max: {lip_openness_norm.max():.6f}, "
+                        f"mean: {lip_openness_norm.mean():.6f}")
+            logger.debug(f"Normalized audio energy - min: {audio_energy_norm.min():.6f}, max: {audio_energy_norm.max():.6f}, "
+                        f"mean: {audio_energy_norm.mean():.6f}")
+
+            # Compute MSE loss between normalized signals
+            correlation_loss = F.mse_loss(lip_openness_norm, audio_energy_norm)
+            logger.debug(f"Raw correlation loss (MSE): {correlation_loss.item():.6f}")
+
+            # Scale by lambda weight
+            scaled_loss = correlation_loss * self.lambda_audio_lip
+            logger.debug(f"Scaled correlation loss (lambda={self.lambda_audio_lip}): {scaled_loss.item():.6f}")
+
+            # Additional debug: Check correlation
+            if lip_openness_norm.numel() > 0 and audio_energy_norm.numel() > 0:
+                # Flatten tensors for correlation
+                lip_flat = lip_openness_norm.flatten()
+                audio_flat = audio_energy_norm.flatten()
+                if len(lip_flat) > 1:
+                    # Compute Pearson correlation
+                    vx = lip_flat - torch.mean(lip_flat)
+                    vy = audio_flat - torch.mean(audio_flat)
+                    correlation = torch.sum(vx * vy) / (torch.sqrt(torch.sum(vx ** 2)) * torch.sqrt(torch.sum(vy ** 2)) + 1e-8)
+                    logger.debug(f"Pearson correlation between lip openness and audio energy: {correlation.item():.4f}")
+
+            logger.debug("=== End Audio-Lip Correlation Loss ===\n")
+
+            return scaled_loss
+
+        except Exception as e:
+            logger.warning(f"Error computing audio-lip correlation loss: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return torch.tensor(0.0, device=audio_features.device)
 
     def compute_losses(
         self,
@@ -587,6 +686,38 @@ class VASALossModule:
             diversity_term = losses.get('motion_diversity', torch.tensor(0.0, device=device))
             logger.debug(f"  Diversity term: {diversity_term.item():.6f}")
             
+            # Compute audio-lip correlation loss
+            audio_lip_term = torch.tensor(0.0, device=device)
+            # Check for both 'audio' and 'audio_features' keys since different parts use different names
+            audio_key = 'audio_features' if 'audio_features' in conditions else 'audio' if 'audio' in conditions else None
+
+            logger.debug(targets.keys())
+            
+            if audio_key and 'lip_metrics' in targets:
+                logger.debug("\n=== Starting Audio-Lip Correlation Loss ===")
+                logger.debug(f"Conditions keys: {conditions.keys()}")
+                logger.debug(f"Targets keys: {targets.keys()}")
+                logger.debug(f"Using audio key: {audio_key}")
+                logger.debug(f"Audio shape in conditions: {conditions[audio_key].shape}")
+                logger.debug(f"Lip metrics type: {type(targets.get('lip_metrics', 'Not present'))}")
+
+                audio_lip_loss = self.compute_audio_lip_correlation(
+                    outputs,
+                    conditions[audio_key],
+                    targets['lip_metrics']
+                )
+                audio_lip_term = audio_lip_loss
+                losses['audio_lip_correlation'] = audio_lip_term
+                logger.debug(f"Final audio-lip correlation loss term: {audio_lip_term.item():.6f}")
+                logger.debug("=== Finished Audio-Lip Correlation Loss ===\n")
+            else:
+                missing_keys = []
+                if not audio_key:
+                    missing_keys.append('audio/audio_features in conditions')
+                if 'lip_metrics' not in targets:
+                    missing_keys.append('lip_metrics in targets')
+                logger.debug(f"Skipping audio-lip correlation loss. Missing: {', '.join(missing_keys)}")
+
             # Compute LPIPS perceptual loss (VASA paper Section 3.3)
             perceptual_term = torch.tensor(0.0, device=device)
             if generated_frames is not None and target_frames is not None:
@@ -627,7 +758,7 @@ class VASALossModule:
                 logger.debug("  No frames provided for perceptual loss")
                 losses['perceptual'] = torch.tensor(0.0, device=device)
 
-            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + diversity_term + perceptual_term
+            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + diversity_term + perceptual_term + audio_lip_term
             losses['total'] = total_loss
             logger.debug(f"Total loss (with perceptual): {total_loss.item():.6f}")
 

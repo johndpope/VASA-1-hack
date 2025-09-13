@@ -74,16 +74,25 @@ class MotionSequenceHandler:
 
                     # Create window data preserving batch dimension
                     window_data = {}
-                    for key, tensor in batch.items():
-                        if isinstance(tensor, torch.Tensor):
+                    for key, value in batch.items():
+                        if isinstance(value, torch.Tensor):
                             # Handle different tensor shapes
-                            if key == 'audio_features' and len(tensor.shape) == 4:  # [B, 1, T, D]
-                                window_data[key] = tensor[b:b+1, :, start_frame:end_frame]
+                            if key == 'audio_features' and len(value.shape) == 4:  # [B, 1, T, D]
+                                window_data[key] = value[b:b+1, :, start_frame:end_frame]
                             else:
                                 # Remove extra dims if present
+                                tensor = value
                                 if len(tensor.shape) > 3 and tensor.shape[1] == 1:
                                     tensor = tensor.squeeze(1)
                                 window_data[key] = tensor[b:b+1, start_frame:end_frame]
+                        elif key == 'lip_metrics' and isinstance(value, dict):
+                            # Handle lip_metrics dictionary
+                            window_data['lip_metrics'] = {}
+                            for metric_key, metric_tensor in value.items():
+                                if isinstance(metric_tensor, torch.Tensor):
+                                    # Extract the window for this metric
+                                    window_data['lip_metrics'][metric_key] = metric_tensor[b:b+1, start_frame:end_frame]
+                            logger.debug(f"Added lip_metrics to window with keys: {list(window_data['lip_metrics'].keys())}")
 
                     # Add metadata
                     window_data['metadata'] = {
@@ -104,6 +113,10 @@ class MotionSequenceHandler:
                     for k, v in window_data.items():
                         if isinstance(v, torch.Tensor):
                             logger.debug(f"  {k}: {v.shape}")
+                        elif k == 'lip_metrics' and isinstance(v, dict):
+                            for metric_key, metric_tensor in v.items():
+                                if isinstance(metric_tensor, torch.Tensor):
+                                    logger.debug(f"  lip_metrics[{metric_key}]: {metric_tensor.shape}")
 
             if windows:
                 logger.info(
