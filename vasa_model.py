@@ -10,6 +10,7 @@ from pathlib import Path
 from diffusers import DDIMScheduler
 import torch.nn.functional as F
 import random
+import traceback
 
 # Add nemo to path for imports
 if 'nemo' not in sys.path:
@@ -553,776 +554,142 @@ class VASAModel(nn.Module):
 
         return noised_motion
 
+  
+  
+    
     def generate_sequence(
         self,
         initial_pose: Dict[str, torch.Tensor],
-        initial_dynamics: torch.Tensor,
+        initial_dynamics: torch.Tensor,  # [B, expression_dim]
         conditions: Dict[str, torch.Tensor],
         num_steps: int = 50,
         eta: float = 0.5,
         cfg_scales: Optional[Dict[str, float]] = None
     ) -> Dict[str, torch.Tensor]:
-        """Generate sequence using DDIM sampling with sliding window and CFG."""
-        self.eval()
-        with torch.no_grad():
-            audio_features = conditions['audio_features']
-            B, total_T = audio_features.shape[:2]
+        try:
+            B = initial_pose['theta'].shape[0]
+            total_T = conditions['audio_features'].shape[1]  # Assuming [B, T, D]
+            window_size = self.config['motion']['window_size']
+            stride = self.config['motion']['stride']
+            context_size = self.config['motion']['context_size']
             device = initial_pose['theta'].device
 
-            window_size = self.config.motion.window_size
-            stride = self.config.motion.stride
-            context_size = self.config.motion.context_size
-
+            # Initialize outputs for ALL motion parameters
             full_motion = {
                 'theta': torch.zeros(B, total_T, 3, 4, device=device),
+                'scale': torch.zeros(B, total_T, 3, device=device),
+                'rotation': torch.zeros(B, total_T, 3, device=device),
+                'translation': torch.zeros(B, total_T, 3, device=device),
                 'expression_embed': torch.zeros(B, total_T, self.config.model.expression_dim, device=device)
             }
 
+            # Set initial frame values if provided
             full_motion['theta'][:, 0] = initial_pose['theta']
             full_motion['expression_embed'][:, 0] = initial_dynamics
+            if 'scale' in initial_pose:
+                full_motion['scale'][:, 0] = initial_pose['scale']
+            if 'rotation' in initial_pose:
+                full_motion['rotation'][:, 0] = initial_pose['rotation']
+            if 'translation' in initial_pose:
+                full_motion['translation'][:, 0] = initial_pose['translation']
 
-            prev_context = None
-            start_frame = 0
-
-            while start_frame < total_T:
-                end_frame = min(start_frame + window_size, total_T)
-                current_T = end_frame - start_frame
-
-                window_conditions = {k: v[:, start_frame:end_frame] for k, v in conditions.items() if isinstance(v, torch.Tensor)}
-
+            # Initial context
+            prev_context = {
+                'theta': self.start_prev_theta.repeat(B, 1, 1, 1),
+                'expression': self.start_prev_expression.repeat(B, 1, 1),
+                'audio': torch.zeros(B, context_size, 768, device=device)  # Assuming 768-dim audio
+            }
+            
+            start_idx = 0
+            while start_idx < total_T:
+                current_T = min(window_size, total_T - start_idx)
+                
+                # Slice conditions for current window  (only tensors)
+                window_conditions = {k: v[:, start_idx:start_idx + current_T] for k, v in conditions.items() if isinstance(v, torch.Tensor)}
+                
+                # Initialize motion with noise for ALL parameters
                 window_motion = {
                     'theta': torch.randn(B, current_T, 3, 4, device=device),
+                    'scale': torch.randn(B, current_T, 3, device=device),
+                    'rotation': torch.randn(B, current_T, 3, device=device),
+                    'translation': torch.randn(B, current_T, 3, device=device),
                     'expression_embed': torch.randn(B, current_T, self.config.model.expression_dim, device=device)
                 }
-
+                
+                # DDIM sampling loop
                 self.scheduler.set_timesteps(num_steps, device=device)
 
                 for t in self.scheduler.timesteps:
+                    timesteps = t.expand(B) if isinstance(t, torch.Tensor) else torch.full((B,), t, device=device, dtype=torch.long)
+
+                    # Prepare for classifier-free guidance if needed
                     if cfg_scales:
-                        uncond_outputs = self.forward(
-                            motion_data=window_motion,
-                            noise_level=t.expand(B),
-                            conditions=None,
+                        # Unconditional prediction (keep audio_features, zero out everything else)
+                        uncond_conditions = {}
+                        for k, v in window_conditions.items():
+                            if k == 'audio_features':
+                                uncond_conditions[k] = v  # Keep audio features
+                            else:
+                                uncond_conditions[k] = torch.zeros_like(v)  # Zero out other conditions
+
+                        uncond_motion = self.forward(
+                            window_motion,
+                            timesteps,
+                            conditions=uncond_conditions,
                             prev_context=prev_context
                         )
 
-                    cond_outputs = self.forward(
-                        motion_data=window_motion,
-                        noise_level=t.expand(B),
+                    # Conditional prediction
+                    cond_motion = self.forward(
+                        window_motion,
+                        timesteps,
                         conditions=window_conditions,
                         prev_context=prev_context
                     )
 
+                    # Apply classifier-free guidance if scales provided
                     if cfg_scales:
-                        model_output = {}
-                        for key in cond_outputs:
-                            scale = sum(cfg_scales.values()) if isinstance(cfg_scales, dict) else cfg_scales
-                            model_output[key] = (1 + scale) * cond_outputs[key] - scale * uncond_outputs[key]
+                        pred_motion = {}
+                        for k in cond_motion:
+                            scale = cfg_scales.get(k, 1.0) if isinstance(cfg_scales, dict) else cfg_scales
+                            pred_motion[k] = (1 + scale) * cond_motion[k] - scale * uncond_motion[k]
                     else:
-                        model_output = cond_outputs
-
+                        pred_motion = cond_motion
+                    
+                    # Update motion using DDIM step for each parameter
                     for key in window_motion.keys():
-                        scheduler_output = self.scheduler.step(
-                            model_output=model_output[key],
-                            timestep=t,
-                            sample=window_motion[key],
-                            eta=eta
-                        )
-                        window_motion[key] = scheduler_output.prev_sample
-
-                full_motion['theta'][:, start_frame:end_frame] = window_motion['theta']
-                full_motion['expression_embed'][:, start_frame:end_frame] = window_motion['expression_embed']
-
-                prev_start = max(0, current_T - context_size)
-                prev_context = {
-                    'theta': window_motion['theta'][:, prev_start:],
-                    'expression': window_motion['expression_embed'][:, prev_start:],
-                    'audio': window_conditions['audio_features'][:, prev_start:]
-                }
-
-                start_frame += stride
-
+                        if key in pred_motion:
+                            scheduler_output = self.scheduler.step(
+                                model_output=pred_motion[key],
+                                timestep=timesteps[0],
+                                sample=window_motion[key],
+                                eta=eta
+                            )
+                            window_motion[key] = scheduler_output.prev_sample
+                
+                # Store generated window for ALL parameters
+                for key in full_motion.keys():
+                    if key in window_motion:
+                        full_motion[key][:, start_idx:start_idx + current_T] = window_motion[key]
+                
+                # Update context for next window
+                context_start = max(0, current_T - context_size)
+                prev_context['theta'] = window_motion['theta'][:, context_start:]
+                prev_context['expression'] = window_motion['expression_embed'][:, context_start:]
+                prev_context['audio'] = window_conditions['audio_features'][:, context_start:]
+                
+                start_idx += stride
+                
             return full_motion
-
-
-
-
-
-# """
-# VASA Model Implementation - Holistic Facial Dynamics Generation using Diffusion Transformers
-# Aligns with VASA-1 documentation specifications.
-# """
-
-# import torch
-# import torch.nn as nn
-# import torch.nn.functional as F
-# from typing import Dict, Optional, Tuple
-# from diffusers import DDIMScheduler
-# from omegaconf import OmegaConf
-# import yaml
-# from pathlib import Path
-# import math
-# import random
-# import logging
-# import traceback
-# import sys
-
-# # Add nemo to path if needed
-# if 'nemo' not in sys.path:
-#     sys.path.insert(0, 'nemo')
-
-# from logger import logger
-# from blink_condition_handler import BlinkConditionHandler
-
-# __all__ = ['VASAPositionalEmbedding', 'EfficientConditionEmbedding', 'MotionTransformer', 'VASAModel']
-
-# class VASAPositionalEmbedding(nn.Module):
-#     """
-#     Positional embeddings for VASA sequence generation with relative position encoding option.
-    
-#     Args:
-#         d_model: Embedding dimension (default: 512)
-#         max_seq_len: Maximum sequence length (default: 50)
-#         max_context_len: Maximum context length (default: 10)
-#         dropout: Dropout probability (default: 0.1)
-#         use_relative_position: Use relative positional encoding (default: True)
-#     """
-#     def __init__(
-#         self,
-#         d_model: int = 512,
-#         max_seq_len: int = 50,
-#         max_context_len: int = 10,
-#         dropout: float = 0.1,
-#         use_relative_position: bool = True
-#     ):
-#         super().__init__()
-#         self.d_model = d_model
-#         self.max_seq_len = max_seq_len
-#         self.max_context_len = max_context_len
-#         self.use_relative_position = use_relative_position
-#         self.dropout = nn.Dropout(dropout)
-        
-#         # Relative positional encoding
-#         if use_relative_position:
-#             self.relative_pe = nn.Parameter(
-#                 torch.zeros(max_seq_len + max_context_len, d_model)
-#             )
-        
-#         # Standard sinusoidal positional encoding
-#         pe = torch.zeros(1, max_seq_len + max_context_len, d_model)
-#         position = torch.arange(0, max_seq_len + max_context_len).unsqueeze(1)
-#         div_term = torch.exp(
-#             torch.arange(0, d_model, 2) * -(math.log(10000.0) / d_model)
-#         )
-        
-#         pe[0, :, 0::2] = torch.sin(position * div_term)
-#         pe[0, :, 1::2] = torch.cos(position * div_term)
-#         self.register_buffer('pe', pe)
-        
-#         # Context and sequence markers
-#         self.context_embedding = nn.Parameter(torch.zeros(1, 1, d_model))
-#         self.sequence_embedding = nn.Parameter(torch.zeros(1, 1, d_model))
-        
-#     def forward(
-#         self,
-#         x: torch.Tensor,  # [B, T, D]
-#         has_context: bool = False
-#     ) -> torch.Tensor:  # [B, T, D]
-#         try:
-#             B, T, D = x.shape
-#             assert D == self.d_model, f"Expected dim {self.d_model}, got {D}"
             
-#             # Get base positional encoding
-#             positions = self.pe[:, :T, :]
-            
-#             # Add relative positions if enabled
-#             if self.use_relative_position:
-#                 relative_pos = self.relative_pe[:T].unsqueeze(0)
-#                 positions = positions + relative_pos
-            
-#             # Add context/sequence markers
-#             if has_context:
-#                 # Assume first max_context_len frames are context
-#                 context_len = min(self.max_context_len, T)
-#                 positions[:, :context_len] += self.context_embedding
-#                 positions[:, context_len:] += self.sequence_embedding
-#             else:
-#                 positions += self.sequence_embedding
-            
-#             # Add to input and apply dropout
-#             x = x + positions
-#             x = self.dropout(x)
-            
-#             assert x.shape == (B, T, self.d_model)
-#             return x
-            
-#         except Exception as e:
-#             logger.error(f"Error in positional embedding: {str(e)}")
-#             logger.error(traceback.format_exc())
-#             return torch.zeros_like(x)
-
-# class EfficientConditionEmbedding(nn.Module):
-#     """
-#     Processes and embeds various conditioning signals for motion generation.
-#     Handles None values robustly by replacing with zero tensors.
-    
-#     Args:
-#         model_dim: Output embedding dimension (default: 512)
-#         max_seq_len: Maximum sequence length (default: 60)
-#     """
-#     def __init__(
-#         self,
-#         model_dim: int = 512,
-#         max_seq_len: int = 60
-#     ):
-#         super().__init__()
-#         self.model_dim = model_dim
-#         self.max_seq_len = max_seq_len
-        
-#         # Load channel config
-#         channel_config_path = Path(__file__).parent / 'channel_config.yaml'
-#         with open(channel_config_path, 'r') as f:
-#             self.channel_config = yaml.safe_load(f)
-        
-#         # Audio projection (wav2vec features: 768 -> hidden -> output)
-#         audio_cfg = self.channel_config['projections']['audio']
-#         self.audio_proj = nn.Sequential(
-#             nn.Linear(audio_cfg['input_dim'], audio_cfg['hidden_dim']),
-#             nn.ReLU(),
-#             nn.Linear(audio_cfg['hidden_dim'], audio_cfg['output_dim'])
-#         )
-        
-#         # Control signal projections
-#         self.gaze_proj = nn.Linear(2, 2)
-#         self.distance_proj = nn.Linear(1, 1)
-#         self.emotion_proj = nn.Linear(2, 2)
-#         self.speed_proj = nn.Linear(1, 1)
-        
-#         # Blink state embedding
-#         blink_cfg = self.channel_config['projections']['blink']
-#         self.blink_embed = nn.Sequential(
-#             nn.Linear(blink_cfg['input_dim'], blink_cfg['hidden_dim']),
-#             nn.ReLU(),
-#             nn.Linear(blink_cfg['hidden_dim'], blink_cfg['output_dim'])
-#         )
-        
-#         # Final normalization
-#         self.norm = nn.LayerNorm(model_dim)
-        
-#     def forward(
-#         self,
-#         conditions: Dict[str, torch.Tensor],
-#         prev_context: Optional[Dict[str, torch.Tensor]] = None
-#     ) -> torch.Tensor:  # [B, T, model_dim]
-#         try:
-#             # Validate required audio features
-#             if 'audio_features' not in conditions or conditions['audio_features'] is None:
-#                 raise ValueError("audio_features are required in conditions")
-            
-#             audio = conditions['audio_features']
-#             if audio.dim() == 4:  # [B, 1, T, D] -> [B, T, D]
-#                 audio = audio.squeeze(1)
-            
-#             B, T, _ = audio.shape
-            
-#             # Handle missing conditions with zeros
-#             device = audio.device
-#             dtype = audio.dtype
-            
-#             def get_or_zero(key: str, shape: Tuple[int, ...]) -> torch.Tensor:
-#                 if key in conditions and conditions[key] is not None:
-#                     tensor = conditions[key]
-#                     assert tensor.shape == (B, T, *shape[2:]), f"Invalid shape for {key}: {tensor.shape}"
-#                     return tensor
-#                 return torch.zeros(B, T, *shape[2:], device=device, dtype=dtype)
-            
-#             # Gather all conditions
-#             gaze = get_or_zero('gaze', (B, T, 2))
-#             head_distance = get_or_zero('head_distance', (B, T, 1))
-#             emotion = get_or_zero('emotion', (B, T, 2))
-#             speed_bucket = get_or_zero('speed_bucket', (B, T, 1))
-#             blink_state = get_or_zero('blink_state', (B, T, 3))
-            
-#             # Project conditions
-#             audio_emb = self.audio_proj(audio)  # [B, T, audio_output_dim]
-#             gaze_emb = self.gaze_proj(gaze)
-#             dist_emb = self.distance_proj(head_distance)
-#             emo_emb = self.emotion_proj(emotion)
-#             speed_emb = self.speed_proj(speed_bucket)
-#             blink_emb = self.blink_embed(blink_state)
-            
-#             # Concatenate all embeddings
-#             emb = torch.cat([
-#                 audio_emb,
-#                 gaze_emb,
-#                 dist_emb,
-#                 emo_emb,
-#                 speed_emb,
-#                 blink_emb
-#             ], dim=-1)  # [B, T, sum_dims]
-            
-#             # Handle padding to model_dim
-#             current_dim = emb.shape[-1]
-#             if current_dim < self.model_dim:
-#                 padding = torch.zeros(B, T, self.model_dim - current_dim, device=device, dtype=dtype)
-#                 emb = torch.cat([emb, padding], dim=-1)
-#             elif current_dim > self.model_dim:
-#                 emb = emb[..., :self.model_dim]
-            
-#             # Normalize
-#             emb = self.norm(emb)
-            
-#             assert emb.shape == (B, T, self.model_dim)
-#             return emb
-            
-#         except Exception as e:
-#             logger.error(f"Error in condition embedding: {str(e)}")
-#             logger.error(traceback.format_exc())
-#             # Fallback to zero embedding
-#             return torch.zeros(conditions['audio_features'].shape[:2] + (self.model_dim,), 
-#                                device=conditions['audio_features'].device)
-
-# class MotionTransformer(nn.Module):
-#     """
-#     Diffusion Transformer for holistic facial dynamics generation.
-    
-#     Args:
-#         config: Configuration dictionary or OmegaConf
-#     """
-#     def __init__(self, config):
-#         super().__init__()
-#         self.config = config if isinstance(config, dict) else OmegaConf.to_container(config, resolve=True)
-        
-#         d_model = self.config['model']['hidden_dim']
-#         self.d_model = d_model
-#         self.motion_dim = self.config['model']['motion_dim']
-        
-#         # Noise level embedding
-#         self.noise_embed = nn.Sequential(
-#             nn.Linear(1, d_model),
-#             nn.ReLU(),
-#             nn.Linear(d_model, d_model)
-#         )
-        
-#         # Condition embedding module
-#         self.cond_embed = EfficientConditionEmbedding(
-#             model_dim=d_model,
-#             max_seq_len=self.config['motion']['window_size']
-#         )
-        
-#         # Positional encoding
-#         self.pos_embed = VASAPositionalEmbedding(
-#             d_model=d_model,
-#             max_seq_len=self.config['motion']['window_size'],
-#             max_context_len=self.config['motion']['context_size'],
-#             dropout=self.config['model']['dropout'],
-#             use_relative_position=self.config['model']['use_relative_position']
-#         )
-        
-#         # Transformer encoder
-#         encoder_layer = nn.TransformerEncoderLayer(
-#             d_model=d_model,
-#             nhead=self.config['model']['n_heads'],
-#             dim_feedforward=self.config['model']['dim_feedforward'],
-#             dropout=self.config['model']['dropout'],
-#             activation='relu'
-#         )
-#         self.transformer = nn.TransformerEncoder(
-#             encoder_layer,
-#             num_layers=self.config['model']['n_layers']
-#         )
-        
-#         # Motion input projections
-#         self.theta_proj_in = nn.Linear(3*4, d_model // 2)
-#         self.expr_proj_in = nn.Linear(self.motion_dim, d_model // 2)
-        
-#         # Output projections
-#         self.theta_proj_out = nn.Linear(d_model, 3*4)
-#         self.expr_proj_out = nn.Linear(d_model, self.motion_dim)
-        
-#     def forward(
-#         self,
-#         motion_data: Dict[str, torch.Tensor],
-#         noise_level: torch.Tensor,  # [B]
-#         conditions: Optional[Dict[str, torch.Tensor]] = None,
-#         cond_emb: Optional[torch.Tensor] = None,  # [B, T, D]
-#         prev_context: Optional[Dict[str, torch.Tensor]] = None
-#     ) -> Dict[str, torch.Tensor]:
-#         try:
-#             # Validate inputs
-#             assert 'theta' in motion_data and 'expression_embed' in motion_data
-#             B, T = motion_data['theta'].shape[:2]
-#             assert noise_level.shape == (B,)
-            
-#             # Handle noise level as float tensor if needed
-#             if not isinstance(noise_level, torch.Tensor):
-#                 noise_level = torch.tensor([noise_level] * B, dtype=torch.float32, device=motion_data['theta'].device)
-#             elif noise_level.dim() == 0:
-#                 noise_level = noise_level.unsqueeze(0).repeat(B)
-            
-#             # Noise embedding [B, 1, D] -> [B, T, D]
-#             noise_emb = self.noise_embed(noise_level.unsqueeze(-1))  # [B, D]
-#             noise_emb = noise_emb.unsqueeze(1).repeat(1, T, 1)  # [B, T, D]
-            
-#             # Get condition embedding if not provided
-#             if cond_emb is None and conditions is not None:
-#                 cond_emb = self.cond_embed(conditions, prev_context)
-            
-#             # Flatten motion data
-#             theta_flat = motion_data['theta'].view(B, T, -1)  # [B, T, 12]
-#             expr_flat = motion_data['expression_embed']  # [B, T, motion_dim]
-            
-#             # Project motion inputs
-#             theta_emb = self.theta_proj_in(theta_flat)
-#             expr_emb = self.expr_proj_in(expr_flat)
-#             motion_emb = torch.cat([theta_emb, expr_emb], dim=-1)  # [B, T, D]
-            
-#             # Combine with noise and conditions
-#             x = motion_emb + noise_emb
-#             if cond_emb is not None:
-#                 x = x + cond_emb
-            
-#             # Add positional encoding
-#             has_context = prev_context is not None
-#             x = self.pos_embed(x, has_context=has_context)
-            
-#             # Transformer processing (src mask None for full attention)
-#             x = x.permute(1, 0, 2)  # [T, B, D]
-#             x = self.transformer(x)
-#             x = x.permute(1, 0, 2)  # [B, T, D]
-            
-#             # Project to outputs
-#             theta_out = self.theta_proj_out(x).view(B, T, 3, 4)
-#             expr_out = self.expr_proj_out(x)
-            
-#             # Derive additional parameters
-#             rotation = theta_out[:, :, :, :3].mean(dim=-1)  # Simplified; adjust as needed
-#             translation = theta_out[:, :, :, 3]
-#             scale = torch.ones(B, T, 3, device=x.device)
-            
-#             output = {
-#                 'theta': theta_out,
-#                 'expression_embed': expr_out,
-#                 'rotation': rotation,
-#                 'translation': translation,
-#                 'scale': scale
-#             }
-            
-#             return output
-            
-#         except Exception as e:
-#             logger.error(f"Error in MotionTransformer: {str(e)}")
-#             logger.error(traceback.format_exc())
-#             # Return zero outputs on error
-#             zero_theta = torch.zeros(B, T, 3, 4, device=motion_data['theta'].device)
-#             zero_expr = torch.zeros(B, T, self.motion_dim, device=motion_data['theta'].device)
-#             return {
-#                 'theta': zero_theta,
-#                 'expression_embed': zero_expr,
-#                 'rotation': zero_theta[:, :, :, :3].mean(-1),
-#                 'translation': zero_theta[:, :, :, 3],
-#                 'scale': torch.zeros(B, T, 3, device=zero_theta.device)
-#             }
-
-# class VASAModel(nn.Module):
-#     """
-#     Main VASA model combining diffusion process with volumetric avatar rendering.
-#     Aligns with VASA-1 specifications for motion diffusion.
-    
-#     Args:
-#         config: Configuration (dict or OmegaConf)
-#         volumetric_avatar: Pre-trained volumetric avatar module
-#         device: Computation device (default: 'cuda')
-#     """
-#     def __init__(
-#         self,
-#         config,
-#         volumetric_avatar: nn.Module,
-#         device: str = 'cuda'
-#     ):
-#         super().__init__()
-#         self.config = config if isinstance(config, dict) else OmegaConf.to_container(config, resolve=True)
-#         self.device = device
-#         self.volumetric_avatar = volumetric_avatar.eval()
-#         for param in self.volumetric_avatar.parameters():
-#             param.requires_grad = False
-        
-#         # Motion transformer
-#         self.motion_transformer = MotionTransformer(self.config).to(device)
-        
-#         # Diffusion scheduler
-#         self.scheduler = DDIMScheduler(
-#             num_train_timesteps=self.config['diffusion']['num_steps'],
-#             beta_start=self.config['diffusion']['beta_start'],
-#             beta_end=self.config['diffusion']['beta_end'],
-#             beta_schedule='linear',
-#             clip_sample=False
-#         )
-        
-#         # Initial context parameters
-#         context_size = self.config['motion']['context_size']
-#         self.start_prev_theta = nn.Parameter(torch.zeros(1, context_size, 3, 4))
-#         self.start_prev_expression = nn.Parameter(torch.zeros(1, context_size, self.motion_transformer.motion_dim))
-        
-#         # Dropout probabilities for CFG
-#         self.dropout_probs = self.config['train'].get('dropout_probs', {})
-        
-#         # Blink handler
-#         self.blink_handler = BlinkConditionHandler()
-        
-#         # Clip bounds
-#         self.clip_min = self.config['model']['clip_bounds']['min']
-#         self.clip_max = self.config['model']['clip_bounds']['max']
-        
-#     def forward(
-#         self,
-#         motion_data: Dict[str, torch.Tensor],
-#         noise_level: torch.Tensor,  # [B]
-#         conditions: Optional[Dict[str, torch.Tensor]] = None,
-#         cond_emb: Optional[torch.Tensor] = None,
-#         prev_context: Optional[Dict[str, torch.Tensor]] = None,
-#         noise: Optional[Dict[str, torch.Tensor]] = None
-#     ) -> Dict[str, torch.Tensor]:
-#         try:
-#             # Sanitize inputs
-#             for k in motion_data:
-#                 motion_data[k] = torch.nan_to_num(
-#                     motion_data[k],
-#                     nan=0.0,
-#                     posinf=self.clip_max,
-#                     neginf=self.clip_min
-#                 )
-            
-#             # Remap landmark keys if needed
-#             remap_keys = {
-#                 'lips_landmarks': 'lips',
-#                 'right_eye_landmarks': 'right_eye',
-#                 'left_eye_landmarks': 'left_eye',
-#                 'jaw_landmarks': 'jaw',
-#                 'nose_landmarks': 'nose'
-#             }
-#             for old_key, new_key in remap_keys.items():
-#                 if old_key in conditions:
-#                     conditions[new_key] = conditions.pop(old_key)
-            
-#             # Validate and prepare conditions
-#             if conditions is None:
-#                 conditions = {}
-            
-#             B, T = motion_data['theta'].shape[:2]
-            
-#             # Ensure consistent shapes
-#             expected_shapes = {
-#                 'gaze': (B, T, 2),
-#                 'head_distance': (B, T, 1),
-#                 'emotion': (B, T, 2),
-#                 'speed_bucket': (B, T, 1),
-#                 'lips': (B, T, 20, 3),
-#                 'right_eye': (B, T, 8, 3),
-#                 'left_eye': (B, T, 7, 3),
-#                 'jaw': (B, T, 10, 3),
-#                 'nose': (B, T, 4, 3),
-#                 'blink_state': (B, T, 3)
-#             }
-            
-#             device = motion_data['theta'].device
-#             dtype = motion_data['theta'].dtype
-            
-#             for key, shape in expected_shapes.items():
-#                 if key not in conditions or conditions[key] is None:
-#                     conditions[key] = torch.zeros(shape, device=device, dtype=dtype)
-#                 else:
-#                     # Expand if needed
-#                     if conditions[key].dim() < len(shape):
-#                         conditions[key] = conditions[key].unsqueeze(0).expand(shape)
-#                     assert conditions[key].shape == shape, f"Invalid shape for {key}: {conditions[key].shape} vs {shape}"
-            
-#             # Auto-generate blink state if not provided
-#             if 'blink_state' not in conditions or torch.all(conditions['blink_state'] == 0):
-#                 conditions['blink_state'] = self.blink_handler.generate_blink_conditions(B, T, device=device)
-            
-#             # Add noise if provided
-#             if noise is not None:
-#                 motion_data = self._add_noise_to_motion(motion_data, noise, noise_level)
-            
-#             # Forward through motion transformer
-#             pred_motion = self.motion_transformer(
-#                 motion_data=motion_data,
-#                 noise_level=noise_level,
-#                 conditions=conditions,
-#                 cond_emb=cond_emb,
-#                 prev_context=prev_context
-#             )
-            
-#             # Sanitize outputs
-#             for k in pred_motion:
-#                 if isinstance(pred_motion[k], torch.Tensor):
-#                     pred_motion[k] = torch.nan_to_num(
-#                         pred_motion[k],
-#                         nan=0.0,
-#                         posinf=self.clip_max,
-#                         neginf=self.clip_min
-#                     )
-#                     pred_motion[k] = torch.clamp(
-#                         pred_motion[k],
-#                         min=self.clip_min,
-#                         max=self.clip_max
-#                     )
-            
-#             return pred_motion
-            
-#         except Exception as e:
-#             logger.error(f"Error in VASAModel forward: {str(e)}")
-#             logger.error(traceback.format_exc())
-#             # Return zero motion on error
-#             B, T = motion_data['theta'].shape[:2]
-#             zero_theta = torch.zeros(B, T, 3, 4, device=self.device)
-#             zero_expr = torch.zeros(B, T, self.motion_transformer.motion_dim, device=self.device)
-#             return {
-#                 'theta': zero_theta,
-#                 'expression_embed': zero_expr,
-#                 'rotation': zero_theta[:, :, :, :3].mean(-1),
-#                 'translation': zero_theta[:, :, :, 3],
-#                 'scale': torch.zeros(B, T, 3, device=self.device)
-#             }
-    
-#     def _apply_dropout(
-#         self,
-#         conditions: Dict[str, torch.Tensor]
-#     ) -> Dict[str, torch.Tensor]:
-#         """Apply classifier-free guidance dropout - replaces with zeros instead of None."""
-#         dropped_conditions = conditions.copy()
-#         for key, prob in self.dropout_probs.items():
-#             if key != 'audio' and random.random() < prob:  # Never drop audio
-#                 dropped_conditions[key] = torch.zeros_like(conditions[key])
-#         return dropped_conditions
-    
-#     def _add_noise_to_motion(
-#         self,
-#         motion_data: Dict[str, torch.Tensor],
-#         noise: Dict[str, torch.Tensor],
-#         noise_level: torch.Tensor
-#     ) -> Dict[str, torch.Tensor]:
-#         if self.config['train'].get('turn_off_noise', False):
-#             return motion_data
-        
-#         noisy_motion = {}
-#         for key in ['theta', 'expression_embed']:
-#             if key in motion_data:
-#                 # Ensure scheduler on correct device
-#                 self.scheduler = self.scheduler.to(motion_data[key].device)
-                
-#                 # Flatten for adding noise
-#                 flat = motion_data[key].view(motion_data[key].shape[0], -1)
-#                 noisy_flat = self.scheduler.add_noise(flat, noise[key].view_as(flat), noise_level)
-#                 noisy_motion[key] = noisy_flat.view_as(motion_data[key])
-        
-#         return noisy_motion
-    
-#     def generate_sequence(
-#         self,
-#         initial_pose: Dict[str, torch.Tensor],
-#         initial_dynamics: torch.Tensor,  # [B, expression_dim]
-#         conditions: Dict[str, torch.Tensor],
-#         num_steps: int = 50,
-#         eta: float = 0.5,
-#         cfg_scales: Optional[Dict[str, float]] = None
-#     ) -> Dict[str, torch.Tensor]:
-#         try:
-#             B = initial_pose['theta'].shape[0]
-#             total_T = conditions['audio_features'].shape[1]  # Assuming [B, T, D]
-#             window_size = self.config['motion']['window_size']
-#             stride = self.config['motion']['stride']
-#             context_size = self.config['motion']['context_size']
-            
-#             # Initialize outputs
-#             full_theta = torch.zeros(B, total_T, 3, 4, device=self.device)
-#             full_expr = torch.zeros(B, total_T, self.motion_transformer.motion_dim, device=self.device)
-            
-#             # Initial context
-#             prev_context = {
-#                 'theta': self.start_prev_theta.repeat(B, 1, 1, 1),
-#                 'expression': self.start_prev_expression.repeat(B, 1, 1),
-#                 'audio': torch.zeros(B, context_size, 768, device=self.device)  # Assuming 768-dim audio
-#             }
-            
-#             start_idx = 0
-#             while start_idx < total_T:
-#                 current_T = min(window_size, total_T - start_idx)
-                
-#                 # Slice conditions for current window
-#                 window_conditions = {k: v[:, start_idx:start_idx + current_T] for k, v in conditions.items()}
-                
-#                 # Initialize noise
-#                 noise = {
-#                     'theta': torch.randn(B, current_T, 3, 4, device=self.device),
-#                     'expression_embed': torch.randn(B, current_T, self.motion_transformer.motion_dim, device=self.device)
-#                 }
-                
-#                 motion = {
-#                     'theta': noise['theta'].clone(),
-#                     'expression_embed': noise['expression_embed'].clone()
-#                 }
-                
-#                 # DDIM sampling loop
-#                 for t in reversed(range(num_steps)):
-#                     timesteps = torch.full((B,), t, device=self.device, dtype=torch.long)
-                    
-#                     # Unconditional prediction
-#                     uncond_motion = self.forward(
-#                         motion,
-#                         timesteps,
-#                         conditions={k: torch.zeros_like(v) for k, v in window_conditions.items() if k != 'audio'},  # Keep audio
-#                         prev_context=prev_context
-#                     )
-                    
-#                     # Conditional prediction
-#                     cond_motion = self.forward(
-#                         motion,
-#                         timesteps,
-#                         conditions=window_conditions,
-#                         prev_context=prev_context
-#                     )
-                    
-#                     # Apply CFG
-#                     if cfg_scales:
-#                         pred_motion = {k: uncond_motion[k] + cfg_scales.get(k, 1.0) * (cond_motion[k] - uncond_motion[k])
-#                                        for k in cond_motion}
-#                     else:
-#                         pred_motion = cond_motion
-                    
-#                     # Update motion
-#                     for key in motion:
-#                         model_output = pred_motion[key].view(B, -1)
-#                         current_sample = motion[key].view(B, -1)
-#                         motion[key] = self.scheduler.step(
-#                             model_output=model_output,
-#                             timestep=timesteps[0],
-#                             sample=current_sample,
-#                             eta=eta
-#                         ).prev_sample.view_as(motion[key])
-                
-#                 # Store generated window
-#                 full_theta[:, start_idx:start_idx + current_T] = pred_motion['theta']
-#                 full_expr[:, start_idx:start_idx + current_T] = pred_motion['expression_embed']
-                
-#                 # Update context for next window
-#                 context_start = max(0, current_T - context_size)
-#                 prev_context['theta'] = pred_motion['theta'][:, context_start:]
-#                 prev_context['expression'] = pred_motion['expression_embed'][:, context_start:]
-#                 prev_context['audio'] = window_conditions['audio_features'][:, context_start:]
-                
-#                 start_idx += stride
-                
-#             return {
-#                 'theta': full_theta,
-#                 'expression_embed': full_expr
-#             }
-            
-#         except Exception as e:
-#             logger.error(f"Error in sequence generation: {str(e)}")
-#             logger.error(traceback.format_exc())
-#             return {
-#                 'theta': torch.zeros(B, total_T, 3, 4, device=self.device),
-#                 'expression_embed': torch.zeros(B, total_T, self.motion_transformer.motion_dim, device=self.device)
-#             }
+        except Exception as e:
+            logger.error(f"Error in sequence generation: {str(e)}")
+            logger.error(traceback.format_exc())
+            # Return zeros for all parameters
+            return {
+                'theta': torch.zeros(B, total_T, 3, 4, device=device),
+                'scale': torch.zeros(B, total_T, 3, device=device),
+                'rotation': torch.zeros(B, total_T, 3, device=device),
+                'translation': torch.zeros(B, total_T, 3, device=device),
+                'expression_embed': torch.zeros(B, total_T, self.config.model.expression_dim, device=device)
+            }

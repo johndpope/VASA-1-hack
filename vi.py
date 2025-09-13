@@ -24,6 +24,7 @@ from torchvision.utils import save_image
 import torchvision
 import torch.nn as nn
 from repos.MODNet.src.models.modnet import MODNet
+import traceback
 
 class VASAInference:
     def __init__(

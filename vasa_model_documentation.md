@@ -115,7 +115,7 @@ model:
   dropout: 0.1
   use_relative_position: true
   condition_embedding_dim: 512
-  motion_dim: 128
+ 
 motion:
   window_size: 50
   context_size: 10
@@ -313,7 +313,7 @@ model:
   dropout: 0.1
   use_relative_position: true
   condition_embedding_dim: 512
-  motion_dim: 128
+ 
   clip_bounds:
     min: -10.0
     max: 10.0
