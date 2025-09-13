@@ -66,25 +66,25 @@ esac
 
 echo ""
 echo "Select log level:"
-echo "1) ERROR (minimal output)"
-echo "2) WARNING (warnings and errors)"
-echo "3) INFO (normal logging)"
+echo "1) INFO (normal logging)"
+echo "2) ERROR (minimal output)"
+echo "3) WARNING (warnings and errors)"
 echo "4) DEBUG (verbose logging)"
 echo ""
 read -p "Enter your choice (1-4): " log_choice
 
 case $log_choice in
     1)
+        export VASA_LOG_LEVEL="INFO"
+        echo "Log level set to INFO (normal)..."
+        ;;
+    2)
         export VASA_LOG_LEVEL="ERROR"
         echo "Log level set to ERROR (minimal output)..."
         ;;
-    2)
+    3)
         export VASA_LOG_LEVEL="WARNING"
         echo "Log level set to WARNING..."
-        ;;
-    3)
-        export VASA_LOG_LEVEL="INFO"
-        echo "Log level set to INFO (normal)..."
         ;;
     4)
         export VASA_LOG_LEVEL="DEBUG"
