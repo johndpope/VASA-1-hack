@@ -188,19 +188,33 @@ def create_window_sequence_collate_fn(context_size: int = 10):
                 # Add prev_context from previous window if available
                 if i > 0 and windows[i-1]['metadata']['has_context']:
                     prev_window = windows[i-1]
-                    # Extract last context_size frames from previous window
-                    window['prev_theta'] = prev_window['theta'][-context_size:]
-                    window['prev_rotation'] = prev_window['rotation'][-context_size:]
-                    window['prev_translation'] = prev_window['translation'][-context_size:]
-                    window['prev_expression'] = prev_window['expression_embed'][-context_size:]
-                    window['prev_audio'] = prev_window['audio_features'][-context_size:]
+                    # Get the device of current window tensors (should be CUDA)
+                    target_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    for key in ['theta', 'rotation', 'translation', 'expression_embed', 'audio_features']:
+                        if key in window and isinstance(window[key], torch.Tensor):
+                            target_device = window[key].device
+                            break
+
+                    # Extract last context_size frames from previous window and ensure same device
+                    window['prev_theta'] = prev_window['theta'][-context_size:].to(target_device)
+                    window['prev_rotation'] = prev_window['rotation'][-context_size:].to(target_device)
+                    window['prev_translation'] = prev_window['translation'][-context_size:].to(target_device)
+                    window['prev_expression'] = prev_window['expression_embed'][-context_size:].to(target_device)
+                    window['prev_audio'] = prev_window['audio_features'][-context_size:].to(target_device)
                 else:
                     # No previous context - use zeros with correct shapes
-                    window['prev_theta'] = torch.zeros(context_size, 3, 4)  # Fixed shape for theta
-                    window['prev_rotation'] = torch.zeros(context_size, 3)
-                    window['prev_translation'] = torch.zeros(context_size, 3)
-                    window['prev_expression'] = torch.zeros(context_size, 128)  # Fixed expression dim
-                    window['prev_audio'] = torch.zeros(context_size, 768)  # Fixed audio dim
+                    # Get device from existing tensors in the window (should be CUDA)
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    for key in ['theta', 'rotation', 'translation', 'expression_embed', 'audio_features']:
+                        if key in window and isinstance(window[key], torch.Tensor):
+                            device = window[key].device
+                            break
+
+                    window['prev_theta'] = torch.zeros(context_size, 3, 4, device=device)  # Fixed shape for theta
+                    window['prev_rotation'] = torch.zeros(context_size, 3, device=device)
+                    window['prev_translation'] = torch.zeros(context_size, 3, device=device)
+                    window['prev_expression'] = torch.zeros(context_size, 128, device=device)  # Fixed expression dim
+                    window['prev_audio'] = torch.zeros(context_size, 768, device=device)  # Fixed audio dim
                 
                 processed_windows.append(window)
         

@@ -41,7 +41,7 @@ except ImportError:
 from torchvision.utils import save_image
 from datetime import datetime
 import hashlib
-from vasa_model import BlinkConditionHandler
+from blink_condition_handler import BlinkConditionHandler
 from video_tracker import VideoEventData, VideoEvent, ProblematicVideosTracker
 
 __all__ = ['VASAIntegratedDataset', 'WorkerState','VASADatasetMixin','SpeedEncoder']
@@ -360,13 +360,17 @@ class WindowCache:
                             
                             # Convert to tensor
                             tensor = torch.from_numpy(data)
-                            
+
                             # Fix tensor dtype if needed
                             if 'dtype' in dataset.attrs:
                                 dtype_str = dataset.attrs['dtype']
                                 if isinstance(dtype_str, tuple):
                                     dtype_str = dtype_str[0].decode('utf-8')
                                 tensor = tensor.to(dtype=getattr(torch, dtype_str.split('.')[-1]))
+
+                            # Move ALL tensors to GPU for training efficiency
+                            if torch.cuda.is_available():
+                                tensor = tensor.cuda()
                             
                             # Remove extra dimensions if needed
                             if key in ['theta', 'rotation', 'translation', 'expression_embed', 'scale']:
@@ -1153,9 +1157,9 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     outputs['translation'].append(translation)
                     outputs['expression_embed'].append(expression_embed)
 
-                # Stack along time dimension and move to CPU
+                # Stack along time dimension - keep on GPU for efficiency
                 outputs = {
-                    k: torch.stack(v, dim=1).cpu()  # [B=1, T=50, ...] moved to CPU
+                    k: torch.stack(v, dim=1)  # [B=1, T=50, ...] stays on GPU
                     for k, v in outputs.items()
                 }
 

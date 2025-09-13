@@ -6,7 +6,8 @@ import importlib
 from PIL import Image
 import numpy as np
 from torchvision import transforms
-from vasa_model import VASAModel, MotionSequenceHandler
+from vasa_model import VASAModel
+from motion_sequence_handler import MotionSequenceHandler
 import cv2
 import subprocess
 import imageio
@@ -546,9 +547,17 @@ class VASAInference:
                 audio_mean = audio_features.mean().item()
                 logger.info(f"Window {window_idx} audio stats: mean={audio_mean:.4f}, variance={audio_var:.6f}")
 
+                # Get batch size and sequence length from audio features
+                B = audio_features.shape[0] if audio_features.dim() >= 2 else 1
+                T = audio_features.shape[1] if audio_features.dim() >= 2 else audio_features.shape[0]
+                
+                # Ensure audio features have correct shape [B, T, D]
+                if audio_features.dim() == 2:
+                    audio_features = audio_features.unsqueeze(0)  # Add batch dimension
+
                 # Prepare conditions for the model - match training conditions
                 cond_signals = {
-                    'audio_features': window_data['audio_features'].to(device),
+                    'audio_features': audio_features.to(device),
                     # Add default values for conditions used in training
                     'gaze': torch.zeros(B, T, 2, device=device),  # [B, T, 2]
                     'head_distance': torch.zeros(B, T, 1, device=device),  # [B, T, 1] 
@@ -584,9 +593,9 @@ class VASAInference:
                     # Get current motion parameters
                     curr_expression = motion_sequence['expression_embed'][:, t]
                     curr_theta = motion_sequence['theta'][:, t]
-                    curr_scale = motion_sequence['scale'][:, t]
-                    curr_rotation = motion_sequence['rotation'][:, t]
-                    curr_translation = motion_sequence['translation'][:, t]
+                    curr_scale = motion_sequence['scale'][:, t].squeeze(0)  # Remove batch dim to get [3]
+                    curr_rotation = motion_sequence['rotation'][:, t].squeeze(0)  # Remove batch dim to get [3]
+                    curr_translation = motion_sequence['translation'][:, t].squeeze(0)  # Remove batch dim to get [3]
 
                     # Calculate and log differences if previous values exist
                     if prev_motion['expression'] is not None:
@@ -937,7 +946,9 @@ class VASAInference:
 
             # Create identity grid first
             grid = self.volumetric_avatar.identity_grid_3d.repeat_interleave(1, dim=0)
-            target_rotation_warp = grid.bmm(current_theta[:3].transpose(0, 1)).view(-1, d, s, s, 3)
+            # Add batch dimension to current_theta and extract rotation part
+            current_theta_batch = current_theta.unsqueeze(0)[:, :3]  # Shape: [1, 3, 4]
+            target_rotation_warp = grid.bmm(current_theta_batch.transpose(1, 2)).view(-1, d, s, s, 3)
 
             # Create source tensor with correct shape for RGB image (B, C, H, W)
             dummy_rgb = torch.zeros(1, 3, 512, 512).to(device)  # Create dummy RGB image 
@@ -993,7 +1004,8 @@ class VASAInference:
             logger.error(f"Error generating frame: {str(e)}")
             logger.error(traceback.format_exc())
             logger.error(f"Available source_params keys: {list(source_params.keys())}")
-            logger.error(f"Data dict keys: {list(data_dict.keys())}")
+            if 'data_dict' in locals():
+                logger.error(f"Data dict keys: {list(data_dict.keys())}")
             raise
     
     def extract_video_assets(self,video_path: str, output_dir: Path) -> Tuple[str, str]:

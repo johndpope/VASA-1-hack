@@ -11,7 +11,7 @@ model:
   n_layers: 8
   dim_feedforward: 2048
   dropout: 0.1
-  motion_dim: 256
+  expression_dim: 128  # Expression embedding dimension from volumetric avatar
   # Add these:
   condition_embedding_dim: 512  # Dimension for condition embeddings
   use_prev_motion: true        # Whether to use previous motion context

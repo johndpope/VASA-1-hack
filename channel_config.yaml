@@ -101,8 +101,8 @@ projections:
     hidden_dim: 32
     output_dim: 32
     
-  motion_norm_dim: 256  
-  control_norm_dim: 6  
+  motion_norm_dim: 256
+  control_norm_dim: 5  # Updated from 6 to 5 (removed speed_bucket: gaze:2 + distance:1 + emotion:2)
   landmark_norm_dim: ${sum:${landmarks.lips.points}*${landmarks.lips.coords},
                           ${landmarks.right_eye.points}*${landmarks.right_eye.coords},
                           ${landmarks.left_eye.points}*${landmarks.left_eye.coords},

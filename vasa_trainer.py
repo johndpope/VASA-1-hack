@@ -21,7 +21,8 @@ from typing import Dict, Optional, List
 from collections import defaultdict
 from omegaconf import OmegaConf
 from datetime import datetime
-from vasa_model import VASAModel, MotionSequenceHandler
+from vasa_model import VASAModel
+from motion_sequence_handler import MotionSequenceHandler
 from vasa_losses import VASALossModule
 from tdd_progressive_loss import TDDProgressiveLoss
 import importlib
@@ -948,7 +949,7 @@ class VASATrainer:
                                 t = torch.zeros((B,), dtype=torch.long, device=device)  # OVERFIT t = 0 no noise/minimal perturbation of the input
                             else:
                                 # Sample timestep uniformly
-                                t = torch.randint(0, self.model.num_steps, (B,), device=device)
+                                t = torch.randint(0, self.config.diffusion.num_steps, (B,), device=device)
 
                             # Rest stays the same
                             noise = {k: torch.randn_like(v) for k, v in motion_data.items()}
@@ -960,6 +961,11 @@ class VASATrainer:
                             logger.debug("Added scheduled noise to motion")
 
                             # Extract control signals with dropout during training
+                            # Debug: Check if audio_features exists in window
+                            if 'audio_features' not in window:
+                                logger.error(f"audio_features not in window! Available keys: {list(window.keys())}")
+                                raise ValueError("audio_features missing from window data")
+
                             control_signals = {
                                 'gaze': window.get('gaze'),
                                 'head_distance': window.get('head_distance'),
@@ -974,13 +980,24 @@ class VASATrainer:
                                 'audio_features': window.get('audio_features')
                             }
 
+                            # Debug: Verify audio_features is included
+                            if 'audio_features' not in control_signals or control_signals['audio_features'] is None:
+                                logger.error(f"audio_features is None or missing in control_signals!")
+                                logger.error(f"Window keys: {list(window.keys())}")
+                                logger.error(f"Control signal keys: {list(control_signals.keys())}")
+
                             # Apply control signal dropout
                             if not self.config.train.turn_off_noise:
                                 dropout_probs = self.config.train.dropout_probs
                                 control_signals = self._apply_condition_dropout(
-                                    control_signals, 
+                                    control_signals,
                                     dropout_probs
                                 )
+
+                                # Debug: Check if audio_features survived dropout
+                                if 'audio_features' not in control_signals:
+                                    logger.error(f"audio_features missing after dropout! Keys: {list(control_signals.keys())}")
+                                    raise ValueError("audio_features removed by dropout - this should never happen!")
 
                             # Forward pass with CFG during inference
                             outputs = self.model(
@@ -2028,14 +2045,20 @@ class VASATrainer:
             return self.val_metrics.get_averages()
             
     def _apply_condition_dropout(
-        self, 
+        self,
         conditions: Dict[str, torch.Tensor],
         dropout_probs: Dict[str, float]
     ) -> Dict[str, torch.Tensor]:
-        """Apply random dropout to conditions based on config probabilities."""
+        """Apply random dropout to conditions based on config probabilities.
+
+        IMPORTANT: audio_features is NEVER dropped as it's required for the model.
+        """
         dropped_conditions = {}
         for k, v in conditions.items():
-            if k in dropout_probs and v is not None:
+            # NEVER drop audio_features - it's required!
+            if k == 'audio_features':
+                dropped_conditions[k] = v
+            elif k in dropout_probs and v is not None:
                 if random.random() < dropout_probs[k]:
                     dropped_conditions[k] = None
                 else:
@@ -2387,6 +2410,44 @@ class VASATrainer:
                 plt.tight_layout()
                 wandb.log({"visuals/expression_comparison": wandb.Image(fig)}, step=step)
                 plt.close(fig)
+                
+                # Add new candle-like expression visualization
+                from visualize_expression import create_expression_candles, create_expression_difference_map
+                from visualize_audio_expression import create_audio_expression_visualization
+                
+                # Create candle visualization for entire window
+                if outputs['expression_embed'].shape[1] > 1:  # If we have temporal dimension
+                    fig_candles = create_expression_candles(
+                        target_expression=targets['expression_embed'][0],  # First batch item, all frames
+                        predicted_expression=outputs['expression_embed'][0],
+                        window_idx=step // 100,  # Use step to create window index
+                        reduce_to=32
+                    )
+                    wandb.log({"visuals/expression_candles": wandb.Image(fig_candles)}, step=step)
+                    plt.close(fig_candles)
+                    
+                    # Create difference map
+                    fig_diff = create_expression_difference_map(
+                        target_expression=targets['expression_embed'][0],
+                        predicted_expression=outputs['expression_embed'][0],
+                        window_idx=step // 100,
+                        reduce_to=32
+                    )
+                    wandb.log({"visuals/expression_diff_map": wandb.Image(fig_diff)}, step=step)
+                    plt.close(fig_diff)
+                    
+                    # Add audio-to-expression visualization if audio features are available
+                    if 'audio_features' in batch:
+                        fig_audio_expr = create_audio_expression_visualization(
+                            audio_features=batch['audio_features'][0],  # First batch item
+                            target_expression=targets['expression_embed'][0],
+                            predicted_expression=outputs['expression_embed'][0],
+                            window_idx=step // 100,
+                            audio_reduce_to=32,
+                            expr_reduce_to=32
+                        )
+                        wandb.log({"visuals/audio_to_expression": wandb.Image(fig_audio_expr)}, step=step)
+                        plt.close(fig_audio_expr)
             
             # Log motion parameter comparison
             motion_params = ['theta', 'rotation', 'translation', 'scale']
@@ -2716,7 +2777,7 @@ if __name__ == "__main__":
         batch_sampler=train_sampler,
         collate_fn=collate_fn,
         num_workers=0,  # Set to 0 to avoid CUDA multiprocessing issues
-        pin_memory=True
+        # pin_memory=True
     )
 
     val_loader = DataLoader(
@@ -2724,7 +2785,7 @@ if __name__ == "__main__":
         batch_size=1,  # Use batch size 1 for testing
         shuffle=False,
         num_workers=1,  # Single worker for validation
-        pin_memory=True,  # Pin memory for faster GPU transfer
+        # pin_memory=True,  # Pin memory for faster GPU transfer
         collate_fn=collate_vasa_batch,
         multiprocessing_context='spawn',
         persistent_workers=False,

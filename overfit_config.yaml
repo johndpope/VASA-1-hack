@@ -9,7 +9,7 @@ model:
   n_layers: 8                 # Reduced to 1 for ultra-fast training (change to 2 or more for better quality)
   dim_feedforward: 2048
   dropout: 0.1
-  motion_dim: 256
+  expression_dim: 128  # Expression embedding dimension from volumetric avatar
   # Add these:
   condition_embedding_dim: 512  # Dimension for condition embeddings
   use_prev_motion: true        # Whether to use previous motion context
@@ -24,7 +24,7 @@ diffusion:
   cfg_start_epoch: 0  # When to start using CFG
 
 
-  schedule_mode: 'cosine'  # One of: linear, quadratic, sigmoid, cosine
+  schedule_mode: 'linear'  # Changed from 'cosine' to fix DDIMScheduler error
   schedule_s: 0.008  # Schedule parameters (for cosine schedule)
 
 # Motion generation parameters - SMALLER WINDOWS
@@ -59,7 +59,7 @@ train:
   # when to add conditional signals
   control_start_epoch: 0      # Start control immediately for overfitting
 
-  lr: 1e-4 # Further reduced to prevent gradient explosions
+  lr: 5e-5 # Further reduced for stability  
   motion_proj_lr: 0.1 # Reduced motion projection LR multiplier
   expression_lr: 0.1   # Reduced expression LR multiplier 
 
@@ -79,7 +79,7 @@ train:
   beta1: 0.9
   beta2: 0.999
   weight_decay: 0.01
-  max_grad_norm: 1.0
+  max_grad_norm: 0.5  # More aggressive gradient clipping for stability
   save_freq: 5                # Save very frequently to enable recovery from OOM
   
   # Dropout probabilities for CFG - VASA-1 uses different rates for prev_ vs current
@@ -129,8 +129,8 @@ loss:
   lambda_verification: 0
   
   # Foundation losses (always active)
-  lambda_reconstruction: 1.0
-  lambda_dynamics: 10.0       # expression variance (tuned for motion encouragement)
+  lambda_reconstruction: 2.0   # Increased for better reconstruction
+  lambda_dynamics: 1.0         # Reduced from 10.0 to prevent variance collapse
   lambda_pose: 1.0
   
   # Progressive losses (unlock based on thresholds)
@@ -297,3 +297,4 @@ optimization:
   channels_last: true       # Use channels_last memory format
   gradient_checkpointing: false  # Disabled for speed
   sync_batchnorm: false
+  amp: true
