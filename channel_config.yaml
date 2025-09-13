@@ -8,7 +8,7 @@ model:
 dimensions:
   prev_expression: 64
   prev_audio: 64
-  audio_features: 128
+  audio_features: 512  # Aligned with JoyVASA's feature_dim
 
 landmarks:
   lips:

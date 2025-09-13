@@ -1234,11 +1234,13 @@ class VASATrainer:
                             if self.config.wandb.enabled and self.accelerator.is_local_main_process:
                                 # Convert grad_norm to scalar if it's a tensor
                                 grad_norm_value = 0.0
-                                if 'grad_norm' in locals():
+                                if 'grad_norm' in locals() and grad_norm is not None:
                                     if isinstance(grad_norm, torch.Tensor):
                                         grad_norm_value = grad_norm.item()
-                                    else:
+                                    elif grad_norm is not None:
                                         grad_norm_value = float(grad_norm)
+                                else:
+                                    grad_norm_value = 0.0  # Default if grad_norm not yet computed
                                 
                                 # Debug: Log what's in metrics
                                 if batch_idx == 0 and window_idx == 0:

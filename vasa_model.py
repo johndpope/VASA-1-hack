@@ -96,18 +96,17 @@ class EfficientConditionEmbedding(nn.Module):
         # Note: channel_layout from config is not used - features are concatenated directly
         # The config defines theoretical positions but implementation uses learned projections
 
-        self.audio_proj = nn.Sequential(
-            nn.Linear(768, config.projections.audio.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(config.projections.audio.hidden_dim, config.projections.audio.output_dim)
-        )
-        logger.info("Using full projection for Wav2Vec features (768 dimensions)")
+        # Audio projection - aligned with JoyVASA (single linear layer, no normalization)
+        # JoyVASA uses a single Linear layer: self.audio_feature_map = nn.Linear(768, feature_dim)
+        self.audio_proj = nn.Linear(768, config.projections.audio.output_dim)
+        logger.info("Using JoyVASA-aligned audio projection: single Linear(768 -> {}) without normalization".format(
+            config.projections.audio.output_dim))
 
         self.gaze_proj = nn.Linear(2, 2)
         self.distance_proj = nn.Linear(1, 1)
         self.emotion_proj = nn.Linear(2, 2)
 
-        self.audio_norm = nn.LayerNorm(config.projections.audio.output_dim)
+        # Removed audio_norm to preserve variance (JoyVASA approach)
         self.control_norm = nn.LayerNorm(config.projections.control_norm_dim)
 
         self.blink_embed = nn.Sequential(
@@ -115,6 +114,11 @@ class EfficientConditionEmbedding(nn.Module):
             nn.ReLU(),
             nn.Linear(config.projections.blink.hidden_dim, config.projections.blink.output_dim)
         )
+
+        # Final projection to combine all features into model_dim
+        # Audio (512) + Controls (5) + Blink (32) = 549 -> 512
+        total_features = config.projections.audio.output_dim + 5 + config.projections.blink.output_dim
+        self.final_proj = nn.Linear(total_features, model_dim)
 
         self.final_norm = nn.LayerNorm(model_dim)
 
@@ -200,31 +204,19 @@ class EfficientConditionEmbedding(nn.Module):
                 audio = audio.squeeze(1)
             audio = self._ensure_float_tensor(audio, dtype)
 
-            # VARIANCE PRESERVATION FIX: Track original audio variance
-            audio_raw_var = audio.var()
-            audio_raw_mean = audio.mean()
-
-            # Project audio features
+            # JoyVASA approach: Direct projection without normalization
+            # This preserves the variance signal that distinguishes silent vs speech
             audio_projected = self.audio_proj(audio)
 
-            # CONDITIONAL NORMALIZATION: Only normalize if audio has significant variance (non-silent)
-            if audio_raw_var > 1e-6:  # Threshold for non-silent audio
-                audio_normalized = self.audio_norm(audio_projected)
-                # ENHANCED VARIANCE PRESERVATION: Scale more aggressively to maintain distinction
-                # Use a power of the variance to amplify differences between silent and speech
-                variance_scale = torch.pow(audio_raw_var + 1e-8, 0.25)  # Fourth root for smoother scaling
-                audio_normalized = audio_normalized * variance_scale * 2.0  # Additional multiplier for strength
-                logger.debug(f"[VARIANCE SCALE] Applied scale factor: {variance_scale.item():.4f}")
-            else:
-                # For silent audio (zeros), keep as zeros without normalization
-                audio_normalized = audio_projected * 0.0  # Force to zero
+            # No normalization - keep raw projected features
+            # This aligns with JoyVASA's audio_feature_map approach
+            audio_features = audio_projected  # Use projected features directly
 
-            # DEBUG: Log audio features variance to check if audio is influencing
+            # DEBUG: Log audio features variance to verify preservation
             audio_var = audio.var().item()
             audio_proj_var = audio_projected.var().item()
-            audio_norm_var = audio_normalized.var().item()
-            logger.debug(f" Audio variance - Raw: {audio_var:.6f}, Projected: {audio_proj_var:.6f}, Final: {audio_norm_var:.6f}")
-            logger.debug(f"Raw variance: {audio_raw_var:.6f}, Applied conditional norm: {audio_raw_var > 1e-6}")
+            logger.debug(f"[JOYVASA ALIGNED] Audio variance - Raw: {audio_var:.6f}, Projected: {audio_proj_var:.6f}")
+            logger.debug(f"Preserving full variance signal without normalization")
 
             # Handle None values from dropout - use zeros as default
             gaze_tensor = conditions.get('gaze')
@@ -254,10 +246,11 @@ class EfficientConditionEmbedding(nn.Module):
             logger.debug(f"Emotion shape: {emotion.shape}, Values mean: {emotion.mean().item():.6f}, var: {emotion.var().item():.6f}")
 
             controls = torch.cat([gaze, distance, emotion], dim=-1)  # Removed speed
-            controls_normalized = self.control_norm(controls)
+            # JoyVASA approach: No normalization to preserve variance
+            controls_features = controls  # Use raw control features
 
-            # DEBUG: Check if normalization is amplifying controls
-            logger.debug(f"Pre-norm controls var: {controls.var().item():.6f}, Post-norm var: {controls_normalized.var().item():.6f}")
+            # DEBUG: Check variance preservation
+            logger.debug(f"Controls variance (no norm): {controls.var().item():.6f}")
 
             # Handle blink_state with None check
             blink_tensor = conditions.get('blink_state')
@@ -265,28 +258,31 @@ class EfficientConditionEmbedding(nn.Module):
                 blink_tensor = torch.zeros(B, T, 3, device=device, dtype=dtype)
             blink_embedded = self.blink_embed(blink_tensor)
 
-            combined = torch.cat([audio_normalized, controls_normalized,  blink_embedded], dim=-1)
-            output[:, :, :combined.shape[-1]] = combined
+            combined = torch.cat([audio_features, controls_features,  blink_embedded], dim=-1)
 
-            # FIXED NORMALIZATION: Completely skip final norm to preserve audio variance differences
-            # The component-wise norms are sufficient, final norm destroys the variance signal
-            final_output = output  # Skip final normalization entirely
-            logger.debug(f"SKIPPING final normalization to preserve variance - Output var: {output.var().item():.6f}")
+            # Project combined features to model dimension
+            # This maintains variance while fitting into model_dim
+            projected = self.final_proj(combined)
+            output = projected  # Direct assignment, shape is now [B, T, model_dim]
+
+            # JoyVASA approach: Skip normalization to preserve variance
+            final_output = output  # No normalization
+            logger.debug(f"[JOYVASA] Final output variance: {output.var().item():.6f}")
 
             final_var = final_output.var().item()
             logger.debug(f" Combined variance: {combined.var().item():.6f}, Output variance: {output.var().item():.6f}, Final normalized: {final_var:.6f}")
 
             # Log individual component contributions and absolute values
-            audio_contrib = audio_normalized.var().item() / (combined.var().item() + 1e-8)
-            controls_contrib = controls_normalized.var().item() / (combined.var().item() + 1e-8)
+            audio_contrib = audio_features.var().item() / (combined.var().item() + 1e-8)
+            controls_contrib = controls_features.var().item() / (combined.var().item() + 1e-8)
             blink_contrib = blink_embedded.var().item() / (combined.var().item() + 1e-8)
 
             # Also log absolute magnitudes to see if audio is being suppressed
-            audio_mag = torch.norm(audio_normalized).item()
-            controls_mag = torch.norm(controls_normalized).item()
+            audio_mag = torch.norm(audio_features).item()
+            controls_mag = torch.norm(controls_features).item()
 
             # Check if variance preservation is working
-            audio_mean_mag = torch.abs(audio_normalized).mean().item()
+            audio_mean_mag = torch.abs(audio_features).mean().item()
 
             logger.debug(f" Component contributions - Audio: {audio_contrib:.2%}, Controls: {controls_contrib:.2%}, Blink: {blink_contrib:.2%}")
             logger.debug(f" Component magnitudes - Audio L2: {audio_mag:.4f}, Audio mean: {audio_mean_mag:.6f}, Controls: {controls_mag:.4f}")
