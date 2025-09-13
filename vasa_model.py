@@ -21,7 +21,9 @@ from blink_condition_handler import BlinkConditionHandler
 
 class VASAPositionalEmbedding(nn.Module):
     """
-    Positional embeddings for VASA sequence generation with relative position encoding option.
+    Positional embeddings for VASA sequence generation with negative positions for context.
+    Uses negative positions for context frames and positive for current frames to maintain
+    clear temporal distinction.
     """
     def __init__(
         self,
@@ -36,24 +38,16 @@ class VASAPositionalEmbedding(nn.Module):
         self.max_seq_len = max_seq_len
         self.max_context_len = max_context_len
         self.use_relative_position = use_relative_position
-
-        if use_relative_position:
-            # Relative position encoding
-            self.relative_pe = nn.Parameter(torch.randn(max_seq_len + max_context_len, d_model) * 0.02)
-        else:
-            # Standard sinusoidal embeddings
-            pe = torch.zeros(max_seq_len + max_context_len, d_model)
-            position = torch.arange(0, max_seq_len + max_context_len).unsqueeze(1)
-            div_term = torch.exp(
-                torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)
-            )
-            pe[:, 0::2] = torch.sin(position * div_term)
-            pe[:, 1::2] = torch.cos(position * div_term)
-            self.register_buffer('pe', pe.unsqueeze(0))
-
-        self.context_embedding = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
-        self.sequence_embedding = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
         self.dropout = nn.Dropout(dropout)
+
+    def _compute_sinusoidal_embedding(self, positions: torch.Tensor, dim: int) -> torch.Tensor:
+        """Compute sinusoidal positional embeddings for any position values."""
+        half_dim = dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=positions.device) * -emb)
+        emb = positions[:, None] * emb[None, :]
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
 
     def forward(
         self,
@@ -61,20 +55,28 @@ class VASAPositionalEmbedding(nn.Module):
         has_context: bool = False
     ) -> torch.Tensor:
         B, T, D = x.shape
-        if self.use_relative_position:
-            pos_encodings = self.relative_pe[:T].unsqueeze(0)
-        else:
-            pos_encodings = self.pe[:, :T]
+        device = x.device
 
-        if has_context:
-            type_embeddings = torch.cat([
-                self.context_embedding.expand(B, self.max_context_len, D),
-                self.sequence_embedding.expand(B, T - self.max_context_len, D)
-            ], dim=1)
-        else:
-            type_embeddings = self.sequence_embedding.expand(B, T, D)
+        if has_context and T > self.max_context_len:
+            # Use negative positions for context, positive for current
+            context_len = self.max_context_len
+            current_len = T - context_len
 
-        x = x + pos_encodings + type_embeddings
+            # Create position indices: [-context_len, ..., -1, 0, 1, ..., current_len-1]
+            context_positions = torch.arange(-context_len, 0, device=device)
+            current_positions = torch.arange(0, current_len, device=device)
+            all_positions = torch.cat([context_positions, current_positions])
+
+            # Compute sinusoidal embeddings for these positions
+            pos_emb = self._compute_sinusoidal_embedding(all_positions, self.d_model)
+            pos_emb = pos_emb.unsqueeze(0).expand(B, -1, -1)
+        else:
+            # No context, use standard positive positions [0, 1, ..., T-1]
+            positions = torch.arange(0, T, device=device)
+            pos_emb = self._compute_sinusoidal_embedding(positions, self.d_model)
+            pos_emb = pos_emb.unsqueeze(0).expand(B, -1, -1)
+
+        x = x + pos_emb
         return self.dropout(x)
 
 
