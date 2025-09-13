@@ -65,24 +65,50 @@ case $mode_choice in
 esac
 
 echo ""
+echo "Select log level:"
+echo "1) ERROR (minimal output)"
+echo "2) WARNING (warnings and errors)"
+echo "3) INFO (normal logging)"
+echo "4) DEBUG (verbose logging)"
+echo ""
+read -p "Enter your choice (1-4): " log_choice
+
+case $log_choice in
+    1)
+        export VASA_LOG_LEVEL="ERROR"
+        echo "Log level set to ERROR (minimal output)..."
+        ;;
+    2)
+        export VASA_LOG_LEVEL="WARNING"
+        echo "Log level set to WARNING..."
+        ;;
+    3)
+        export VASA_LOG_LEVEL="INFO"
+        echo "Log level set to INFO (normal)..."
+        ;;
+    4)
+        export VASA_LOG_LEVEL="DEBUG"
+        echo "Log level set to DEBUG (verbose)..."
+        ;;
+    *)
+        export VASA_LOG_LEVEL="INFO"
+        echo "Defaulting to INFO log level..."
+        ;;
+esac
+
+echo ""
 echo "Additional options:"
 echo "1) Normal training"
-echo "2) Debug mode (verbose logging)"
-echo "3) Fast mode (reduced validation)"
+echo "2) Fast mode (reduced validation)"
 echo ""
-read -p "Enter your choice (1-3): " debug_choice
+read -p "Enter your choice (1-2): " debug_choice
 
 case $debug_choice in
     2)
-        DEBUG_FLAG="--debug"
-        echo "Debug mode enabled..."
-        ;;
-    3)
         FAST_FLAG="--fast"
         echo "Fast mode enabled..."
         ;;
     *)
-        DEBUG_FLAG=""
         FAST_FLAG=""
         echo "Normal training mode..."
         ;;
@@ -93,7 +119,8 @@ echo "================================"
 echo "Starting training with:"
 echo "  Config: $CONFIG_FILE"
 echo "  Mode: $mode_choice"
-echo "  Debug: $debug_choice"
+echo "  Log Level: $VASA_LOG_LEVEL"
+echo "  Options: $debug_choice"
 echo "================================"
 echo ""
 
