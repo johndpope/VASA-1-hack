@@ -240,7 +240,18 @@ def create_window_sequence_collate_fn(context_size: int = 10):
                     batched[key] = torch.stack([w[key] for w in processed_windows])
                 except Exception as e:
                     logger.warning(f"Could not stack {key}: {e}")
-        
+
+        # Handle lip_metrics separately as it's a dictionary of tensors
+        if 'lip_metrics' in processed_windows[0]:
+            batched['lip_metrics'] = {}
+            for metric_key in processed_windows[0]['lip_metrics'].keys():
+                try:
+                    batched['lip_metrics'][metric_key] = torch.stack([
+                        w['lip_metrics'][metric_key] for w in processed_windows
+                    ])
+                except Exception as e:
+                    logger.warning(f"Could not stack lip_metrics[{metric_key}]: {e}")
+
         # Handle metadata separately (don't stack)
         batched['metadata'] = [w['metadata'] for w in processed_windows]
         

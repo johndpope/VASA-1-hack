@@ -213,14 +213,31 @@ class EfficientConditionEmbedding(nn.Module):
                 audio = audio.squeeze(1)
             audio = self._ensure_float_tensor(audio, dtype)
 
+            # VARIANCE PRESERVATION FIX: Track original audio variance
+            audio_raw_var = audio.var()
+            audio_raw_mean = audio.mean()
+
+            # Project audio features
             audio_projected = self.audio_proj(audio)
-            audio_normalized = self.audio_norm(audio_projected)
+
+            # CONDITIONAL NORMALIZATION: Only normalize if audio has significant variance (non-silent)
+            if audio_raw_var > 1e-6:  # Threshold for non-silent audio
+                audio_normalized = self.audio_norm(audio_projected)
+                # ENHANCED VARIANCE PRESERVATION: Scale more aggressively to maintain distinction
+                # Use a power of the variance to amplify differences between silent and speech
+                variance_scale = torch.pow(audio_raw_var + 1e-8, 0.25)  # Fourth root for smoother scaling
+                audio_normalized = audio_normalized * variance_scale * 2.0  # Additional multiplier for strength
+                logger.debug(f"[VARIANCE SCALE] Applied scale factor: {variance_scale.item():.4f}")
+            else:
+                # For silent audio (zeros), keep as zeros without normalization
+                audio_normalized = audio_projected * 0.0  # Force to zero
 
             # DEBUG: Log audio features variance to check if audio is influencing
             audio_var = audio.var().item()
             audio_proj_var = audio_projected.var().item()
             audio_norm_var = audio_normalized.var().item()
-            logger.info(f"[CONDITION DEBUG] Audio variance - Raw: {audio_var:.6f}, Projected: {audio_proj_var:.6f}, Normalized: {audio_norm_var:.6f}")
+            logger.info(f"[CONDITION DEBUG] Audio variance - Raw: {audio_var:.6f}, Projected: {audio_proj_var:.6f}, Final: {audio_norm_var:.6f}")
+            logger.info(f"[VARIANCE FIX] Raw variance: {audio_raw_var:.6f}, Applied conditional norm: {audio_raw_var > 1e-6}")
 
             # Handle None values from dropout - use zeros as default
             gaze_tensor = conditions.get('gaze')
@@ -252,8 +269,16 @@ class EfficientConditionEmbedding(nn.Module):
             #     speed_tensor = self._ensure_float_tensor(speed_tensor, dtype)
             # speed = self.speed_proj(speed_tensor)
 
+            # DEBUG: Log control projections to diagnose dominance issue
+            logger.debug(f"[DEBUG CONTROLS] Gaze shape: {gaze.shape}, Values mean: {gaze.mean().item():.6f}, var: {gaze.var().item():.6f}")
+            logger.debug(f"[DEBUG CONTROLS] Distance shape: {distance.shape}, Values mean: {distance.mean().item():.6f}, var: {distance.var().item():.6f}")
+            logger.debug(f"[DEBUG CONTROLS] Emotion shape: {emotion.shape}, Values mean: {emotion.mean().item():.6f}, var: {emotion.var().item():.6f}")
+
             controls = torch.cat([gaze, distance, emotion], dim=-1)  # Removed speed
             controls_normalized = self.control_norm(controls)
+
+            # DEBUG: Check if normalization is amplifying controls
+            logger.debug(f"[DEBUG CONTROLS] Pre-norm controls var: {controls.var().item():.6f}, Post-norm var: {controls_normalized.var().item():.6f}")
 
             # landmarks = []
             # for key in self.landmark_dims.keys():
@@ -274,7 +299,19 @@ class EfficientConditionEmbedding(nn.Module):
             # DEBUG: Log final combined embeddings variance
             combined_var = combined.var().item()
             output_var = output.var().item()
-            final_output = self.final_norm(output)
+
+            # FIXED NORMALIZATION: Completely skip final norm to preserve audio variance differences
+            # The component-wise norms are sufficient, final norm destroys the variance signal
+            final_output = output  # Skip final normalization entirely
+            logger.info(f"[FIXED NORM] SKIPPING final normalization to preserve variance - Output var: {output_var:.6f}")
+
+            # Alternative: Scale by audio contribution to preserve relative differences
+            # if audio_normalized.var() > 1e-6:
+            #     audio_scale = torch.sqrt(audio_normalized.var() / (output.var() + 1e-8))
+            #     final_output = self.final_norm(output) * (1.0 + audio_scale * 0.5)
+            # else:
+            #     final_output = self.final_norm(output) * 0.5  # Reduce magnitude for silence
+
             final_var = final_output.var().item()
             logger.info(f"[CONDITION DEBUG] Combined variance: {combined_var:.6f}, Output variance: {output_var:.6f}, Final normalized: {final_var:.6f}")
 
@@ -287,8 +324,11 @@ class EfficientConditionEmbedding(nn.Module):
             audio_mag = torch.norm(audio_normalized).item()
             controls_mag = torch.norm(controls_normalized).item()
 
+            # Check if variance preservation is working
+            audio_mean_mag = torch.abs(audio_normalized).mean().item()
+
             logger.info(f"[CONDITION DEBUG] Component contributions - Audio: {audio_contrib:.2%}, Controls: {controls_contrib:.2%}, Blink: {blink_contrib:.2%}")
-            logger.info(f"[CONDITION DEBUG] Component magnitudes - Audio: {audio_mag:.4f}, Controls: {controls_mag:.4f}")
+            logger.info(f"[CONDITION DEBUG] Component magnitudes - Audio L2: {audio_mag:.4f}, Audio mean: {audio_mean_mag:.6f}, Controls: {controls_mag:.4f}")
 
             return final_output
 
@@ -611,6 +651,17 @@ class VASAModel(nn.Module):
         cfg_scales: Optional[Dict[str, float]] = None
     ) -> Dict[str, torch.Tensor]:
         try:
+            # BOOST AUDIO CFG: Use much stronger audio CFG to overcome training issues
+            if cfg_scales is None:
+                cfg_scales = {
+                    'audio': 10.0,  # Further increased from 7.5 to strongly amplify audio
+                    'gaze': 0.5,    # Reduced to minimize control dominance
+                    'head_distance': 0.3,  # Reduced to minimize control dominance
+                    'emotion': 0.2   # Reduced to minimize control dominance
+                }
+            logger.info(f"[CFG SCALES] Using scales - Audio: {cfg_scales.get('audio', 10.0)}, Controls reduced to minimize dominance")
+            logger.info(f"[CFG BOOST] Using enhanced CFG scales: {cfg_scales}")
+
             B = initial_pose['theta'].shape[0]
             total_T = conditions['audio_features'].shape[1]  # Assuming [B, T, D]
             window_size = self.config['motion']['window_size']
@@ -701,8 +752,17 @@ class VASAModel(nn.Module):
                     if cfg_scales:
                         pred_motion = {}
                         for k in cond_motion:
-                            scale = cfg_scales.get(k, 1.0) if isinstance(cfg_scales, dict) else cfg_scales
+                            # Use audio scale for expression (since audio drives expression)
+                            if k == 'expression_embed':
+                                scale = cfg_scales.get('audio', 1.0)
+                            else:
+                                scale = cfg_scales.get(k, 1.0) if isinstance(cfg_scales, dict) else cfg_scales
                             pred_motion[k] = (1 + scale) * cond_motion[k] - scale * uncond_motion[k]
+
+                        # Debug log CFG effect on first timestep
+                        if t == self.scheduler.timesteps[0]:
+                            expr_diff = (pred_motion['expression_embed'] - cond_motion['expression_embed']).abs().mean().item()
+                            logger.info(f"[CFG DEBUG] Audio CFG scale: {cfg_scales.get('audio', 1.0)}, Expression change: {expr_diff:.6f}")
                     else:
                         pred_motion = cond_motion
                     
