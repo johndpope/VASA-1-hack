@@ -961,6 +961,11 @@ class VASATrainer:
                             logger.debug("Added scheduled noise to motion")
 
                             # Extract control signals with dropout during training
+                            # Debug: Check if audio_features exists in window
+                            if 'audio_features' not in window:
+                                logger.error(f"audio_features not in window! Available keys: {list(window.keys())}")
+                                raise ValueError("audio_features missing from window data")
+
                             control_signals = {
                                 'gaze': window.get('gaze'),
                                 'head_distance': window.get('head_distance'),
@@ -975,13 +980,24 @@ class VASATrainer:
                                 'audio_features': window.get('audio_features')
                             }
 
+                            # Debug: Verify audio_features is included
+                            if 'audio_features' not in control_signals or control_signals['audio_features'] is None:
+                                logger.error(f"audio_features is None or missing in control_signals!")
+                                logger.error(f"Window keys: {list(window.keys())}")
+                                logger.error(f"Control signal keys: {list(control_signals.keys())}")
+
                             # Apply control signal dropout
                             if not self.config.train.turn_off_noise:
                                 dropout_probs = self.config.train.dropout_probs
                                 control_signals = self._apply_condition_dropout(
-                                    control_signals, 
+                                    control_signals,
                                     dropout_probs
                                 )
+
+                                # Debug: Check if audio_features survived dropout
+                                if 'audio_features' not in control_signals:
+                                    logger.error(f"audio_features missing after dropout! Keys: {list(control_signals.keys())}")
+                                    raise ValueError("audio_features removed by dropout - this should never happen!")
 
                             # Forward pass with CFG during inference
                             outputs = self.model(
