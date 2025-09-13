@@ -128,7 +128,7 @@ def main():
         batch_sampler=train_sampler,
         collate_fn=collate_fn,
         num_workers=0,  # Set to 0 to avoid CUDA multiprocessing issues
-        pin_memory=True
+        pin_memory=False  # Disabled because tensors are already on GPU
     )
     
     # Create trainer

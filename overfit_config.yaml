@@ -9,7 +9,7 @@ model:
   n_layers: 8                 # Reduced to 1 for ultra-fast training (change to 2 or more for better quality)
   dim_feedforward: 2048
   dropout: 0.1
-  motion_dim: 256
+  motion_dim: 12  # For theta tensor [3, 4] flattened
   # Add these:
   condition_embedding_dim: 512  # Dimension for condition embeddings
   use_prev_motion: true        # Whether to use previous motion context
@@ -24,7 +24,7 @@ diffusion:
   cfg_start_epoch: 0  # When to start using CFG
 
 
-  schedule_mode: 'cosine'  # One of: linear, quadratic, sigmoid, cosine
+  schedule_mode: 'linear'  # Changed from 'cosine' to fix DDIMScheduler error
   schedule_s: 0.008  # Schedule parameters (for cosine schedule)
 
 # Motion generation parameters - SMALLER WINDOWS
@@ -297,3 +297,4 @@ optimization:
   channels_last: true       # Use channels_last memory format
   gradient_checkpointing: false  # Disabled for speed
   sync_batchnorm: false
+  amp: true

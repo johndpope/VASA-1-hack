@@ -949,7 +949,7 @@ class VASATrainer:
                                 t = torch.zeros((B,), dtype=torch.long, device=device)  # OVERFIT t = 0 no noise/minimal perturbation of the input
                             else:
                                 # Sample timestep uniformly
-                                t = torch.randint(0, self.model.num_steps, (B,), device=device)
+                                t = torch.randint(0, self.config.diffusion.num_steps, (B,), device=device)
 
                             # Rest stays the same
                             noise = {k: torch.randn_like(v) for k, v in motion_data.items()}
@@ -2029,14 +2029,20 @@ class VASATrainer:
             return self.val_metrics.get_averages()
             
     def _apply_condition_dropout(
-        self, 
+        self,
         conditions: Dict[str, torch.Tensor],
         dropout_probs: Dict[str, float]
     ) -> Dict[str, torch.Tensor]:
-        """Apply random dropout to conditions based on config probabilities."""
+        """Apply random dropout to conditions based on config probabilities.
+
+        IMPORTANT: audio_features is NEVER dropped as it's required for the model.
+        """
         dropped_conditions = {}
         for k, v in conditions.items():
-            if k in dropout_probs and v is not None:
+            # NEVER drop audio_features - it's required!
+            if k == 'audio_features':
+                dropped_conditions[k] = v
+            elif k in dropout_probs and v is not None:
                 if random.random() < dropout_probs[k]:
                     dropped_conditions[k] = None
                 else:
@@ -2755,7 +2761,7 @@ if __name__ == "__main__":
         batch_sampler=train_sampler,
         collate_fn=collate_fn,
         num_workers=0,  # Set to 0 to avoid CUDA multiprocessing issues
-        pin_memory=True
+        # pin_memory=True
     )
 
     val_loader = DataLoader(
@@ -2763,7 +2769,7 @@ if __name__ == "__main__":
         batch_size=1,  # Use batch size 1 for testing
         shuffle=False,
         num_workers=1,  # Single worker for validation
-        pin_memory=True,  # Pin memory for faster GPU transfer
+        # pin_memory=True,  # Pin memory for faster GPU transfer
         collate_fn=collate_vasa_batch,
         multiprocessing_context='spawn',
         persistent_workers=False,
