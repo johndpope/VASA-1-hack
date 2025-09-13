@@ -21,7 +21,9 @@ from blink_condition_handler import BlinkConditionHandler
 
 class VASAPositionalEmbedding(nn.Module):
     """
-    Positional embeddings for VASA sequence generation with relative position encoding option.
+    Positional embeddings for VASA sequence generation with negative positions for context.
+    Uses negative positions for context frames and positive for current frames to maintain
+    clear temporal distinction.
     """
     def __init__(
         self,
@@ -36,24 +38,16 @@ class VASAPositionalEmbedding(nn.Module):
         self.max_seq_len = max_seq_len
         self.max_context_len = max_context_len
         self.use_relative_position = use_relative_position
-
-        if use_relative_position:
-            # Relative position encoding
-            self.relative_pe = nn.Parameter(torch.randn(max_seq_len + max_context_len, d_model) * 0.02)
-        else:
-            # Standard sinusoidal embeddings
-            pe = torch.zeros(max_seq_len + max_context_len, d_model)
-            position = torch.arange(0, max_seq_len + max_context_len).unsqueeze(1)
-            div_term = torch.exp(
-                torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)
-            )
-            pe[:, 0::2] = torch.sin(position * div_term)
-            pe[:, 1::2] = torch.cos(position * div_term)
-            self.register_buffer('pe', pe.unsqueeze(0))
-
-        self.context_embedding = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
-        self.sequence_embedding = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
         self.dropout = nn.Dropout(dropout)
+
+    def _compute_sinusoidal_embedding(self, positions: torch.Tensor, dim: int) -> torch.Tensor:
+        """Compute sinusoidal positional embeddings for any position values."""
+        half_dim = dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=positions.device) * -emb)
+        emb = positions[:, None] * emb[None, :]
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
 
     def forward(
         self,
@@ -61,20 +55,28 @@ class VASAPositionalEmbedding(nn.Module):
         has_context: bool = False
     ) -> torch.Tensor:
         B, T, D = x.shape
-        if self.use_relative_position:
-            pos_encodings = self.relative_pe[:T].unsqueeze(0)
-        else:
-            pos_encodings = self.pe[:, :T]
+        device = x.device
 
-        if has_context:
-            type_embeddings = torch.cat([
-                self.context_embedding.expand(B, self.max_context_len, D),
-                self.sequence_embedding.expand(B, T - self.max_context_len, D)
-            ], dim=1)
-        else:
-            type_embeddings = self.sequence_embedding.expand(B, T, D)
+        if has_context and T > self.max_context_len:
+            # Use negative positions for context, positive for current
+            context_len = self.max_context_len
+            current_len = T - context_len
 
-        x = x + pos_encodings + type_embeddings
+            # Create position indices: [-context_len, ..., -1, 0, 1, ..., current_len-1]
+            context_positions = torch.arange(-context_len, 0, device=device)
+            current_positions = torch.arange(0, current_len, device=device)
+            all_positions = torch.cat([context_positions, current_positions])
+
+            # Compute sinusoidal embeddings for these positions
+            pos_emb = self._compute_sinusoidal_embedding(all_positions, self.d_model)
+            pos_emb = pos_emb.unsqueeze(0).expand(B, -1, -1)
+        else:
+            # No context, use standard positive positions [0, 1, ..., T-1]
+            positions = torch.arange(0, T, device=device)
+            pos_emb = self._compute_sinusoidal_embedding(positions, self.d_model)
+            pos_emb = pos_emb.unsqueeze(0).expand(B, -1, -1)
+
+        x = x + pos_emb
         return self.dropout(x)
 
 
@@ -91,20 +93,8 @@ class EfficientConditionEmbedding(nn.Module):
 
         self.blink_handler = BlinkConditionHandler(window_size=max_seq_len)
 
-        self.channel_layout = {}
-        curr_idx = 0
-        for key, channel_info in config.channel_layout.items():
-            size = eval(str(channel_info.size)) if isinstance(channel_info.size, str) else channel_info.size
-            self.channel_layout[key] = (curr_idx, curr_idx + size)
-            curr_idx += size
-
-        if curr_idx > self.model_dim:
-            raise ValueError(f"Total feature dimension {curr_idx} exceeds model dimension {self.model_dim}")
-
-        # self.landmark_dims = {
-        #     name: info.points * info.coords
-        #     for name, info in config.landmarks.items()
-        # }
+        # Note: channel_layout from config is not used - features are concatenated directly
+        # The config defines theoretical positions but implementation uses learned projections
 
         self.audio_proj = nn.Sequential(
             nn.Linear(768, config.projections.audio.hidden_dim),
@@ -116,10 +106,7 @@ class EfficientConditionEmbedding(nn.Module):
         self.gaze_proj = nn.Linear(2, 2)
         self.distance_proj = nn.Linear(1, 1)
         self.emotion_proj = nn.Linear(2, 2)
-        # self.speed_proj = nn.Linear(1, 1)  # Removed speed bucket
 
-        # total_landmark_dims = sum(self.landmark_dims.values())
-        # self.landmark_norm = nn.LayerNorm(total_landmark_dims)
         self.audio_norm = nn.LayerNorm(config.projections.audio.output_dim)
         self.control_norm = nn.LayerNorm(config.projections.control_norm_dim)
 
@@ -236,8 +223,8 @@ class EfficientConditionEmbedding(nn.Module):
             audio_var = audio.var().item()
             audio_proj_var = audio_projected.var().item()
             audio_norm_var = audio_normalized.var().item()
-            logger.info(f"[CONDITION DEBUG] Audio variance - Raw: {audio_var:.6f}, Projected: {audio_proj_var:.6f}, Final: {audio_norm_var:.6f}")
-            logger.info(f"[VARIANCE FIX] Raw variance: {audio_raw_var:.6f}, Applied conditional norm: {audio_raw_var > 1e-6}")
+            logger.debug(f" Audio variance - Raw: {audio_var:.6f}, Projected: {audio_proj_var:.6f}, Final: {audio_norm_var:.6f}")
+            logger.debug(f"Raw variance: {audio_raw_var:.6f}, Applied conditional norm: {audio_raw_var > 1e-6}")
 
             # Handle None values from dropout - use zeros as default
             gaze_tensor = conditions.get('gaze')
@@ -261,31 +248,16 @@ class EfficientConditionEmbedding(nn.Module):
                 emotion_tensor = self._ensure_float_tensor(emotion_tensor, dtype)
             emotion = self.emotion_proj(emotion_tensor)
 
-            # Speed bucket removed - was causing dtype issues
-            # speed_tensor = conditions.get('speed_bucket')
-            # if speed_tensor is None:
-            #     speed_tensor = torch.zeros(B, T, 1, device=device, dtype=dtype)
-            # else:
-            #     speed_tensor = self._ensure_float_tensor(speed_tensor, dtype)
-            # speed = self.speed_proj(speed_tensor)
-
             # DEBUG: Log control projections to diagnose dominance issue
-            logger.debug(f"[DEBUG CONTROLS] Gaze shape: {gaze.shape}, Values mean: {gaze.mean().item():.6f}, var: {gaze.var().item():.6f}")
-            logger.debug(f"[DEBUG CONTROLS] Distance shape: {distance.shape}, Values mean: {distance.mean().item():.6f}, var: {distance.var().item():.6f}")
-            logger.debug(f"[DEBUG CONTROLS] Emotion shape: {emotion.shape}, Values mean: {emotion.mean().item():.6f}, var: {emotion.var().item():.6f}")
+            logger.debug(f"Gaze shape: {gaze.shape}, Values mean: {gaze.mean().item():.6f}, var: {gaze.var().item():.6f}")
+            logger.debug(f"Distance shape: {distance.shape}, Values mean: {distance.mean().item():.6f}, var: {distance.var().item():.6f}")
+            logger.debug(f"Emotion shape: {emotion.shape}, Values mean: {emotion.mean().item():.6f}, var: {emotion.var().item():.6f}")
 
             controls = torch.cat([gaze, distance, emotion], dim=-1)  # Removed speed
             controls_normalized = self.control_norm(controls)
 
             # DEBUG: Check if normalization is amplifying controls
-            logger.debug(f"[DEBUG CONTROLS] Pre-norm controls var: {controls.var().item():.6f}, Post-norm var: {controls_normalized.var().item():.6f}")
-
-            # landmarks = []
-            # for key in self.landmark_dims.keys():
-            #     lm = conditions.get(key, torch.zeros(B, T, self.landmark_dims[key], device=device))
-            #     landmarks.append(lm)
-            # landmarks_combined = torch.cat(landmarks, dim=-1)
-            # landmarks_normalized = self.landmark_norm(landmarks_combined)
+            logger.debug(f"Pre-norm controls var: {controls.var().item():.6f}, Post-norm var: {controls_normalized.var().item():.6f}")
 
             # Handle blink_state with None check
             blink_tensor = conditions.get('blink_state')
@@ -293,32 +265,21 @@ class EfficientConditionEmbedding(nn.Module):
                 blink_tensor = torch.zeros(B, T, 3, device=device, dtype=dtype)
             blink_embedded = self.blink_embed(blink_tensor)
 
-            combined = torch.cat([audio_normalized, controls_normalized,  blink_embedded], dim=-1) # landmarks_normalized
+            combined = torch.cat([audio_normalized, controls_normalized,  blink_embedded], dim=-1)
             output[:, :, :combined.shape[-1]] = combined
-
-            # DEBUG: Log final combined embeddings variance
-            combined_var = combined.var().item()
-            output_var = output.var().item()
 
             # FIXED NORMALIZATION: Completely skip final norm to preserve audio variance differences
             # The component-wise norms are sufficient, final norm destroys the variance signal
             final_output = output  # Skip final normalization entirely
-            logger.info(f"[FIXED NORM] SKIPPING final normalization to preserve variance - Output var: {output_var:.6f}")
-
-            # Alternative: Scale by audio contribution to preserve relative differences
-            # if audio_normalized.var() > 1e-6:
-            #     audio_scale = torch.sqrt(audio_normalized.var() / (output.var() + 1e-8))
-            #     final_output = self.final_norm(output) * (1.0 + audio_scale * 0.5)
-            # else:
-            #     final_output = self.final_norm(output) * 0.5  # Reduce magnitude for silence
+            logger.debug(f"SKIPPING final normalization to preserve variance - Output var: {output.var().item():.6f}")
 
             final_var = final_output.var().item()
-            logger.info(f"[CONDITION DEBUG] Combined variance: {combined_var:.6f}, Output variance: {output_var:.6f}, Final normalized: {final_var:.6f}")
+            logger.debug(f" Combined variance: {combined.var().item():.6f}, Output variance: {output.var().item():.6f}, Final normalized: {final_var:.6f}")
 
             # Log individual component contributions and absolute values
-            audio_contrib = audio_normalized.var().item() / (combined_var + 1e-8)
-            controls_contrib = controls_normalized.var().item() / (combined_var + 1e-8)
-            blink_contrib = blink_embedded.var().item() / (combined_var + 1e-8)
+            audio_contrib = audio_normalized.var().item() / (combined.var().item() + 1e-8)
+            controls_contrib = controls_normalized.var().item() / (combined.var().item() + 1e-8)
+            blink_contrib = blink_embedded.var().item() / (combined.var().item() + 1e-8)
 
             # Also log absolute magnitudes to see if audio is being suppressed
             audio_mag = torch.norm(audio_normalized).item()
@@ -327,80 +288,111 @@ class EfficientConditionEmbedding(nn.Module):
             # Check if variance preservation is working
             audio_mean_mag = torch.abs(audio_normalized).mean().item()
 
-            logger.info(f"[CONDITION DEBUG] Component contributions - Audio: {audio_contrib:.2%}, Controls: {controls_contrib:.2%}, Blink: {blink_contrib:.2%}")
-            logger.info(f"[CONDITION DEBUG] Component magnitudes - Audio L2: {audio_mag:.4f}, Audio mean: {audio_mean_mag:.6f}, Controls: {controls_mag:.4f}")
+            logger.debug(f" Component contributions - Audio: {audio_contrib:.2%}, Controls: {controls_contrib:.2%}, Blink: {blink_contrib:.2%}")
+            logger.debug(f" Component magnitudes - Audio L2: {audio_mag:.4f}, Audio mean: {audio_mean_mag:.6f}, Controls: {controls_mag:.4f}")
 
             return final_output
 
         except Exception as e:
             logger.error(f"Error in condition embedding: {str(e)}")
+            logger.error(traceback.format_exc())
             raise
 
-
 class MotionTransformer(nn.Module):
-    """Diffusion Transformer for holistic facial dynamics generation."""
+    """Decoder-based Transformer for motion generation with diffusion."""
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.d_model = config.model.hidden_dim
-        self.num_layers = config.model.n_layers
-        self.num_heads = config.model.n_heads
+        self.expression_dim = config.model.expression_dim
+        self.context_size = config.motion.context_size
+        self.window_size = config.motion.window_size
 
-        self.pos_embed = VASAPositionalEmbedding(
+        # Transformer configuration
+        nhead = config.model.n_heads
+        num_layers = config.model.n_layers
+        dim_feedforward = config.model.dim_feedforward
+        dropout = config.model.dropout
+
+        # Motion embeddings
+        self.theta_emb = nn.Linear(3 * 4, self.d_model // 2)
+        self.expr_emb = nn.Linear(self.expression_dim, self.d_model // 2)
+
+        # Additional motion parameter embeddings
+        self.scale_emb = nn.Linear(3, self.d_model // 4)
+        self.rotation_emb = nn.Linear(3, self.d_model // 4)
+        self.translation_emb = nn.Linear(3, self.d_model // 4)
+
+        # Combine all motion embeddings
+        self.motion_proj = nn.Linear(self.d_model + self.d_model // 4 * 3, self.d_model)
+
+        # Timestep embedding
+        self.time_emb = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model * 4),
+            nn.SiLU(),
+            nn.Linear(self.d_model * 4, self.d_model)
+        )
+
+        # Positional embedding
+        self.pos_emb = VASAPositionalEmbedding(
             d_model=self.d_model,
-            max_seq_len=config.motion.window_size,
-            max_context_len=config.motion.context_size,
-            dropout=config.model.dropout,
-            use_relative_position=config.model.use_relative_position
+            max_seq_len=self.window_size,
+            max_context_len=self.context_size,
+            use_relative_position=config.model.get('use_relative_position', True)
         )
 
-        encoder_layer = nn.TransformerEncoderLayer(
+        # Condition embedding
+        self.cond_emb = EfficientConditionEmbedding(
+            model_dim=self.d_model,
+            max_seq_len=self.window_size + self.context_size
+        )
+
+        # Transformer decoder
+        decoder_layer = nn.TransformerDecoderLayer(
             d_model=self.d_model,
-            nhead=self.num_heads,
-            dim_feedforward=config.model.dim_feedforward,
-            dropout=config.model.dropout
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation=F.gelu,
+            batch_first=True,
+            norm_first=True  # Pre-LN for better stability
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=self.num_layers)
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
 
-        self.noise_embed = nn.Sequential(
-            nn.Linear(1, self.d_model),
-            nn.ReLU(),
-            nn.Linear(self.d_model, self.d_model)
+        # Output heads for all motion parameters
+        self.theta_head = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model // 2),
+            nn.SiLU(),
+            nn.Linear(self.d_model // 2, 3 * 4)
+        )
+        self.expr_head = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model // 2),
+            nn.SiLU(),
+            nn.Linear(self.d_model // 2, self.expression_dim)
+        )
+        self.scale_head = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model // 4),
+            nn.SiLU(),
+            nn.Linear(self.d_model // 4, 3)
+        )
+        self.rotation_head = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model // 4),
+            nn.SiLU(),
+            nn.Linear(self.d_model // 4, 3)
+        )
+        self.translation_head = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model // 4),
+            nn.SiLU(),
+            nn.Linear(self.d_model // 4, 3)
         )
 
-        self.cond_embed = EfficientConditionEmbedding(
-            model_dim=config.model.condition_embedding_dim,
-            max_seq_len=config.motion.window_size + config.motion.context_size
-        )
-
-        # Project motion (all parameters) to d_model dimensions
-        # theta: 12, scale: 3, rotation: 3, translation: 3, expression: 128
-        motion_input_dim = 12 + 3 + 3 + 3 + config.model.expression_dim  # Total: 12+3+3+3+128 = 149
-        self.motion_proj = nn.Linear(motion_input_dim, self.d_model)
-
-        # Log the expected dimensions for debugging
-        logger.info(f"MotionTransformer initialized: motion_input_dim={motion_input_dim}, d_model={self.d_model}")
-
-        # Output projections for all motion parameters
-        self.pose_proj = nn.Linear(self.d_model, 12)  # theta
-        self.scale_proj = nn.Linear(self.d_model, 3)  # scale
-        self.rotation_proj = nn.Linear(self.d_model, 3)  # rotation
-        self.translation_proj = nn.Linear(self.d_model, 3)  # translation
-        self.dyn_proj = nn.Linear(self.d_model, config.model.expression_dim)  # expression
-
-    def _check_and_fix_motion_proj(self):
-        """Check if motion_proj has correct dimensions and reinitialize if needed."""
-        # theta: 12, scale: 3, rotation: 3, translation: 3, expression: 128 = 149 total
-        expected_input_dim = 12 + 3 + 3 + 3 + self.config.model.expression_dim  # 149
-        if hasattr(self, 'motion_proj'):
-            actual_input_dim = self.motion_proj.in_features
-            if actual_input_dim != expected_input_dim:
-                logger.warning(f"motion_proj has wrong input dimension: {actual_input_dim} vs expected {expected_input_dim}")
-                logger.warning("Reinitializing motion_proj with correct dimensions...")
-                self.motion_proj = nn.Linear(expected_input_dim, self.d_model).to(self.motion_proj.weight.device)
-                nn.init.xavier_uniform_(self.motion_proj.weight)
-                if self.motion_proj.bias is not None:
-                    nn.init.zeros_(self.motion_proj.bias)
+    def _get_sinusoidal_embedding(self, ts, dim):
+        half_dim = dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=ts.device) * -emb)
+        emb = ts.unsqueeze(1) * emb.unsqueeze(0)
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
 
     def forward(
         self,
@@ -410,65 +402,128 @@ class MotionTransformer(nn.Module):
         cond_emb: Optional[torch.Tensor] = None,
         prev_context: Optional[Dict[str, torch.Tensor]] = None
     ) -> Dict[str, torch.Tensor]:
-        # Check and fix motion_proj dimensions if needed (for checkpoint compatibility)
-        self._check_and_fix_motion_proj()
-
         B, T = motion_data['theta'].shape[:2]
         device = motion_data['theta'].device
+        C = self.context_size if prev_context is not None else 0
 
-        # Ensure noise_level is float tensor
-        noise_level = noise_level.float() if noise_level.dtype != torch.float32 else noise_level
+        # Embed current motion
+        theta_flat = motion_data['theta'].view(B, T, -1)  # [B, T, 12]
+        expr = motion_data['expression_embed']  # [B, T, expression_dim]
 
-        noise_emb = self.noise_embed(noise_level.unsqueeze(-1)).unsqueeze(1).expand(B, T, -1)
+        # Embed all motion parameters
+        theta_emb = self.theta_emb(theta_flat)
+        expr_emb = self.expr_emb(expr)
 
+        # Handle additional motion parameters
+        scale_emb = self.scale_emb(motion_data.get('scale', torch.zeros(B, T, 3, device=device)))
+        rotation_emb = self.rotation_emb(motion_data.get('rotation', torch.zeros(B, T, 3, device=device)))
+        translation_emb = self.translation_emb(motion_data.get('translation', torch.zeros(B, T, 3, device=device)))
+
+        # Combine all embeddings
+        current_emb = torch.cat([
+            theta_emb, expr_emb, scale_emb, rotation_emb, translation_emb
+        ], dim=-1)
+        current_emb = self.motion_proj(current_emb)  # [B, T, d_model]
+
+        # Handle previous context if provided
+        if prev_context is not None and C > 0:
+            # Embed prev_context
+            prev_theta_flat = prev_context['theta'].view(B, C, -1)
+            prev_expr = prev_context['expression']
+
+            prev_theta_emb = self.theta_emb(prev_theta_flat)
+            prev_expr_emb = self.expr_emb(prev_expr)
+
+            # Get other motion parameters from context if available
+            prev_scale_emb = self.scale_emb(prev_context.get('scale', torch.zeros(B, C, 3, device=device)))
+            prev_rotation_emb = self.rotation_emb(prev_context.get('rotation', torch.zeros(B, C, 3, device=device)))
+            prev_translation_emb = self.translation_emb(prev_context.get('translation', torch.zeros(B, C, 3, device=device)))
+
+            prev_emb = torch.cat([
+                prev_theta_emb, prev_expr_emb, prev_scale_emb, prev_rotation_emb, prev_translation_emb
+            ], dim=-1)
+            prev_emb = self.motion_proj(prev_emb)  # [B, C, d_model]
+
+            # Concatenate context and current
+            tgt = torch.cat([prev_emb, current_emb], dim=1)  # [B, C+T, d_model]
+        else:
+            tgt = current_emb  # [B, T, d_model]
+
+        # Add positional embeddings
+        tgt = self.pos_emb(tgt, has_context=(C > 0))
+
+        # Add timestep embedding
+        time_pe = self._get_sinusoidal_embedding(noise_level, self.d_model)  # [B, d_model]
+        time_emb = self.time_emb(time_pe)  # [B, d_model]
+        tgt = tgt + time_emb.unsqueeze(1)  # Broadcast to all positions
+
+        # Get condition embeddings (memory for decoder)
         if cond_emb is None:
-            cond_emb = self.cond_embed(conditions, prev_context)
+            if conditions is None:
+                raise ValueError("Either conditions or cond_emb must be provided")
 
-        # DEBUG: Log condition embedding influence
-        cond_emb_var = cond_emb.var().item()
-        cond_emb_mean = cond_emb.mean().item()
-        logger.info(f"[TRANSFORMER DEBUG] Condition embedding stats - Mean: {cond_emb_mean:.6f}, Variance: {cond_emb_var:.6f}")
+            # Build full conditions with context if available
+            if prev_context is not None and C > 0:
+                full_conditions = {}
+                prev_audio = prev_context.get('audio', torch.zeros(B, C, 768, device=device))
 
-        # Concatenate all motion parameters, then project to d_model dimensions
-        motion_components = [
-            motion_data['theta'].view(B, T, -1),  # 12 dims
-            motion_data.get('scale', torch.ones(B, T, 3, device=device)),  # 3 dims
-            motion_data.get('rotation', torch.zeros(B, T, 3, device=device)),  # 3 dims
-            motion_data.get('translation', torch.zeros(B, T, 3, device=device)),  # 3 dims
-            motion_data['expression_embed']  # 128 dims
-        ]
-        motion_flat = torch.cat(motion_components, dim=-1)  # Total: 149 dims
-        motion_emb = self.motion_proj(motion_flat)
+                for k, v in conditions.items():
+                    if v is None:
+                        continue
+                    if k == 'audio_features':
+                        full_conditions[k] = torch.cat([prev_audio, v], dim=1)  # [B, C+T, 768]
+                    else:
+                        # Pad other conditions with zeros for context
+                        if isinstance(v, torch.Tensor):
+                            shape = list(v.shape)
+                            shape[1] = C
+                            prev_zeros = torch.zeros(*shape, device=device, dtype=v.dtype)
+                            full_conditions[k] = torch.cat([prev_zeros, v], dim=1)
+                        else:
+                            full_conditions[k] = v
+            else:
+                full_conditions = conditions
 
-        # Now all embeddings have the same dimension (d_model)
-        input_emb = motion_emb + cond_emb + noise_emb
+            cond_emb = self.cond_emb(full_conditions)  # [B, T or C+T, d_model]
 
-        # DEBUG: Log embedding contributions
-        motion_emb_var = motion_emb.var().item()
-        noise_emb_var = noise_emb.var().item()
-        input_emb_var = input_emb.var().item()
-        logger.info(f"[TRANSFORMER DEBUG] Embedding variances - Motion: {motion_emb_var:.6f}, Noise: {noise_emb_var:.6f}, Combined input: {input_emb_var:.6f}")
+        else:
+            # If cond_emb provided but for T, pad with zeros for context
+            if C > 0 and cond_emb.shape[1] == T:
+                prev_cond = torch.zeros(B, C, self.d_model, device=device, dtype=cond_emb.dtype)
+                cond_emb = torch.cat([prev_cond, cond_emb], dim=1)
 
-        has_context = prev_context is not None
-        input_emb = self.pos_embed(input_emb, has_context)
+        # Add positional embeddings to memory as well
+        cond_emb = self.pos_emb(cond_emb, has_context=(C > 0))
 
-        transformer_out = self.transformer(input_emb.transpose(0, 1)).transpose(0, 1)
+        # Log embedding statistics for debugging
+        logger.debug(f" Condition embedding stats - Mean: {cond_emb.mean().item():.6f}, Variance: {cond_emb.var().item():.6f}")
 
-        # DEBUG: Log transformer output variance
-        transformer_out_var = transformer_out.var().item()
-        logger.info(f"[TRANSFORMER DEBUG] Transformer output variance: {transformer_out_var:.6f}")
+        # Apply transformer decoder
+        # tgt: query (motion embeddings)
+        # memory: key/value (condition embeddings)
+        out = self.decoder(tgt=tgt, memory=cond_emb)  # [B, C+T or T, d_model]
 
-        # Generate all motion parameters using dedicated projections
-        outputs = {
-            'theta': self.pose_proj(transformer_out).view(B, T, 3, 4),
-            'scale': self.scale_proj(transformer_out),
-            'rotation': self.rotation_proj(transformer_out),
-            'translation': self.translation_proj(transformer_out),
-            'expression_embed': self.dyn_proj(transformer_out)
+        # Extract only current T frames if we had context
+        if C > 0:
+            out = out[:, C:]  # [B, T, d_model]
+
+        # Log output statistics
+        logger.debug(f" Transformer output variance: {out.var().item():.6f}")
+
+        # Predict outputs (noise predictions for diffusion)
+        theta_pred = self.theta_head(out).view(B, T, 3, 4)
+        expr_pred = self.expr_head(out)
+        scale_pred = self.scale_head(out)
+        rotation_pred = self.rotation_head(out)
+        translation_pred = self.translation_head(out)
+
+        return {
+            'theta': theta_pred,
+            'expression_embed': expr_pred,
+            'scale': scale_pred,
+            'rotation': rotation_pred,
+            'translation': translation_pred
         }
-
-        return outputs
-
 
 class VASAModel(nn.Module):
     def __init__(
@@ -484,32 +539,64 @@ class VASAModel(nn.Module):
             param.requires_grad = False
 
         self.context_size = config.motion.context_size
-
         self.motion_transformer = MotionTransformer(config)
+        self.condition_embedding = self.motion_transformer.cond_emb
+        self.device = device
 
-        expression_dim = config.model.expression_dim
-        self.start_prev_theta = nn.Parameter(torch.randn(1, self.context_size, 3, 4) * 0.01)
-        self.start_prev_expression = nn.Parameter(torch.randn(1, self.context_size, expression_dim) * 0.01)
-
+        # Initialize scheduler
         self.scheduler = DDIMScheduler(
             num_train_timesteps=config.diffusion.num_steps,
+            beta_schedule=config.diffusion.get('schedule_mode', 'linear'),
             beta_start=config.diffusion.beta_start,
             beta_end=config.diffusion.beta_end,
-            clip_sample=True,
-            prediction_type="sample",
-            timestep_spacing="leading"
+            clip_sample=False,
+            set_alpha_to_one=False,
+            steps_offset=1
         )
 
-        self.dropout_probs = config.train.dropout_probs
+        # Initial context parameters
+        self.start_prev_theta = nn.Parameter(torch.zeros(1, config.motion.context_size, 3, 4))
+        self.start_prev_expression = nn.Parameter(torch.zeros(1, config.motion.context_size, config.model.expression_dim))
+        self.start_prev_scale = nn.Parameter(torch.zeros(1, config.motion.context_size, 3))
+        self.start_prev_rotation = nn.Parameter(torch.zeros(1, config.motion.context_size, 3))
+        self.start_prev_translation = nn.Parameter(torch.zeros(1, config.motion.context_size, 3))
 
-    def _apply_dropout(self, conditions: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Apply classifier-free guidance dropout to conditions."""
-        dropped_conditions = conditions.copy()
-        for key, prob in self.dropout_probs.items():
-            if random.random() < prob:
-                if key in dropped_conditions:
-                    dropped_conditions[key] = torch.zeros_like(dropped_conditions[key])
+    def _apply_dropout(self, conditions: Dict[str, torch.Tensor], dropout_probs: Dict[str, float]) -> Dict[str, torch.Tensor]:
+        """Apply dropout to conditions for classifier-free guidance during training."""
+        dropped_conditions = {}
+        for key, value in conditions.items():
+            if key in dropout_probs and random.random() < dropout_probs[key]:
+                dropped_conditions[key] = None
+            else:
+                dropped_conditions[key] = value
         return dropped_conditions
+
+    def _add_noise_to_motion(
+        self,
+        motion_data: Dict[str, torch.Tensor],
+        noise: Dict[str, torch.Tensor],
+        noise_level: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        """Add noise to motion data for diffusion training."""
+        motion_keys = ['theta', 'expression_embed', 'scale', 'rotation', 'translation']
+        noised_motion = {}
+
+        self.scheduler.alphas_cumprod = self.scheduler.alphas_cumprod.to(device=noise_level.device)
+
+        for key, value in motion_data.items():
+            if key in motion_keys and key in noise:
+                if self.config.train.get('turn_off_noise', False):
+                    noised_motion[key] = value
+                else:
+                    noised_motion[key] = self.scheduler.add_noise(
+                        original_samples=value,
+                        noise=noise[key],
+                        timesteps=noise_level
+                    )
+            else:
+                noised_motion[key] = value
+
+        return noised_motion
 
     def forward(
         self,
@@ -520,6 +607,9 @@ class VASAModel(nn.Module):
         prev_context: Optional[Dict[str, torch.Tensor]] = None,
         noise: Optional[Dict[str, torch.Tensor]] = None
     ) -> Dict[str, torch.Tensor]:
+        """Forward pass for training and inference."""
+
+        # Validate and clean motion data
         for key, tensor in motion_data.items():
             if torch.isnan(tensor).any() or torch.isinf(tensor).any():
                 motion_data[key] = torch.nan_to_num(tensor, nan=0.0, posinf=1.0, neginf=-1.0)
@@ -527,8 +617,10 @@ class VASAModel(nn.Module):
         B, T = motion_data['theta'].shape[:2]
         device = motion_data['theta'].device
 
+        # Process conditions
         validated_conditions = {}
         if conditions is not None:
+            # Map landmark names
             landmark_mapping = {
                 'lips_landmarks': 'lips',
                 'right_eye_landmarks': 'right_eye',
@@ -539,11 +631,11 @@ class VASAModel(nn.Module):
             mapped_conditions = {landmark_mapping.get(k, k): v for k, v in conditions.items()}
             conditions = mapped_conditions
 
+            # Expected shapes for validation
             expected_shapes = {
                 'gaze': (B, T, 2),
                 'head_distance': (B, T, 1),
                 'emotion': (B, T, 2),
-                # 'speed_bucket': (B, T, 1),  # Removed speed bucket
                 'lips': (B, T, 20, 3),
                 'right_eye': (B, T, 8, 3),
                 'left_eye': (B, T, 7, 3),
@@ -572,6 +664,7 @@ class VASAModel(nn.Module):
                             tensor = tensor.expand(B, -1, -1)
                     validated_conditions[key] = tensor
 
+            # Add blink state if missing
             if 'blink_state' not in validated_conditions:
                 blink_handler = BlinkConditionHandler(window_size=T)
                 blink_states = blink_handler.generate_blink_sequence(T)
@@ -579,18 +672,23 @@ class VASAModel(nn.Module):
 
             # Apply dropout for classifier-free guidance ONLY during training
             if self.training:
-                validated_conditions = self._apply_dropout(validated_conditions)
+                dropout_probs = self.config.train.get('dropout_probs', {})
+                validated_conditions = self._apply_dropout(validated_conditions, dropout_probs)
             else:
-                # During inference, log that we're NOT applying dropout
                 logger.debug("[INFERENCE] Not applying dropout to conditions")
 
+        # Handle previous context
         if prev_context is None:
             prev_context = {
                 'theta': self.start_prev_theta.repeat(B, 1, 1, 1),
                 'expression': self.start_prev_expression.repeat(B, 1, 1),
+                'scale': self.start_prev_scale.repeat(B, 1, 1),
+                'rotation': self.start_prev_rotation.repeat(B, 1, 1),
+                'translation': self.start_prev_translation.repeat(B, 1, 1),
                 'audio': torch.zeros(B, self.context_size, 768, device=device)
             }
 
+        # Forward through transformer
         outputs = self.motion_transformer(
             motion_data=motion_data,
             noise_level=noise_level,
@@ -599,6 +697,7 @@ class VASAModel(nn.Module):
             prev_context=prev_context
         )
 
+        # Clean outputs
         for key, tensor in outputs.items():
             if torch.isnan(tensor).any():
                 tensor = torch.nan_to_num(tensor, nan=0.0, posinf=10.0, neginf=-10.0)
@@ -607,40 +706,12 @@ class VASAModel(nn.Module):
                 tensor = torch.clamp(tensor, min=-10.0, max=10.0)
                 outputs[key] = tensor
 
+        # Add noise for loss computation if provided
         if noise is not None:
             outputs['noise'] = noise
 
         return outputs
 
-    def _add_noise_to_motion(
-        self,
-        motion_data: Dict[str, torch.Tensor],
-        noise: Dict[str, torch.Tensor],
-        noise_level: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
-        motion_keys = ['theta', 'expression_embed']
-        noised_motion = {}
-        
-        self.scheduler.alphas_cumprod = self.scheduler.alphas_cumprod.to(device=noise_level.device)
-
-        for key, value in motion_data.items():
-            if key in motion_keys:
-                if self.config.train.turn_off_noise:
-                    noised_motion[key] = value
-                else:
-                    noised_motion[key] = self.scheduler.add_noise(
-                        original_samples=value,
-                        noise=noise[key],
-                        timesteps=noise_level
-                    )
-            else:
-                noised_motion[key] = value
-
-        return noised_motion
-
-  
-  
-    
     def generate_sequence(
         self,
         initial_pose: Dict[str, torch.Tensor],
@@ -650,6 +721,7 @@ class VASAModel(nn.Module):
         eta: float = 0.5,
         cfg_scales: Optional[Dict[str, float]] = None
     ) -> Dict[str, torch.Tensor]:
+        """Generate motion sequence using DDIM sampling."""
         try:
             # BOOST AUDIO CFG: Use much stronger audio CFG to overcome training issues
             if cfg_scales is None:
@@ -692,22 +764,33 @@ class VASAModel(nn.Module):
             prev_context = {
                 'theta': self.start_prev_theta.repeat(B, 1, 1, 1),
                 'expression': self.start_prev_expression.repeat(B, 1, 1),
-                'audio': torch.zeros(B, context_size, 768, device=device)  # Assuming 768-dim audio
+                'scale': self.start_prev_scale.repeat(B, 1, 1),
+                'rotation': self.start_prev_rotation.repeat(B, 1, 1),
+                'translation': self.start_prev_translation.repeat(B, 1, 1),
+                'audio': torch.zeros(B, context_size, 768, device=device)
             }
-            
+
             start_idx = 0
             while start_idx < total_T:
                 current_T = min(window_size, total_T - start_idx)
-                
-                # Slice conditions for current window  (only tensors)
-                window_conditions = {k: v[:, start_idx:start_idx + current_T] for k, v in conditions.items() if isinstance(v, torch.Tensor)}
+
+                # Slice conditions for current window (only tensors)
+                window_conditions = {}
+                for k, v in conditions.items():
+                    if isinstance(v, torch.Tensor):
+                        window_conditions[k] = v[:, start_idx:start_idx + current_T]
+                    elif isinstance(v, dict):  # Handle lip_metrics which is a dict
+                        window_conditions[k] = {
+                            sub_k: sub_v[:, start_idx:start_idx + current_T]
+                            for sub_k, sub_v in v.items() if isinstance(sub_v, torch.Tensor)
+                        }
 
                 # DEBUG: Log audio features variance for this window
                 if 'audio_features' in window_conditions:
                     audio_window_var = window_conditions['audio_features'].var().item()
                     audio_window_mean = window_conditions['audio_features'].mean().item()
                     logger.info(f"[GENERATE DEBUG] Window {start_idx//stride}: Audio features - Mean: {audio_window_mean:.6f}, Variance: {audio_window_var:.6f}")
-                
+
                 # Initialize motion with noise for ALL parameters
                 window_motion = {
                     'theta': torch.randn(B, current_T, 3, 4, device=device),
@@ -716,7 +799,7 @@ class VASAModel(nn.Module):
                     'translation': torch.randn(B, current_T, 3, device=device),
                     'expression_embed': torch.randn(B, current_T, self.config.model.expression_dim, device=device)
                 }
-                
+
                 # DDIM sampling loop
                 self.scheduler.set_timesteps(num_steps, device=device)
 
@@ -731,7 +814,10 @@ class VASAModel(nn.Module):
                             if k == 'audio_features':
                                 uncond_conditions[k] = v  # Keep audio features
                             else:
-                                uncond_conditions[k] = torch.zeros_like(v)  # Zero out other conditions
+                                if isinstance(v, torch.Tensor):
+                                    uncond_conditions[k] = torch.zeros_like(v)
+                                elif isinstance(v, dict):  # Handle lip_metrics
+                                    uncond_conditions[k] = {sub_k: torch.zeros_like(sub_v) for sub_k, sub_v in v.items()}
 
                         uncond_motion = self.forward(
                             window_motion,
@@ -752,6 +838,8 @@ class VASAModel(nn.Module):
                     if cfg_scales:
                         pred_motion = {}
                         for k in cond_motion:
+                            if k == 'noise':
+                                continue
                             # Use audio scale for expression (since audio drives expression)
                             if k == 'expression_embed':
                                 scale = cfg_scales.get('audio', 1.0)
@@ -765,7 +853,7 @@ class VASAModel(nn.Module):
                             logger.info(f"[CFG DEBUG] Audio CFG scale: {cfg_scales.get('audio', 1.0)}, Expression change: {expr_diff:.6f}")
                     else:
                         pred_motion = cond_motion
-                    
+
                     # Update motion using DDIM step for each parameter
                     for key in window_motion.keys():
                         if key in pred_motion:
@@ -776,22 +864,27 @@ class VASAModel(nn.Module):
                                 eta=eta
                             )
                             window_motion[key] = scheduler_output.prev_sample
-                
+
                 # Store generated window for ALL parameters
                 for key in full_motion.keys():
                     if key in window_motion:
                         full_motion[key][:, start_idx:start_idx + current_T] = window_motion[key]
-                
+
                 # Update context for next window
                 context_start = max(0, current_T - context_size)
-                prev_context['theta'] = window_motion['theta'][:, context_start:]
-                prev_context['expression'] = window_motion['expression_embed'][:, context_start:]
-                prev_context['audio'] = window_conditions['audio_features'][:, context_start:]
-                
+                prev_context = {
+                    'theta': window_motion['theta'][:, context_start:],
+                    'expression': window_motion['expression_embed'][:, context_start:],
+                    'scale': window_motion['scale'][:, context_start:],
+                    'rotation': window_motion['rotation'][:, context_start:],
+                    'translation': window_motion['translation'][:, context_start:],
+                    'audio': window_conditions['audio_features'][:, context_start:]
+                }
+
                 start_idx += stride
-                
+
             return full_motion
-            
+
         except Exception as e:
             logger.error(f"Error in sequence generation: {str(e)}")
             logger.error(traceback.format_exc())
