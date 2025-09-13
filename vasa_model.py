@@ -93,15 +93,8 @@ class EfficientConditionEmbedding(nn.Module):
 
         self.blink_handler = BlinkConditionHandler(window_size=max_seq_len)
 
-        self.channel_layout = {}
-        curr_idx = 0
-        for key, channel_info in config.channel_layout.items():
-            size = eval(str(channel_info.size)) if isinstance(channel_info.size, str) else channel_info.size
-            self.channel_layout[key] = (curr_idx, curr_idx + size)
-            curr_idx += size
-
-        if curr_idx > self.model_dim:
-            raise ValueError(f"Total feature dimension {curr_idx} exceeds model dimension {self.model_dim}")
+        # Note: channel_layout from config is not used - features are concatenated directly
+        # The config defines theoretical positions but implementation uses learned projections
 
         self.audio_proj = nn.Sequential(
             nn.Linear(768, config.projections.audio.hidden_dim),
@@ -503,7 +496,7 @@ class MotionTransformer(nn.Module):
         cond_emb = self.pos_emb(cond_emb, has_context=(C > 0))
 
         # Log embedding statistics for debugging
-        logger.info(f"[TRANSFORMER DEBUG] Condition embedding stats - Mean: {cond_emb.mean().item():.6f}, Variance: {cond_emb.var().item():.6f}")
+        logger.debug(f" Condition embedding stats - Mean: {cond_emb.mean().item():.6f}, Variance: {cond_emb.var().item():.6f}")
 
         # Apply transformer decoder
         # tgt: query (motion embeddings)
@@ -515,7 +508,7 @@ class MotionTransformer(nn.Module):
             out = out[:, C:]  # [B, T, d_model]
 
         # Log output statistics
-        logger.info(f"[TRANSFORMER DEBUG] Transformer output variance: {out.var().item():.6f}")
+        logger.debug(f" Transformer output variance: {out.var().item():.6f}")
 
         # Predict outputs (noise predictions for diffusion)
         theta_pred = self.theta_head(out).view(B, T, 3, 4)
