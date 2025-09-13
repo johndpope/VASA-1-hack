@@ -113,3 +113,4 @@ face_detection/
 # Task files
 # tasks.json
 # tasks/ 
+training_log.txt

@@ -21,7 +21,8 @@ from typing import Dict, Optional, List
 from collections import defaultdict
 from omegaconf import OmegaConf
 from datetime import datetime
-from vasa_model import VASAModel, MotionSequenceHandler
+from vasa_model import VASAModel
+from motion_sequence_handler import MotionSequenceHandler
 from vasa_losses import VASALossModule
 from tdd_progressive_loss import TDDProgressiveLoss
 import importlib

@@ -59,7 +59,7 @@ train:
   # when to add conditional signals
   control_start_epoch: 0      # Start control immediately for overfitting
 
-  lr: 1e-4 # Further reduced to prevent gradient explosions
+  lr: 5e-5 # Further reduced for stability  
   motion_proj_lr: 0.1 # Reduced motion projection LR multiplier
   expression_lr: 0.1   # Reduced expression LR multiplier 
 
@@ -79,7 +79,7 @@ train:
   beta1: 0.9
   beta2: 0.999
   weight_decay: 0.01
-  max_grad_norm: 1.0
+  max_grad_norm: 0.5  # More aggressive gradient clipping for stability
   save_freq: 5                # Save very frequently to enable recovery from OOM
   
   # Dropout probabilities for CFG - VASA-1 uses different rates for prev_ vs current
@@ -129,8 +129,8 @@ loss:
   lambda_verification: 0
   
   # Foundation losses (always active)
-  lambda_reconstruction: 1.0
-  lambda_dynamics: 10.0       # expression variance (tuned for motion encouragement)
+  lambda_reconstruction: 2.0   # Increased for better reconstruction
+  lambda_dynamics: 1.0         # Reduced from 10.0 to prevent variance collapse
   lambda_pose: 1.0
   
   # Progressive losses (unlock based on thresholds)

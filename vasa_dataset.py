@@ -41,7 +41,7 @@ except ImportError:
 from torchvision.utils import save_image
 from datetime import datetime
 import hashlib
-from vasa_model import BlinkConditionHandler
+from blink_condition_handler import BlinkConditionHandler
 from video_tracker import VideoEventData, VideoEvent, ProblematicVideosTracker
 
 __all__ = ['VASAIntegratedDataset', 'WorkerState','VASADatasetMixin','SpeedEncoder']

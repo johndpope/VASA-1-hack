@@ -162,7 +162,7 @@ def test_data_loading():
     """Test optimized data loading with smaller windows"""
     logger.info("\n=== Testing Data Loading Optimization ===")
     
-    from vasa_model import MotionSequenceHandler
+    from motion_sequence_handler import MotionSequenceHandler
     
     # Original configuration
     original_handler = MotionSequenceHandler(

@@ -6,7 +6,8 @@ import importlib
 from PIL import Image
 import numpy as np
 from torchvision import transforms
-from vasa_model import VASAModel, MotionSequenceHandler
+from vasa_model import VASAModel
+from motion_sequence_handler import MotionSequenceHandler
 import cv2
 import subprocess
 import imageio
