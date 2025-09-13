@@ -70,7 +70,7 @@ train:
     output_projections: 1e-4   # Further reduced for stability
 
   batch_size: 1                # Increased from 16 to maximize 32GB VRAM utilization
-  windows_per_batch: 8         # Number of consecutive windows per sequence (auto-adjusts if too large)
+  windows_per_batch: 32         # Number of consecutive windows per sequence (auto-adjusts if too large)
   gradient_accumulation_steps: 4  # Increase effective batch size to break plateau
   num_epochs: 1000            # Reduced for quick testing
 
@@ -247,7 +247,7 @@ num_workers: 8                # Multi-threading for data loading
 debug: false
 wandb:
   project: "vasa-overfit"
-  enabled: false
+  enabled: true
 
 # Additional components
 face_analysis:

@@ -1,12 +1,12 @@
-# VASA Model Documentation (Updated)
+# VASA Model Documentation (Updated - Decoder Architecture)
 
 ## Overview
-VASA model implementation for holistic facial dynamics generation using diffusion transformers with classifier-free guidance and temporal context handling.
+VASA model implementation for holistic facial dynamics generation using diffusion transformer **decoder** architecture with cross-attention conditioning, classifier-free guidance, and temporal context handling with negative position encoding.
 
 ## Module Structure
 
 ### 1. VASAPositionalEmbedding
-**Purpose**: Positional embeddings for VASA sequence generation with relative position encoding option.
+**Purpose**: Positional embeddings using **negative positions for context frames** to maintain clear temporal distinction between past context and current generation.
 
 ```python
 __init__(
@@ -14,7 +14,7 @@ __init__(
     max_seq_len: int = 50,
     max_context_len: int = 10,
     dropout: float = 0.1,
-    use_relative_position: bool = True
+    use_relative_position: bool = True  # Not used in current implementation
 )
 ```
 
@@ -26,16 +26,28 @@ forward(
 ) -> torch.Tensor  # Shape: [B, T, D]
 ```
 
-**Internal Tensors**:
-- `relative_pe`: Parameter, shape `[max_seq_len + max_context_len, d_model]`
-- `pe`: Buffer (sinusoidal), shape `[1, max_seq_len + max_context_len, d_model]`
-- `context_embedding`: Parameter, shape `[1, 1, d_model]` - marks context frames
-- `sequence_embedding`: Parameter, shape `[1, 1, d_model]` - marks sequence frames
+**Position Encoding Strategy**:
+- **With Context** (T=60 total):
+  - Context frames: 10 frames at positions [-10, -9, ..., -1]
+  - Current frames: 50 frames at positions [0, 1, ..., 49]
+  - Clear semantic: negative = past, positive = current
+- **Without Context** (T=50):
+  - All frames: positions [0, 1, ..., 49]
+
+**Implementation**:
+```python
+if has_context and T > self.max_context_len:
+    # Create position indices: [-context_len, ..., -1, 0, 1, ..., current_len-1]
+    context_positions = torch.arange(-context_len, 0, device=device)
+    current_positions = torch.arange(0, current_len, device=device)
+    all_positions = torch.cat([context_positions, current_positions])
+    pos_emb = self._compute_sinusoidal_embedding(all_positions, self.d_model)
+```
 
 **Shape Assertions**:
 ```python
 assert x.shape == (B, T, d_model)  # Input
-assert output.shape == (B, T, d_model)  # Output
+assert output.shape == (B, T, d_model)  # Output with positions added
 ```
 
 ### 2. EfficientConditionEmbedding
@@ -99,7 +111,7 @@ assert any(tensor is not None and isinstance(tensor, torch.Tensor)
 - Handles dropout-induced None values gracefully
 
 ### 3. MotionTransformer
-**Purpose**: Diffusion Transformer for holistic facial dynamics generation.
+**Purpose**: Diffusion Transformer using **decoder architecture with cross-attention** for superior conditioning.
 
 ```python
 __init__(config)
@@ -109,17 +121,43 @@ __init__(config)
 ```yaml
 model:
   hidden_dim: 512
-  n_layers: 6
+  n_layers: 8  # Decoder layers
   n_heads: 8
   dim_feedforward: 2048
   dropout: 0.1
   use_relative_position: true
   condition_embedding_dim: 512
- 
+
 motion:
   window_size: 50
   context_size: 10
 ```
+
+**Architecture Components**:
+
+1. **Motion Embeddings** (Hierarchical sizing):
+   ```python
+   self.theta_emb = nn.Linear(12, d_model // 2)  # 256D - primary motion
+   self.expr_emb = nn.Linear(expression_dim, d_model // 2)  # 256D - primary
+   self.scale_emb = nn.Linear(3, d_model // 4)  # 128D - auxiliary
+   self.rotation_emb = nn.Linear(3, d_model // 4)  # 128D - auxiliary
+   self.translation_emb = nn.Linear(3, d_model // 4)  # 128D - auxiliary
+   self.motion_proj = nn.Linear(896, d_model)  # Combine all (256+256+128+128+128)
+   ```
+
+2. **Transformer Decoder**:
+   ```python
+   decoder_layer = nn.TransformerDecoderLayer(
+       d_model=self.d_model,
+       nhead=8,
+       dim_feedforward=2048,
+       dropout=0.1,
+       activation=F.gelu,
+       batch_first=True,
+       norm_first=True  # Pre-LN for stability
+   )
+   self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=8)
+   ```
 
 **Forward Method**:
 ```python
@@ -127,45 +165,42 @@ forward(
     motion_data: Dict[str, torch.Tensor],
     noise_level: torch.Tensor,  # Shape: [B]
     conditions: Optional[Dict[str, torch.Tensor]] = None,
-    cond_emb: Optional[torch.Tensor] = None,  # Shape: [B, T, condition_embedding_dim]
+    cond_emb: Optional[torch.Tensor] = None,  # Shape: [B, T, d_model]
     prev_context: Optional[Dict[str, torch.Tensor]] = None
 ) -> Dict[str, torch.Tensor]
 ```
 
-**Input Motion Data**:
+**Cross-Attention Mechanism**:
 ```python
-{
-    'theta': Tensor[B, T, 3, 4],  # Pose parameters
-    'expression_embed': Tensor[B, T, motion_dim]  # Expression embeddings
-}
+# Decoder cross-attention: motion queries attend to condition memory
+out = self.decoder(
+    tgt=tgt,        # Query: motion embeddings [B, C+T, d_model]
+    memory=cond_emb # Key/Value: condition embeddings [B, C+T, d_model]
+)
 ```
 
-**Output Dictionary**:
-```python
-{
-    'theta': Tensor[B, T, 3, 4],
-    'expression_embed': Tensor[B, T, motion_dim],
-    'rotation': Tensor[B, T, 3],  # Mean of theta[:,:,:,:3]
-    'translation': Tensor[B, T, 3],  # theta[:,:,:,3]
-    'scale': Tensor[B, T, 3]  # ones
-}
-```
+**Key Advantages of Decoder Architecture**:
+- **Per-frame conditioning**: Each frame's motion attends to audio/control conditions
+- **Multi-layer attention**: Cross-attention happens at every decoder layer (8x)
+- **Selective focus**: Different motion aspects can attend to relevant conditions
+- **Better audio-motion coupling**: Direct attention from motion to audio features
 
 **Internal Processing Flow**:
-1. Convert noise_level to float tensor if needed
-2. Create noise embedding: `[B, T, d_model]`
-3. Generate condition embedding if not provided
-4. Flatten motion data and combine with embeddings
-5. Apply positional encoding with context awareness
-6. Process through transformer encoder
-7. Project outputs to motion parameters
+1. Embed motion parameters with hierarchical sizing
+2. Add previous context if available
+3. Apply negative position encoding for context frames
+4. Add timestep embedding
+5. Generate condition embeddings (memory)
+6. **Process through decoder with cross-attention** (key difference)
+7. Extract current frames if context was included
+8. Project to output motion parameters
 
 **Shape Assertions**:
 ```python
 assert motion_data['theta'].shape == (B, T, 3, 4)
-assert motion_data['expression_embed'].shape == (B, T, motion_dim)
+assert motion_data['expression_embed'].shape == (B, T, expression_dim)
 assert noise_level.shape == (B,)
-assert transformer_out.shape == (B, T, d_model)
+assert decoder_out.shape == (B, T, d_model)
 ```
 
 ### 4. VASAModel

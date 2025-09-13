@@ -2822,11 +2822,14 @@ if __name__ == "__main__":
 
     # validation_handler = ValidationHandler(config)
 
-    # Load checkpoint if continuing training
-    if hasattr(config.train, 'resume_from') and config.train.resume_from is not None:
-        if config.train.resume_from:  # Checks if empty string            
-            logger.info(f"Resuming training from checkpoint: {config.train.resume_from}")
-            trainer.load_checkpoint(config.train.resume_from)
+    # Load checkpoint if continuing training (check env var first, then config)
+    import os
+    env_resume = os.environ.get('VASA_RESUME_FROM')
+    resume_path = env_resume if env_resume else (config.train.resume_from if hasattr(config.train, 'resume_from') else None)
+
+    if resume_path:  # Checks if not None and not empty string
+        logger.info(f"Resuming training from checkpoint: {resume_path}")
+        trainer.load_checkpoint(resume_path)
 
     if config.train.turn_off_noise:  # Checks if empty string            
         logger.info(f"👹 Config turn_off_noise: {config.train.turn_off_noise}")
