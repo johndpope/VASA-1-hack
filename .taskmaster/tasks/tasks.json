@@ -103,6 +103,27 @@
         "dependencies": [],
         "priority": "high",
         "subtasks": []
+      },
+      {
+        "id": 10,
+        "title": "VASA Audio-to-Video Alignment Test Suite",
+        "description": "Comprehensive testing to align VASA's audio-driven motion generation with volumetric avatar renderer",
+        "details": "Create test suite covering: audio feature extraction alignment, motion latent generation, isolated rendering tests, end-to-end metrics, and disentanglement verification",
+        "testStrategy": "Run tests sequentially starting with simple cases (short neutral audio), use metrics like MSE for features, L2 for motion, SyncNet for lip sync, FVD for video quality",
+        "status": "pending",
+        "dependencies": [],
+        "priority": "medium",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Verify Audio Feature Extraction Alignment",
+            "description": "Test if Wav2Vec2 features match between VASA and baseline pipelines for same audio",
+            "details": "Extract short audio clip, run through both pipelines' audio processors, compute MSE between features. Expected: MSE < 0.01 for aligned features.",
+            "status": "done",
+            "dependencies": [],
+            "parentTaskId": 10
+          }
+        ]
       }
     ],
     "metadata": {
@@ -117,7 +138,7 @@
       },
       "created": "2025-09-09T01:31:02.525Z",
       "description": "Tasks for master context",
-      "updated": "2025-09-11T19:59:32.233Z"
+      "updated": "2025-09-13T10:20:43.438Z"
     }
   }
 }

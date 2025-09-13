@@ -216,6 +216,12 @@ class EfficientConditionEmbedding(nn.Module):
             audio_projected = self.audio_proj(audio)
             audio_normalized = self.audio_norm(audio_projected)
 
+            # DEBUG: Log audio features variance to check if audio is influencing
+            audio_var = audio.var().item()
+            audio_proj_var = audio_projected.var().item()
+            audio_norm_var = audio_normalized.var().item()
+            logger.info(f"[CONDITION DEBUG] Audio variance - Raw: {audio_var:.6f}, Projected: {audio_proj_var:.6f}, Normalized: {audio_norm_var:.6f}")
+
             # Handle None values from dropout - use zeros as default
             gaze_tensor = conditions.get('gaze')
             if gaze_tensor is None:
@@ -265,7 +271,26 @@ class EfficientConditionEmbedding(nn.Module):
             combined = torch.cat([audio_normalized, controls_normalized,  blink_embedded], dim=-1) # landmarks_normalized
             output[:, :, :combined.shape[-1]] = combined
 
-            return self.final_norm(output)
+            # DEBUG: Log final combined embeddings variance
+            combined_var = combined.var().item()
+            output_var = output.var().item()
+            final_output = self.final_norm(output)
+            final_var = final_output.var().item()
+            logger.info(f"[CONDITION DEBUG] Combined variance: {combined_var:.6f}, Output variance: {output_var:.6f}, Final normalized: {final_var:.6f}")
+
+            # Log individual component contributions and absolute values
+            audio_contrib = audio_normalized.var().item() / (combined_var + 1e-8)
+            controls_contrib = controls_normalized.var().item() / (combined_var + 1e-8)
+            blink_contrib = blink_embedded.var().item() / (combined_var + 1e-8)
+
+            # Also log absolute magnitudes to see if audio is being suppressed
+            audio_mag = torch.norm(audio_normalized).item()
+            controls_mag = torch.norm(controls_normalized).item()
+
+            logger.info(f"[CONDITION DEBUG] Component contributions - Audio: {audio_contrib:.2%}, Controls: {controls_contrib:.2%}, Blink: {blink_contrib:.2%}")
+            logger.info(f"[CONDITION DEBUG] Component magnitudes - Audio: {audio_mag:.4f}, Controls: {controls_mag:.4f}")
+
+            return final_output
 
         except Exception as e:
             logger.error(f"Error in condition embedding: {str(e)}")
@@ -359,6 +384,11 @@ class MotionTransformer(nn.Module):
         if cond_emb is None:
             cond_emb = self.cond_embed(conditions, prev_context)
 
+        # DEBUG: Log condition embedding influence
+        cond_emb_var = cond_emb.var().item()
+        cond_emb_mean = cond_emb.mean().item()
+        logger.info(f"[TRANSFORMER DEBUG] Condition embedding stats - Mean: {cond_emb_mean:.6f}, Variance: {cond_emb_var:.6f}")
+
         # Concatenate all motion parameters, then project to d_model dimensions
         motion_components = [
             motion_data['theta'].view(B, T, -1),  # 12 dims
@@ -373,10 +403,20 @@ class MotionTransformer(nn.Module):
         # Now all embeddings have the same dimension (d_model)
         input_emb = motion_emb + cond_emb + noise_emb
 
+        # DEBUG: Log embedding contributions
+        motion_emb_var = motion_emb.var().item()
+        noise_emb_var = noise_emb.var().item()
+        input_emb_var = input_emb.var().item()
+        logger.info(f"[TRANSFORMER DEBUG] Embedding variances - Motion: {motion_emb_var:.6f}, Noise: {noise_emb_var:.6f}, Combined input: {input_emb_var:.6f}")
+
         has_context = prev_context is not None
         input_emb = self.pos_embed(input_emb, has_context)
 
         transformer_out = self.transformer(input_emb.transpose(0, 1)).transpose(0, 1)
+
+        # DEBUG: Log transformer output variance
+        transformer_out_var = transformer_out.var().item()
+        logger.info(f"[TRANSFORMER DEBUG] Transformer output variance: {transformer_out_var:.6f}")
 
         # Generate all motion parameters using dedicated projections
         outputs = {
@@ -497,8 +537,12 @@ class VASAModel(nn.Module):
                 blink_states = blink_handler.generate_blink_sequence(T)
                 validated_conditions['blink_state'] = blink_states.unsqueeze(0).expand(B, -1, -1).to(device)
 
-            # Apply dropout for classifier-free guidance
-            validated_conditions = self._apply_dropout(validated_conditions)
+            # Apply dropout for classifier-free guidance ONLY during training
+            if self.training:
+                validated_conditions = self._apply_dropout(validated_conditions)
+            else:
+                # During inference, log that we're NOT applying dropout
+                logger.debug("[INFERENCE] Not applying dropout to conditions")
 
         if prev_context is None:
             prev_context = {
@@ -606,6 +650,12 @@ class VASAModel(nn.Module):
                 
                 # Slice conditions for current window  (only tensors)
                 window_conditions = {k: v[:, start_idx:start_idx + current_T] for k, v in conditions.items() if isinstance(v, torch.Tensor)}
+
+                # DEBUG: Log audio features variance for this window
+                if 'audio_features' in window_conditions:
+                    audio_window_var = window_conditions['audio_features'].var().item()
+                    audio_window_mean = window_conditions['audio_features'].mean().item()
+                    logger.info(f"[GENERATE DEBUG] Window {start_idx//stride}: Audio features - Mean: {audio_window_mean:.6f}, Variance: {audio_window_var:.6f}")
                 
                 # Initialize motion with noise for ALL parameters
                 window_motion = {

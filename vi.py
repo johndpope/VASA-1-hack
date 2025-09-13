@@ -25,6 +25,10 @@ import torchvision
 import torch.nn as nn
 from repos.MODNet.src.models.modnet import MODNet
 import traceback
+from PIL import Image
+
+
+to_512 = lambda x: x.resize((512, 512), Image.LANCZOS)
 
 class VASAInference:
     def __init__(
@@ -313,8 +317,7 @@ class VASAInference:
         self,
         input_video: str,
         output_path: str,
-        fps: float = 25.0,
-        neutral_expression: bool = True
+        fps: float = 25.0
     ):
         """Generate animated sequence from input video with background preservation."""
         try:
@@ -326,7 +329,10 @@ class VASAInference:
                 )
                 
                 # Load source image
+                
                 source_img = Image.open(source_image_path).convert('RGB')
+                source_img = to_512(source_img)
+
                 source_tensor = self.transform(source_img).unsqueeze(0).to(self.device)
 
                 # Load and process audio first to determine frame count
@@ -334,8 +340,8 @@ class VASAInference:
                 if sr != 16000:
                     resampler = torchaudio.transforms.Resample(sr, 16000)
                     waveform = resampler(waveform)
-                if waveform.shape[0] > 1:
-                    waveform = waveform.mean(dim=0, keepdim=True)
+                # if waveform.shape[0] > 1:
+                #     waveform = waveform.mean(dim=0, keepdim=True)
 
                 # Calculate exact number of frames needed
                 audio_length_seconds = waveform.shape[1] / sr
@@ -837,6 +843,10 @@ class VASAInference:
     def process_audio(self, waveform, sr=16000, fps=25.0):
         """Process audio into windows of features."""
         try:
+            # Ensure waveform is 2D [channels, samples]
+            if waveform.dim() == 1:
+                waveform = waveform.unsqueeze(0)  # Add channel dimension
+
             # Calculate exact audio duration and frame count
             audio_length_seconds = waveform.shape[1] / sr
             target_frames = int(audio_length_seconds * fps)
@@ -1518,7 +1528,7 @@ if __name__ == "__main__":
                         help='Path to config file (default: vasa_config.yaml)')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='Path to checkpoint file (default: auto-detect from config)')
-    parser.add_argument('--input', type=str, default='./junk/11.mp4',
+    parser.add_argument('--input', type=str, default='./junk/7.mp4',
                         help='Input video path')
     parser.add_argument('--output', type=str, default=None,
                         help='Output video path (default: auto-generate)')
@@ -1596,7 +1606,6 @@ if __name__ == "__main__":
             input_video=args.input,
             output_path=args.output,
             fps=args.fps,
-            neutral_expression=args.neutral
         )
 
     # inferencer.visualize_inference_outputs(

@@ -1,0 +1,61 @@
+{
+  "test_1": {
+    "mse": 0.0,
+    "features_shape": [
+      636,
+      768
+    ],
+    "features_stats": {
+      "min": -6.037503719329834,
+      "max": 4.602971076965332,
+      "mean": -0.003101484617218375,
+      "std": 0.32781440019607544
+    }
+  },
+  "test_2": {
+    "theta_variance": 5.2536615839926526e-05,
+    "expression_variance": 0.00012397411046549678,
+    "motion_shapes": {
+      "theta": [
+        1,
+        50,
+        3,
+        4
+      ],
+      "scale": [
+        1,
+        50,
+        3
+      ],
+      "rotation": [
+        1,
+        50,
+        3
+      ],
+      "translation": [
+        1,
+        50,
+        3
+      ],
+      "expression_embed": [
+        1,
+        50,
+        128
+      ]
+    },
+    "audio_responsive": false
+  },
+  "test_3": {
+    "num_frames_rendered": 30,
+    "identity_mse": 0.0,
+    "identity_preserved": true
+  },
+  "test_4": {
+    "status": "failed",
+    "error": "CUDA out of memory. Tried to allocate 80.00 MiB. GPU 0 has a total capacity of 31.35 GiB of which 80.81 MiB is free. Process 4420 has 154.43 MiB memory in use. Process 1304296 has 4.51 GiB memory in use. Including non-PyTorch memory, this process has 24.29 GiB memory in use. Of the allocated memory 23.51 GiB is allocated by PyTorch, and 180.33 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+  },
+  "test_5": {
+    "status": "failed",
+    "error": "CUDA out of memory. Tried to allocate 16.00 MiB. GPU 0 has a total capacity of 31.35 GiB of which 80.81 MiB is free. Process 4420 has 154.43 MiB memory in use. Process 1304296 has 4.51 GiB memory in use. Including non-PyTorch memory, this process has 24.29 GiB memory in use. Of the allocated memory 23.55 GiB is allocated by PyTorch, and 140.33 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+  }
+}

@@ -152,7 +152,7 @@ loss:
   
   # Other losses
   lambda_nonlip: 0.0          # Weight for non-lip facial landmarks
-  lambda_speed: 0
+  lambda_speed: 0.1
   lambda_control: 0.0         # Overall control weight
   lambda_lip: 0.0
   lambda_cfg: 0.5
@@ -167,7 +167,7 @@ loss:
   use_score_matching: true    # Use VASA-1 style clean signal prediction (not noise)
   lambda_consist: 0.0         # Pairwise transfer loss for disentanglement
   lambda_cross_id: 0.0        # Cross-identity similarity loss
-  lambda_velocity: 1.0        # Velocity matching regularization (GREATLY increased to enforce motion)
+  lambda_velocity: 0.5        # Velocity matching regularization (GREATLY increased to enforce motion)
   lambda_smoothness: 0.01     # Acceleration smoothness regularization (increased for temporal consistency)
   
   # Disentanglement loss configuration
