@@ -1317,13 +1317,13 @@ class VASATrainer:
                                                 single_frame_generated = None
                                     
                                     # Pass single frames to thumbnail generator
-                                    # thumbnail = generate_window_thumbnail(
-                                    #     generated_frames=single_frame_generated,  # Just one frame
-                                    #     target_frames=single_frame_target,        # Just one frame
-                                    #     motion_outputs=stored_outputs,            # For motion stats overlay (using stored)
-                                    #     size=(1024, 512)  # Wide format for side-by-side comparison
-                                    # )
-                                    
+                                    thumbnail = generate_window_thumbnail(
+                                        generated_frames=single_frame_generated,  # Just one frame
+                                        target_frames=single_frame_target,        # Just one frame
+                                        motion_outputs=stored_outputs,            # For motion stats overlay (using stored)
+                                        size=(1024, 512)  # Wide format for side-by-side comparison
+                                    )
+
                                     # Log to wandb with more descriptive caption
                                     if thumbnail is not None:
                                         if single_frame_generated is not None:
