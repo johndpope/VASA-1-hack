@@ -355,6 +355,9 @@ class MotionTransformer(nn.Module):
         )
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
 
+        # Residual connection gate for context continuity
+        self.context_residual_gate = nn.Parameter(torch.ones(1) * 0.3)  # Learnable gate
+
         # Output heads for all motion parameters
         self.theta_head = nn.Sequential(
             nn.Linear(self.d_model, self.d_model // 2),
@@ -502,6 +505,20 @@ class MotionTransformer(nn.Module):
         # Extract only current T frames if we had context
         if C > 0:
             out = out[:, C:]  # [B, T, d_model]
+
+            # RESIDUAL CONNECTION: Use last context frame to guide generation
+            # This helps maintain continuity from context to generated frames
+            last_context_frame = prev_emb[:, -1:, :]  # [B, 1, d_model]
+
+            # Create a smooth transition by blending context influence
+            # Stronger influence at the beginning, weaker towards the end
+            gate_value = torch.sigmoid(self.context_residual_gate)  # Apply sigmoid for 0-1 range
+            blend_weights = torch.linspace(gate_value.item(), 0.0, T, device=device).view(1, T, 1)
+            context_residual = last_context_frame * blend_weights  # [B, T, d_model]
+
+            # Add residual connection to decoder output
+            out = out + context_residual
+            logger.debug(f"[RESIDUAL] Added context residual with gate={gate_value.item():.3f}, blend weights from {gate_value.item():.3f} to 0.0")
 
         # Log output statistics
         logger.debug(f" Transformer output variance: {out.var().item():.6f}")
