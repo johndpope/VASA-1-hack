@@ -622,7 +622,8 @@ class VASAModel(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """Forward pass for training and inference."""
 
-        # Validate and clean motion data
+        # Validate and clean motion data - CREATE A COPY to avoid modifying original
+        motion_data = {k: v.clone() for k, v in motion_data.items()}  # Clone to avoid modifying dataset
         for key, tensor in motion_data.items():
             if torch.isnan(tensor).any() or torch.isinf(tensor).any():
                 motion_data[key] = torch.nan_to_num(tensor, nan=0.0, posinf=1.0, neginf=-1.0)
