@@ -71,8 +71,10 @@ def main():
     logger.info("Initializing VASA model...")
     model = VASAModel(config, volumetric_avatar)
     
-    # Load checkpoint if resuming
-    resume_path = config.train.get('resume_from')
+    # Load checkpoint if resuming (check env var first, then config)
+    import os
+    env_resume = os.environ.get('VASA_RESUME_FROM')
+    resume_path = env_resume if env_resume else config.train.get('resume_from')
     start_epoch = 0
     if resume_path and Path(resume_path).exists():
         checkpoint_path = Path(resume_path)

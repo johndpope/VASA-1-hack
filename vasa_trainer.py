@@ -1234,11 +1234,13 @@ class VASATrainer:
                             if self.config.wandb.enabled and self.accelerator.is_local_main_process:
                                 # Convert grad_norm to scalar if it's a tensor
                                 grad_norm_value = 0.0
-                                if 'grad_norm' in locals():
+                                if 'grad_norm' in locals() and grad_norm is not None:
                                     if isinstance(grad_norm, torch.Tensor):
                                         grad_norm_value = grad_norm.item()
-                                    else:
+                                    elif grad_norm is not None:
                                         grad_norm_value = float(grad_norm)
+                                else:
+                                    grad_norm_value = 0.0  # Default if grad_norm not yet computed
                                 
                                 # Debug: Log what's in metrics
                                 if batch_idx == 0 and window_idx == 0:
@@ -1315,13 +1317,13 @@ class VASATrainer:
                                                 single_frame_generated = None
                                     
                                     # Pass single frames to thumbnail generator
-                                    # thumbnail = generate_window_thumbnail(
-                                    #     generated_frames=single_frame_generated,  # Just one frame
-                                    #     target_frames=single_frame_target,        # Just one frame
-                                    #     motion_outputs=stored_outputs,            # For motion stats overlay (using stored)
-                                    #     size=(1024, 512)  # Wide format for side-by-side comparison
-                                    # )
-                                    
+                                    thumbnail = generate_window_thumbnail(
+                                        generated_frames=single_frame_generated,  # Just one frame
+                                        target_frames=single_frame_target,        # Just one frame
+                                        motion_outputs=stored_outputs,            # For motion stats overlay (using stored)
+                                        size=(1024, 512)  # Wide format for side-by-side comparison
+                                    )
+
                                     # Log to wandb with more descriptive caption
                                     if thumbnail is not None:
                                         if single_frame_generated is not None:
@@ -2822,11 +2824,14 @@ if __name__ == "__main__":
 
     # validation_handler = ValidationHandler(config)
 
-    # Load checkpoint if continuing training
-    if hasattr(config.train, 'resume_from') and config.train.resume_from is not None:
-        if config.train.resume_from:  # Checks if empty string            
-            logger.info(f"Resuming training from checkpoint: {config.train.resume_from}")
-            trainer.load_checkpoint(config.train.resume_from)
+    # Load checkpoint if continuing training (check env var first, then config)
+    import os
+    env_resume = os.environ.get('VASA_RESUME_FROM')
+    resume_path = env_resume if env_resume else (config.train.resume_from if hasattr(config.train, 'resume_from') else None)
+
+    if resume_path:  # Checks if not None and not empty string
+        logger.info(f"Resuming training from checkpoint: {resume_path}")
+        trainer.load_checkpoint(resume_path)
 
     if config.train.turn_off_noise:  # Checks if empty string            
         logger.info(f"👹 Config turn_off_noise: {config.train.turn_off_noise}")

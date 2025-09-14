@@ -1166,6 +1166,19 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     for k, v in outputs.items()
                 }
 
+                # DEBUG: Check expression variation
+                expr_tensor = outputs['expression_embed']  # [1, T, 128]
+                expr_flat = expr_tensor.squeeze(0)  # [T, 128]
+                frame_diff = torch.diff(expr_flat, dim=0)  # [T-1, 128]
+                diff_norm = torch.norm(frame_diff, dim=-1)  # [T-1]
+                is_constant = torch.allclose(expr_flat[0], expr_flat, atol=1e-5)
+
+                logger.info(f"[EXPRESSION DEBUG] Shape: {expr_tensor.shape}")
+                logger.info(f"[EXPRESSION DEBUG] Constant across frames? {is_constant}")
+                logger.info(f"[EXPRESSION DEBUG] Frame-to-frame diff - Mean: {diff_norm.mean():.6f}, Max: {diff_norm.max():.6f}")
+                logger.info(f"[EXPRESSION DEBUG] First frame values (first 5): {expr_flat[0, :5].tolist()}")
+                logger.info(f"[EXPRESSION DEBUG] Last frame values (first 5): {expr_flat[-1, :5].tolist()}")
+
                 # Verify final output shapes
                 logger.debug("\nFinal output shapes:")
                 expected_shapes = {

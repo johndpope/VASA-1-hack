@@ -41,25 +41,42 @@ echo ""
 echo "Select training mode:"
 echo "1) Train from scratch"
 echo "2) Resume from checkpoint"
-echo "3) Fine-tune from checkpoint"
+echo "3) Fine-tune from checkpoint (not implemented yet)"
 echo ""
 read -p "Enter your choice (1-3): " mode_choice
 
+# Determine checkpoint directory based on config
+if [ "$CONFIG_FILE" == "overfit_config.yaml" ]; then
+    CHECKPOINT_DIR="checkpoints_overfit"
+else
+    CHECKPOINT_DIR="checkpoints"
+fi
+
 case $mode_choice in
     1)
-        RESUME_FLAG=""
+        RESUME_PATH=""
         echo "Training from scratch..."
         ;;
     2)
-        RESUME_FLAG="--resume"
-        echo "Resuming from checkpoint..."
+        # Look for the best checkpoint
+        if [ -f "$CHECKPOINT_DIR/best_checkpoint.pt" ]; then
+            RESUME_PATH="$CHECKPOINT_DIR/best_checkpoint.pt"
+            echo "Found checkpoint: $RESUME_PATH"
+        elif [ -f "$CHECKPOINT_DIR/latest_checkpoint.pt" ]; then
+            RESUME_PATH="$CHECKPOINT_DIR/latest_checkpoint.pt"
+            echo "Found checkpoint: $RESUME_PATH"
+        else
+            echo "No checkpoint found in $CHECKPOINT_DIR/"
+            read -p "Enter checkpoint path manually (or press Enter to train from scratch): " RESUME_PATH
+        fi
         ;;
     3)
-        RESUME_FLAG="--resume --reset-optimizer"
-        echo "Fine-tuning from checkpoint (reset optimizer)..."
+        echo "Fine-tuning with optimizer reset not implemented yet."
+        echo "Please manually edit the training script if needed."
+        RESUME_PATH=""
         ;;
     *)
-        RESUME_FLAG=""
+        RESUME_PATH=""
         echo "Defaulting to train from scratch..."
         ;;
 esac
@@ -133,11 +150,18 @@ else
     COMMAND="python vasa_trainer.py --config $CONFIG_FILE"
 fi
 
-# Note: Resume is handled via config file's resume_from field
-# Debug and fast modes would need to be implemented in the training scripts
+# If resume path is set, we need to temporarily modify the config
+# or pass it as an environment variable
+if [ ! -z "$RESUME_PATH" ]; then
+    export VASA_RESUME_FROM="$RESUME_PATH"
+    echo "Resume checkpoint set to: $RESUME_PATH"
+fi
 
 # Show the command being run
 echo "Running: $COMMAND"
+if [ ! -z "$RESUME_PATH" ]; then
+    echo "  with VASA_RESUME_FROM=$RESUME_PATH"
+fi
 echo ""
 
 # Execute the training
