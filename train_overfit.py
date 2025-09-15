@@ -93,6 +93,7 @@ def main():
     
     # Create data loader
     logger.info("Creating data loader...")
+    use_single_bucket = config.dataset.get('use_single_bucket', True)  # Default to single-bucket
     train_dataset = VASAIntegratedDataset(
         video_folder=config.paths.video_folder,
         emo_model=volumetric_avatar,
@@ -106,8 +107,17 @@ def main():
         preextract_audio=config.dataset.preextract_audio,
         max_videos=config.dataset.max_videos,
         cache_dir=config.paths.cache_dir,
-        device=config.device
+        device=config.device,
+        use_single_bucket=use_single_bucket
     )
+
+    # Check if single-bucket cache exists, preprocess if needed
+    if use_single_bucket and hasattr(train_dataset.cache, 'has_cache'):
+        if not train_dataset.cache.has_cache():
+            logger.info("Single-bucket cache not found. Consider running preprocess_single_bucket.py first.")
+        else:
+            cache_info = train_dataset.cache.get_cache_info()
+            logger.info(f"Using single-bucket cache: {cache_info['num_windows']} windows, {cache_info['file_size_mb']:.1f} MB")
     
     # Create custom sampler for maintaining window sequences
     # Use windows_per_batch from config if available, otherwise default to 4

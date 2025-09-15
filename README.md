@@ -165,7 +165,22 @@ Expected output:
 
 ### Training Modes
 
-#### 1. **Vanilla Training** (Full Dataset)
+#### 1. **Quick Start - Overfitting Test** (Recommended First)
+Test your setup and verify model can train properly:
+
+```bash
+# Run overfitting test with optimized settings
+python train_overfit.py
+```
+
+This uses `overfit_config.yaml` with:
+- Single-bucket caching for fast data loading
+- Face attribute caching (gaze, emotion, head_distance)
+- Optimized batch sizes and learning rates
+- WandB integration for monitoring
+- Automatic checkpoint resumption
+
+#### 2. **Vanilla Training** (Full Dataset)
 Use the standard configuration for training on your complete dataset:
 
 ```bash
@@ -183,11 +198,11 @@ python vasa_trainer.py --config vasa_config.yaml
 - `batch_size: 1` - Adjust based on GPU memory
 - `num_epochs: 4000` - Full training schedule
 
-#### 2. **Overfitting Training** (Fast Convergence Testing)
-Use the overfitting configuration for rapid testing and debugging:
+#### 3. **Advanced Overfitting** (With Custom Config)
+Use the overfitting configuration via vasa_trainer:
 
 ```bash
-# Use the overfitting configuration
+# Use the overfitting configuration with vasa_trainer
 python vasa_trainer.py --config overfit_config.yaml
 ```
 
@@ -207,6 +222,29 @@ python vasa_trainer.py --config overfit_config.yaml
 - Verifying data loading and caching
 - Quick convergence tests
 - Checking if model can overfit to small dataset (sanity check)
+
+### Data Preprocessing (Optional but Recommended)
+
+For faster training, preprocess all windows into a single cache file:
+
+```bash
+# Preprocess data for overfitting test (small dataset)
+python preprocess_single_bucket.py --max_videos 100 --cache_dir cache_overfit
+
+# Preprocess full dataset
+python preprocess_single_bucket.py --max_videos 1000 --cache_dir cache_full
+```
+
+Benefits of single-bucket caching:
+- **10x faster data loading** - Direct index access to any window
+- **Face attributes cached** - Gaze, emotion, head_distance pre-computed
+- **Better shuffling** - Perfect for random sampling
+- **Memory efficient** - One H5 file instead of many
+- **Self-contained windows** - Context is cached, no video dependencies
+
+The cache will be automatically used if:
+1. `use_single_bucket: true` in your config file
+2. The cache file exists in the specified `cache_dir`
 
 ### Monitoring Training
 

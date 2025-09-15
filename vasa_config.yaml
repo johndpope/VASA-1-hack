@@ -233,6 +233,7 @@ dataset:
   max_sequence_samples: 500   # Limit samples per epoch
   use_identity_image: false   # Set to true to use high-quality identity image
   identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image
+  use_single_bucket: false     # Set to true to use single-bucket caching (recommended after preprocessing)
   augmentation:
     enabled: false             # Disable augmentation initially for stability
     flip_prob: 0.5

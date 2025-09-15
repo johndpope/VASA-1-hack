@@ -2740,6 +2740,7 @@ if __name__ == "__main__":
     torch.cuda.empty_cache()
 
     # Create dataset with volumetric model
+    use_single_bucket = config.dataset.get('use_single_bucket', False)  # Get from config
     full_dataset = VASAIntegratedDataset(
         # video_folder="/media/oem/12TB/Downloads/CelebV-HQ/celebvhq/35666/", #ovs-GiY_848_1
         video_folder=config.paths.video_folder,
@@ -2753,8 +2754,17 @@ if __name__ == "__main__":
         cache_audio=True,
         preextract_audio=True,
         random_seed=42,
-        cache_dir=config.paths.get('cache_dir', 'cache')  # Use config cache dir
+        cache_dir=config.paths.get('cache_dir', 'cache'),  # Use config cache dir
+        use_single_bucket=use_single_bucket  # Pass single-bucket flag
     )
+
+    # Check if single-bucket cache exists
+    if use_single_bucket and hasattr(full_dataset.cache, 'has_cache'):
+        if not full_dataset.cache.has_cache():
+            logger.info("Single-bucket cache not found. Consider running preprocess_single_bucket.py first.")
+        else:
+            cache_info = full_dataset.cache.get_cache_info()
+            logger.info(f"Using single-bucket cache: {cache_info['num_windows']} windows, {cache_info['file_size_mb']:.1f} MB")
 
     # Print dataset stats
     logger.info(f"Dataset created:")

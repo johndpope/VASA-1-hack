@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 import torchaudio
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Tuple, Optional, List, Any
 import numpy as np
 import cv2
 import os
@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 import subprocess
 import random
+import h5py
+import hashlib
 from transformers import Wav2Vec2Model, Wav2Vec2Processor
 from insightface.app import FaceAnalysis
 from hsemotion_onnx.facial_emotions import HSEmotionRecognizer
@@ -42,6 +44,15 @@ except ImportError:
     ChunkedWindowCache = None
     USE_CHUNKED_CACHE = False
     logger.info("ChunkedWindowCache not available, using built-in cache")
+
+try:
+    from single_bucket_cache import SingleBucketCache
+    USE_SINGLE_BUCKET = True
+    logger.info("SingleBucketCache available for single-file caching")
+except ImportError:
+    SingleBucketCache = None
+    USE_SINGLE_BUCKET = False
+    logger.info("SingleBucketCache not available")
 from torchvision.utils import save_image
 from datetime import datetime
 import hashlib
@@ -498,6 +509,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         random_seed: int = 42,
         device: str = 'cuda',
         cache_dir: Optional[str] = 'cache',
+        use_single_bucket: bool = True,  # New parameter for single-bucket caching
     ):
         VASADatasetMixin.__init__(self)
         
@@ -517,8 +529,24 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         # Initialize LipStateAnalyzer for lip metrics computation
         self.lip_analyzer = LipStateAnalyzer()
 
-        # Use chunked cache if available for flexible window support
-        if USE_CHUNKED_CACHE and ChunkedWindowCache:
+        # Set cache directory
+        self.cache_dir = Path(cache_dir) if cache_dir else Path(video_folder) / "cache"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.use_single_bucket = use_single_bucket
+
+        # Choose cache implementation based on preference
+        if use_single_bucket and USE_SINGLE_BUCKET and SingleBucketCache:
+            # Use single-bucket cache for all windows
+            self.cache = SingleBucketCache(
+                cache_dir=self.cache_dir,
+                cache_name="all_windows_cache.h5",
+                compression='gzip',
+                compression_level=4
+            )
+            self.cache_type = 'single_bucket'
+            logger.info(f"Using SingleBucketCache at {self.cache_dir}/all_windows_cache.h5")
+        elif USE_CHUNKED_CACHE and ChunkedWindowCache:
+            # Use chunked cache for flexible window support
             cache_path = Path(cache_dir) if cache_dir else Path(video_folder) / "window_cache_chunked"
             self.cache = ChunkedWindowCache(
                 cache_dir=cache_path,
@@ -526,10 +554,12 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 overlap_size=50,  # 50 frame overlap for context
                 max_memory_cache=5  # Keep 5 chunks in memory
             )
+            self.cache_type = 'chunked'
             logger.info(f"Initialized ChunkedWindowCache at {cache_path}")
         else:
             # Fallback to built-in cache
             self.cache = WindowCache(Path(video_folder) / "window_cache")
+            self.cache_type = 'built_in'
             logger.info("Using built-in WindowCache")
 
         self.blink_handler = BlinkConditionHandler(window_size=sequence_length)
@@ -1333,8 +1363,112 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         """Public method to get audio path for testing"""
         if not self.audio_status.get(video_path, False):
             return None
-            
+
         return str(self._get_audio_path(video_path))
+
+    def _get_face_cache_path(self, video_path: str) -> Path:
+        """Get the path for cached face attributes"""
+        video_hash = hashlib.md5(str(video_path).encode()).hexdigest()
+        return self.cache_dir / f"face_attrs_{video_hash}.h5"
+
+    def _load_cached_window(self, video_path: str, window_idx: int) -> Optional[Dict[str, torch.Tensor]]:
+        """Load cached window data including face attributes"""
+        cache_path = self._get_face_cache_path(video_path)
+        if not cache_path.exists():
+            return None
+
+        try:
+            with h5py.File(cache_path, 'r') as f:
+                window_key = f"window_{window_idx}"
+                if window_key not in f:
+                    return None
+
+                window_group = f[window_key]
+
+                # Load all cached data
+                cached_data = {}
+                for key in window_group.keys():
+                    if key == 'metadata':
+                        # Handle metadata specially
+                        cached_data['metadata'] = {
+                            'video_path': window_group['metadata'].attrs['video_path'],
+                            'start_frame': window_group['metadata'].attrs['start_frame'],
+                            'fps': window_group['metadata'].attrs['fps'],
+                            'has_context': window_group['metadata'].attrs['has_context']
+                        }
+                    elif key == 'lip_metrics':
+                        # Handle nested lip_metrics
+                        cached_data['lip_metrics'] = {}
+                        for metric_key in window_group['lip_metrics'].keys():
+                            cached_data['lip_metrics'][metric_key] = torch.tensor(
+                                window_group['lip_metrics'][metric_key][()],
+                                dtype=torch.float32
+                            )
+                    else:
+                        # Load tensor data
+                        data = window_group[key][()]
+                        if key in ['speed_bucket']:
+                            cached_data[key] = torch.tensor(data, dtype=torch.long)
+                        else:
+                            cached_data[key] = torch.tensor(data, dtype=torch.float32)
+
+                return cached_data
+
+        except Exception as e:
+            logger.warning(f"Failed to load cached window: {str(e)}")
+            return None
+
+    def _save_window_to_cache(self, video_path: str, window_idx: int, window_data: Dict[str, Any]):
+        """Save window data including face attributes to cache"""
+        cache_path = self._get_face_cache_path(video_path)
+
+        # Debug: Log what we're trying to save
+        logger.info(f"Saving window {window_idx} to cache with keys: {list(window_data.keys())}")
+        if 'gaze' in window_data:
+            logger.info(f"  - gaze shape: {window_data['gaze'].shape}")
+        if 'emotion' in window_data:
+            logger.info(f"  - emotion shape: {window_data['emotion'].shape}")
+        if 'head_distance' in window_data:
+            logger.info(f"  - head_distance shape: {window_data['head_distance'].shape}")
+
+        try:
+            # Open in append mode to add new windows
+            mode = 'a' if cache_path.exists() else 'w'
+            with h5py.File(cache_path, mode) as f:
+                window_key = f"window_{window_idx}"
+
+                # Remove existing window if it exists
+                if window_key in f:
+                    del f[window_key]
+
+                window_group = f.create_group(window_key)
+
+                # Save all window data
+                for key, value in window_data.items():
+                    if key == 'metadata':
+                        # Save metadata as attributes
+                        meta_group = window_group.create_group('metadata')
+                        for meta_key, meta_value in value.items():
+                            meta_group.attrs[meta_key] = meta_value
+                    elif key == 'lip_metrics':
+                        # Save nested lip_metrics
+                        lip_group = window_group.create_group('lip_metrics')
+                        for metric_key, metric_value in value.items():
+                            if isinstance(metric_value, torch.Tensor):
+                                lip_group.create_dataset(metric_key, data=metric_value.cpu().numpy())
+                            else:
+                                lip_group.create_dataset(metric_key, data=metric_value)
+                    else:
+                        # Save tensor data
+                        if isinstance(value, torch.Tensor):
+                            window_group.create_dataset(key, data=value.cpu().numpy())
+                        elif isinstance(value, np.ndarray):
+                            window_group.create_dataset(key, data=value)
+                        else:
+                            window_group.create_dataset(key, data=value)
+
+        except Exception as e:
+            logger.error(f"Failed to save window to cache: {str(e)}")
 
     def _extract_audio(self, video_path: str, audio_path: Path) -> None:
         """Extract audio from video file using ffmpeg"""
@@ -1640,7 +1774,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     frame = (frame * 255).clip(0, 255).astype(np.uint8)
                 else:
                     frame = frame.clip(0, 255).astype(np.uint8)
-                    
+
             # Handle different color channel arrangements
             if len(frame.shape) == 2:  # Grayscale
                 frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
@@ -1649,13 +1783,21 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
                 elif frame.shape[2] == 3:  # Assume BGR if not explicitly RGB
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    
+
             # Get image dimensions
             height, width = frame.shape[:2]
-            
-            # Get face landmarks
-            results = self.face_mesh.process(frame)
-            
+
+            # Get face landmarks with protobuf error handling
+            try:
+                results = self.face_mesh.process(frame)
+            except (AttributeError, TypeError) as e:
+                if "SymbolDatabase" in str(e) or "GetPrototype" in str(e):
+                    # Protobuf compatibility issue - return None to skip this frame
+                    logger.error(f"MediaPipe protobuf issue for {video_path}: {str(e)}")
+                    return None
+                else:
+                    raise
+
             if not results.multi_face_landmarks:
                 # Get video path from filename if part of error context
                 logger.error(f"frame.shape: {frame.shape}")
@@ -2265,9 +2407,17 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             # logger.debug(f"Processing window {idx} from video: {video_path}")
             
             # Check if we have cached data for this specific window
-            cache_key = f"{video_path}_window_{window['window_idx']}"
-            if hasattr(self.cache, 'has_window_cache') and self.cache.has_window_cache(cache_key):
-                return self.cache.load_window(cache_key)
+            if self.cache_type == 'single_bucket':
+                # For single-bucket cache, load by index directly
+                cached_data = self.cache.load_window(idx)
+                if cached_data is not None:
+                    return cached_data
+            else:
+                # For per-video caching
+                cache_key = f"{video_path}_window_{window['window_idx']}"
+                cached_data = self._load_cached_window(video_path, window['window_idx'])
+                if cached_data is not None:
+                    return cached_data
             
             # Process the single window
             try:
@@ -2449,6 +2599,10 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                             # Create correct shape with zeros
                             window_data[key] = torch.zeros(expected_shape, dtype=torch.float32)
                     
+                    # Save to cache before returning
+                    logger.info(f"About to save window {window['window_idx']} with {len(window_data)} keys")
+                    self._save_window_to_cache(video_path, window['window_idx'], window_data)
+
                     # Return the single window data directly
                     return window_data
 
@@ -2464,6 +2618,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
         except Exception as e:
             logger.error(f"Error in __getitem__: {str(e)}")
+            import traceback
             logger.error(traceback.format_exc())
             return self._get_zero_sample()
 
