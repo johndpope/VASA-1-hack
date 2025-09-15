@@ -46,6 +46,7 @@ pip install facenet-pytorch insightface hsemotion-onnx
 pip install mediapipe OmegaConf wandb
 pip install l2cs memory-profiler rich
 pip install diffusers h5py scikit-learn seaborn python_speech_features
+pip install onnxruntime-gpu
 
 # EMOPortaits
 cd nemo
