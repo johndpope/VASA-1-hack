@@ -38,7 +38,7 @@ pip install transformers diffusers accelerate
 pip install facenet-pytorch insightface hsemotion-onnx
 pip install mediapipe 
 pip install l2cs memory-profiler rich
-
+pip install diffusers h5py
 
 # EMOPortaits
 cd nemo
