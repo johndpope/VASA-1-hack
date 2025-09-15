@@ -25,12 +25,19 @@ git submodule update --init --recursive
 ###  Prerequisites
 
 ```bash
+
+mkdir -p ~/miniconda3
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh
+chmod +x ~/miniconda.sh
+~/miniconda.sh
+# carefully accept - type yes - 
+
 # Create conda environment
-conda create -n vasa python=3.10
+conda create -n vasa python=3.12
 conda activate vasa
 
 # Install PyTorch (adjust for your CUDA version)
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129
 
 # Install required packages
 pip install omegaconf wandb opencv-python pillow scipy matplotlib tqdm
