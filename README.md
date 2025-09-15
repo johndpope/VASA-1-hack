@@ -49,7 +49,8 @@ pip install diffusers h5py
 
 # EMOPortaits
 cd nemo
-bootstrap.sh
+chmod +x ./bootstrap.sh
+./bootstrap.sh
 
 ```
 
