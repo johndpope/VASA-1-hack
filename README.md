@@ -43,7 +43,7 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 pip install omegaconf wandb opencv-python pillow scipy matplotlib tqdm
 pip install transformers diffusers accelerate
 pip install facenet-pytorch insightface hsemotion-onnx
-pip install mediapipe 
+pip install mediapipe OmegaConf wandb
 pip install l2cs memory-profiler rich
 pip install diffusers h5py
 
