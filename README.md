@@ -64,6 +64,9 @@ ln -s nemo/repos repos
 
 # Create symlink for data directory (required for aligned keypoints)
 ln -s nemo/data data
+
+# Create symlink for losses directory (required for loss model weights)
+ln -s nemo/losses losses
 ```
 
 4. **Download pre-trained volumetric avatar model:**

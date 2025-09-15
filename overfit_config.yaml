@@ -246,7 +246,7 @@ seed: 42
 num_workers: 8                # Multi-threading for data loading
 debug: false
 wandb:
-  project: "vasa-overfit"
+  project: "vasa-overfit-hp"
   enabled: true
 
 # Additional components
