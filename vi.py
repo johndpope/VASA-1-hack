@@ -370,7 +370,7 @@ class VASAInference:
                 logger.info("Extracting background...")
                 modnet = MODNet(backbone_pretrained=False)
                 modnet = nn.DataParallel(modnet).cuda() if torch.cuda.is_available() else modnet
-                modnet.load_state_dict(torch.load('repos/MODNet/pretrained/modnet_photographic_portrait_matting.ckpt', map_location=self.device))
+                modnet.load_state_dict(torch.load('repos/MODNet/pretrained/modnet_photographic_portrait_matting.ckpt', map_location=self.device, weights_only=False))
                 modnet.eval()
                 modnet = modnet.to(self.device)
 
