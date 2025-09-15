@@ -69,8 +69,8 @@ train:
     transformer_late: 1e-4  # Further reduced for stability
     output_projections: 1e-4   # Further reduced for stability
 
-  batch_size: 1                # Increased from 16 to maximize 32GB VRAM utilization
-  windows_per_batch: 32         # Number of consecutive windows per sequence (auto-adjusts if too large)
+  batch_size: 2               # Increased from 16 to maximize 32GB VRAM utilization
+  windows_per_batch: 28         # Number of consecutive windows per sequence (auto-adjusts if too large)
   gradient_accumulation_steps: 4  # Increase effective batch size to break plateau
   num_epochs: 1000            # Reduced for quick testing
 

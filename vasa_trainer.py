@@ -1218,8 +1218,11 @@ class VASATrainer:
                             # Store outputs needed for thumbnail before cleanup (every batch for first window)
                             stored_outputs = None
                             if 'outputs' in locals() and window_idx == 0:  # Generate thumbnail for every batch's first window
-                                stored_outputs = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v 
+                                stored_outputs = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v
                                                 for k, v in outputs.items()}
+                                # Add gaze from control signals for visualization
+                                if 'control_signals' in locals() and control_signals.get('gaze') is not None:
+                                    stored_outputs['gaze'] = control_signals['gaze'].detach().cpu() if isinstance(control_signals['gaze'], torch.Tensor) else control_signals['gaze']
                             
                             # Clear intermediate tensors to prevent memory buildup
                             del losses

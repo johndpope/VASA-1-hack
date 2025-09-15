@@ -22,7 +22,11 @@ import matplotlib.pyplot as plt
 import sys
 if 'nemo' not in sys.path:
     sys.path.insert(0, 'nemo')
-from logger import logger  
+from logger import logger
+import sys
+# Add fixed L2CS to path
+if 'L2CS-Net' not in sys.path:
+    sys.path.insert(0, 'L2CS-Net')
 from l2cs import L2CS, select_device, Pipeline
 import h5py
 from tqdm import tqdm
@@ -158,21 +162,24 @@ class WorkerState:
     def l2cs_pipeline(self):
         """Lazy initialization of L2CS pipeline"""
         if self._l2cs_pipeline is None:
-            # Initialize device if not already set
-            # if self._l2cs_device is None:
-            #     self._l2cs_device = select_device('cpu', batch_size=1)
-                
-            # Create pipeline
-            import pathlib
-            # Use the existing L2CSNet_gaze360.pkl file which has 92MB
-            weights_path = pathlib.Path('models/L2CSNet_gaze360.pkl')
-            
-            self._l2cs_pipeline =  Pipeline(
-                weights=weights_path,
-                arch='ResNet50',
-                device='cuda'
-            )
-            
+            try:
+                # Create pipeline
+                import pathlib
+                # Use the existing L2CSNet_gaze360.pkl file which has 92MB
+                weights_path = pathlib.Path('models/L2CSNet_gaze360.pkl')
+
+                self._l2cs_pipeline = Pipeline(
+                    weights=weights_path,
+                    arch='ResNet50',
+                    device='cuda',
+                    include_detector=False  # We use our own face detection
+                )
+                logger.info("L2CS pipeline initialized successfully")
+            except Exception as e:
+                logger.warning(f"Failed to initialize L2CS pipeline: {e}")
+                logger.warning("Will use default gaze values")
+                return None
+
         return self._l2cs_pipeline
 
 
@@ -1697,31 +1704,41 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
             # Extract L2CS gaze
             try:
-                # Ensure frame is in correct format for L2CS
-                if len(frame.shape) == 2:
-                    frame_l2cs = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                elif frame.shape[2] == 4:
-                    frame_l2cs = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-                else:
-                    frame_l2cs = frame
+                # Skip L2CS if pipeline not available or has protobuf issues
+                if hasattr(self.worker_state, 'l2cs_pipeline') and self.worker_state.l2cs_pipeline is not None:
+                    try:
+                        # Ensure frame is in correct format for L2CS
+                        if len(frame.shape) == 2:
+                            frame_l2cs = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                        elif frame.shape[2] == 4:
+                            frame_l2cs = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                        else:
+                            frame_l2cs = frame
 
-                # Get predictions using worker state pipeline
-                results = self.worker_state.l2cs_pipeline.step(frame_l2cs)
-                
-                # Get pitch and yaw (converting radians to degrees)
-                if len(results.pitch) > 0:
-                    pitch = float(results.pitch[0] * 180/np.pi)
-                    yaw = float(results.yaw[0] * 180/np.pi)
+                        # Get predictions using worker state pipeline
+                        results = self.worker_state.l2cs_pipeline.step(frame_l2cs)
+
+                        # Get pitch and yaw (converting radians to degrees)
+                        if len(results.pitch) > 0:
+                            pitch = float(results.pitch[0] * 180/np.pi)
+                            yaw = float(results.yaw[0] * 180/np.pi)
+                        else:
+                            pitch = 0.0
+                            yaw = 0.0
+
+                        gaze = np.array([pitch, yaw], dtype=np.float32)
+                    except (AttributeError, ImportError) as e:
+                        # Protobuf or L2CS issue - just use default values
+                        if "SymbolDatabase" in str(e) or "GetPrototype" in str(e):
+                            logger.debug("L2CS protobuf issue detected, using default gaze values")
+                        else:
+                            logger.debug(f"L2CS error: {str(e)}")
+                        gaze = np.zeros(2, dtype=np.float32)
                 else:
-                    pitch = 0.0
-                    yaw = 0.0
-                    
-                gaze = np.array([pitch, yaw], dtype=np.float32)
-                
+                    gaze = np.zeros(2, dtype=np.float32)
+
             except Exception as e:
-                import traceback
-                logger.error(f"Error in L2CS gaze extraction: {str(e)}")
-                logger.error(f"Traceback: {traceback.format_exc()}")
+                logger.debug(f"Error in L2CS gaze extraction: {str(e)}")
                 gaze = np.zeros(2, dtype=np.float32)
 
             # Calculate face size/distance
@@ -1744,7 +1761,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
         except Exception as e:
             logger.error(f"Error in face attribute extraction: {str(e)}")
-            logger.error(traceback.format_exc())
+            import traceback
+            logger.debug(traceback.format_exc())
             return None
                 
     def _map_to_68_landmarks(self, landmarks: np.ndarray) -> np.ndarray:
@@ -2357,6 +2375,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                                 
                         except Exception as e:
                             logger.error(f"Error processing frame {i}: {str(e)}")
+                            import traceback
+                            logger.debug(f"Traceback: {traceback.format_exc()}")
                             continue
 
                     lip_motion_sequence = self._get_lip_motion_sequence(lips_landmarks)

@@ -137,6 +137,42 @@ def create_debug_thumbnail(
             if isinstance(gaze, np.ndarray):
                 if gaze.shape == (2,):
                     indicators.append(f"Gaze: [{float(gaze[0]):.2f}, {float(gaze[1]):.2f}]")
+
+                    # Draw gaze arrows on the image
+                    # Assuming gaze[0] is pitch (vertical) and gaze[1] is yaw (horizontal)
+                    # Convert from radians to pixel coordinates
+                    img_height, img_width = generated_frame.shape[:2]
+
+                    # Estimate eye positions (typical face proportions)
+                    # Left eye at ~0.35 width, right eye at ~0.65 width, both at ~0.4 height
+                    left_eye_x = int(0.35 * img_width)
+                    right_eye_x = int(0.65 * img_width)
+                    eye_y = int(0.4 * img_height)
+
+                    # Convert gaze angles to arrow endpoints
+                    # Scale factor for arrow length
+                    arrow_length = img_width * 0.15
+
+                    # Calculate arrow direction from gaze angles
+                    # gaze[1] is yaw (horizontal), gaze[0] is pitch (vertical)
+                    dx = np.sin(gaze[1]) * arrow_length
+                    dy = -np.sin(gaze[0]) * arrow_length  # Negative because image y-axis is inverted
+
+                    # Draw arrows for both eyes
+                    for eye_x in [left_eye_x, right_eye_x]:
+                        # Starting point (eye position)
+                        start_x = eye_x / img_width
+                        start_y = eye_y / img_height
+
+                        # End point based on gaze direction
+                        end_x = (eye_x + dx) / img_width
+                        end_y = (eye_y + dy) / img_height
+
+                        # Draw arrow using matplotlib annotation
+                        ax.annotate('', xy=(end_x, end_y), xytext=(start_x, start_y),
+                                  xycoords='axes fraction', textcoords='axes fraction',
+                                  arrowprops=dict(arrowstyle='->', color='red', lw=2,
+                                                shrinkA=0, shrinkB=0))
                 else:
                     indicators.append(f"Gaze: {float(gaze.mean()):.2f}")
         
