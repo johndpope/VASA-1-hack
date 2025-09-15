@@ -44,7 +44,7 @@ pip install omegaconf wandb opencv-python-headless pillow scipy matplotlib tqdm
 pip install transformers diffusers accelerate einops
 pip install facenet-pytorch insightface hsemotion-onnx
 pip install mediapipe OmegaConf wandb
-pip install l2cs memory-profiler rich
+pip install git+https://github.com/Ahmednull/L2CS-Net.git memory-profiler rich
 pip install diffusers h5py scikit-learn seaborn python_speech_features
 pip install onnxruntime-gpu
 
