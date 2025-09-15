@@ -163,13 +163,21 @@ def create_window_sequence_collate_fn(context_size: int = 10):
     def collate_fn(batch: List[dict]) -> dict:
         """
         Custom collate that maintains window sequences and adds prev_context.
-        
+
         Args:
             batch: List of window dictionaries
-            
+
         Returns:
             Batched dictionary with prev_context added
         """
+        # Filter out None values from problematic videos
+        batch = [b for b in batch if b is not None]
+
+        # If all windows were None, return None
+        if not batch:
+            logger.warning("All windows in batch were None, skipping batch")
+            return None
+
         # Sort batch by video path and window index to ensure correct order
         batch_sorted = sorted(batch, key=lambda x: (
             x['metadata']['video_path'],

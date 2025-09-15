@@ -2,3 +2,9 @@
 	path = nemo
 	url = https://github.com/johndpope/nemo.git
 	branch = main
+[submodule "L2CS-Net"]
+	path = L2CS-Net
+	url = https://github.com/johndpope/L2CS-Net.git
+[submodule "face-detection"]
+	path = face-detection
+	url = https://github.com/ibug-group/face_detection.git
