@@ -61,6 +61,9 @@ chmod +x ./bootstrap.sh
 ```bash
 # Create symlink for repos (required for relative paths)
 ln -s nemo/repos repos
+
+# Create symlink for data directory (required for aligned keypoints)
+ln -s nemo/data data
 ```
 
 4. **Download pre-trained volumetric avatar model:**
