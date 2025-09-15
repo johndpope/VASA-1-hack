@@ -40,12 +40,12 @@ conda activate vasa
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129
 
 # Install required packages
-pip install omegaconf wandb opencv-python pillow scipy matplotlib tqdm
-pip install transformers diffusers accelerate
+pip install omegaconf wandb opencv-python-headless pillow scipy matplotlib tqdm
+pip install transformers diffusers accelerate einops
 pip install facenet-pytorch insightface hsemotion-onnx
 pip install mediapipe OmegaConf wandb
 pip install l2cs memory-profiler rich
-pip install diffusers h5py
+pip install diffusers h5py scikit-learn seaborn python_speech_features
 
 # EMOPortaits
 cd nemo
