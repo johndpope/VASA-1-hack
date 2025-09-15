@@ -273,9 +273,15 @@ class EfficientConditionEmbedding(nn.Module):
             logger.debug(f" Combined variance: {combined.var().item():.6f}, Output variance: {output.var().item():.6f}, Final normalized: {final_var:.6f}")
 
             # Log individual component contributions and absolute values
-            audio_contrib = audio_features.var().item() / (combined.var().item() + 1e-8)
-            controls_contrib = controls_features.var().item() / (combined.var().item() + 1e-8)
-            blink_contrib = blink_embedded.var().item() / (combined.var().item() + 1e-8)
+            # Calculate proper variance contributions (sum of individual variances)
+            audio_var = audio_features.var().item()
+            controls_var = controls_features.var().item()
+            blink_var = blink_embedded.var().item()
+            total_var = audio_var + controls_var + blink_var + 1e-8
+
+            audio_contrib = audio_var / total_var
+            controls_contrib = controls_var / total_var
+            blink_contrib = blink_var / total_var
 
             # Also log absolute magnitudes to see if audio is being suppressed
             audio_mag = torch.norm(audio_features).item()

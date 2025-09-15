@@ -1422,15 +1422,6 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         """Save window data including face attributes to cache"""
         cache_path = self._get_face_cache_path(video_path)
 
-        # Debug: Log what we're trying to save
-        logger.info(f"Saving window {window_idx} to cache with keys: {list(window_data.keys())}")
-        if 'gaze' in window_data:
-            logger.info(f"  - gaze shape: {window_data['gaze'].shape}")
-        if 'emotion' in window_data:
-            logger.info(f"  - emotion shape: {window_data['emotion'].shape}")
-        if 'head_distance' in window_data:
-            logger.info(f"  - head_distance shape: {window_data['head_distance'].shape}")
-
         try:
             # Open in append mode to add new windows
             mode = 'a' if cache_path.exists() else 'w'
@@ -1536,7 +1527,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Extract both whisper/wav2vec and MFCC audio features."""
         try:
-            logger.debug(f"Starting audio feature extraction for {video_path}")
+            video_name = Path(video_path).name
+            logger.debug(f"Starting audio feature extraction for video: {video_name}")
             logger.debug(f"Processing window: start_time={start_time:.2f}s, duration={duration:.2f}s")
             logger.debug(f"Using Whisper: {use_whisper}")
 
@@ -2600,8 +2592,9 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                             window_data[key] = torch.zeros(expected_shape, dtype=torch.float32)
                     
                     # Save to cache before returning
-                    logger.info(f"About to save window {window['window_idx']} with {len(window_data)} keys")
-                    self._save_window_to_cache(video_path, window['window_idx'], window_data)
+                    # Only save to per-video cache if not using single-bucket
+                    if self.cache_type != 'single_bucket':
+                        self._save_window_to_cache(video_path, window['window_idx'], window_data)
 
                     # Return the single window data directly
                     return window_data
