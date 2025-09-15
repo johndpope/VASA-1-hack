@@ -2450,9 +2450,9 @@ class VASATrainer:
                     plt.close(fig_diff)
                     
                     # Add audio-to-expression visualization if audio features are available
-                    if 'audio_features' in batch:
+                    if 'audio_features' in targets:
                         fig_audio_expr = create_audio_expression_visualization(
-                            audio_features=batch['audio_features'][0],  # First batch item
+                            audio_features=targets['audio_features'][0],  # First batch item
                             target_expression=targets['expression_embed'][0],
                             predicted_expression=outputs['expression_embed'][0],
                             window_idx=step // 100,

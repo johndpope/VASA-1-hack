@@ -547,7 +547,8 @@ class VASAModel(nn.Module):
             beta_end=config.diffusion.beta_end,
             clip_sample=False,
             set_alpha_to_one=False,
-            steps_offset=1
+            steps_offset=1,
+            prediction_type="sample"
         )
 
         # Initial context parameters
