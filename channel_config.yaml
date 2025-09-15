@@ -8,7 +8,7 @@ model:
 dimensions:
   prev_expression: 64
   prev_audio: 64
-  audio_features: 512  # Aligned with JoyVASA's feature_dim
+  audio_features: 475  # Adjusted to fit within channel layout
 
 landmarks:
   lips:
@@ -28,58 +28,31 @@ landmarks:
     coords: 3
 
 channel_layout:
-  # Previous context will be handled directly through transformer attention,
-  # not compressed into the condition embedding
-  
-  # Current window conditions  
+  # Dedicated channels for each condition type
+  # Total must not exceed model_dim (512)
+
+  # Current window conditions
   audio_features:
-    size: ${dimensions.audio_features}
-    description: "Current audio features"
-    
+    size: 475  # Reduced to leave room for other features (512 - 37 = 475)
+    description: "Current audio features from wav2vec (projected)"
+
   gaze:
     size: 2  # pitch and yaw
     description: "Gaze direction angles"
-    
+
   head_distance:
     size: 1
     description: "Head distance from camera"
-    
+
   emotion:
     size: 2  # valence and arousal
     description: "Emotion parameters"
-    
-  speed_bucket:
-    size: 1
-    description: "Motion speed category"
-    
-  # Landmark features
-  lips:
-    size: ${landmarks.lips.points}*${landmarks.lips.coords}
-    description: "Lip landmark coordinates"
-    
-  right_eye:
-    size: ${landmarks.right_eye.points}*${landmarks.right_eye.coords}
-    description: "Right eye landmark coordinates"
-    
-  left_eye:
-    size: ${landmarks.left_eye.points}*${landmarks.left_eye.coords}
-    description: "Left eye landmark coordinates"
-    
-  jaw:
-    size: ${landmarks.jaw.points}*${landmarks.jaw.coords}
-    description: "Jaw landmark coordinates"
-    
-  nose:
-    size: ${landmarks.nose.points}*${landmarks.nose.coords}
-    description: "Nose landmark coordinates"
-    
+
   blink_state:
     size: 32
     description: "Blink state embedding"
-    
-  padding:
-    size: 149
-    description: "Padding to match model_dim (512 - 363 = 149)"
+
+  # Total: 475 + 2 + 1 + 2 + 32 = 512 (exactly fits model_dim)
 
 # Audio model dimensions 
 audio_models:

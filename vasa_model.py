@@ -93,8 +93,19 @@ class EfficientConditionEmbedding(nn.Module):
 
         self.blink_handler = BlinkConditionHandler(window_size=max_seq_len)
 
-        # Note: channel_layout from config is not used - features are concatenated directly
-        # The config defines theoretical positions but implementation uses learned projections
+        # Build channel layout from config for dedicated channel allocation
+        self.channel_layout = {}
+        curr_idx = 0
+        for key, channel_info in config.channel_layout.items():
+            size = eval(str(channel_info.size)) if isinstance(channel_info.size, str) else channel_info.size
+            self.channel_layout[key] = (curr_idx, curr_idx + size)
+            curr_idx += size
+            logger.debug(f"Channel '{key}': indices [{self.channel_layout[key][0]}:{self.channel_layout[key][1]}], size={size}")
+
+        if curr_idx > self.model_dim:
+            raise ValueError(f"Total feature dimension {curr_idx} exceeds model dimension {self.model_dim}")
+
+        logger.info(f"Channel layout initialized: total channels used = {curr_idx}/{self.model_dim}")
 
         # Audio projection - aligned with JoyVASA (single linear layer, no normalization)
         # JoyVASA uses a single Linear layer: self.audio_feature_map = nn.Linear(768, feature_dim)
@@ -116,11 +127,10 @@ class EfficientConditionEmbedding(nn.Module):
         )
 
         # Final projection to combine all features into model_dim
-        # Audio (512) + Controls (5) + Blink (32) = 549 -> 512
-        total_features = config.projections.audio.output_dim + 5 + config.projections.blink.output_dim
-        self.final_proj = nn.Linear(total_features, model_dim)
-
-        self.final_norm = nn.LayerNorm(model_dim)
+        # With channel-based approach, no final projection needed
+        # Each feature is placed in its dedicated channel position
+        # Total channel allocation is validated in __init__ to not exceed model_dim
+        self.final_norm = nn.LayerNorm(model_dim)  # Optional normalization, currently not used
 
     def load_channel_config(self, config_path: str) -> OmegaConf:
         try:
@@ -208,17 +218,29 @@ class EfficientConditionEmbedding(nn.Module):
             # This preserves the variance signal that distinguishes silent vs speech
             audio_projected = self.audio_proj(audio)
 
-            # No normalization - keep raw projected features
-            # This aligns with JoyVASA's audio_feature_map approach
-            audio_features = audio_projected  # Use projected features directly
+            # Place audio features in dedicated channels
+            if 'audio_features' in self.channel_layout:
+                start_idx, end_idx = self.channel_layout['audio_features']
+                # Ensure audio features match expected channel size
+                expected_size = end_idx - start_idx
+                if audio_projected.shape[-1] != expected_size:
+                    logger.warning(f"Audio features size mismatch: {audio_projected.shape[-1]} vs expected {expected_size}")
+                    # Pad or truncate to fit
+                    if audio_projected.shape[-1] < expected_size:
+                        padding = torch.zeros(B, T, expected_size - audio_projected.shape[-1], device=device, dtype=dtype)
+                        audio_projected = torch.cat([audio_projected, padding], dim=-1)
+                    else:
+                        audio_projected = audio_projected[:, :, :expected_size]
+                output[:, :, start_idx:end_idx] = audio_projected
+                logger.debug(f"Placed audio features in channels [{start_idx}:{end_idx}]")
 
             # DEBUG: Log audio features variance to verify preservation
             audio_var = audio.var().item()
             audio_proj_var = audio_projected.var().item()
-            logger.debug(f"[JOYVASA ALIGNED] Audio variance - Raw: {audio_var:.6f}, Projected: {audio_proj_var:.6f}")
-            logger.debug(f"Preserving full variance signal without normalization")
+            logger.debug(f"[CHANNEL-BASED] Audio variance - Raw: {audio_var:.6f}, Projected: {audio_proj_var:.6f}")
+            logger.debug(f"Using dedicated channels for audio features")
 
-            # Handle None values from dropout - use zeros as default
+            # Handle gaze features
             gaze_tensor = conditions.get('gaze')
             if gaze_tensor is None:
                 gaze_tensor = torch.zeros(B, T, 2, device=device, dtype=dtype)
@@ -226,6 +248,12 @@ class EfficientConditionEmbedding(nn.Module):
                 gaze_tensor = self._ensure_float_tensor(gaze_tensor, dtype)
             gaze = self.gaze_proj(gaze_tensor)
 
+            if 'gaze' in self.channel_layout:
+                start_idx, end_idx = self.channel_layout['gaze']
+                output[:, :, start_idx:end_idx] = gaze
+                logger.debug(f"Placed gaze in channels [{start_idx}:{end_idx}]")
+
+            # Handle head distance
             distance_tensor = conditions.get('head_distance')
             if distance_tensor is None:
                 distance_tensor = torch.zeros(B, T, 1, device=device, dtype=dtype)
@@ -233,6 +261,12 @@ class EfficientConditionEmbedding(nn.Module):
                 distance_tensor = self._ensure_float_tensor(distance_tensor, dtype)
             distance = self.distance_proj(distance_tensor)
 
+            if 'head_distance' in self.channel_layout:
+                start_idx, end_idx = self.channel_layout['head_distance']
+                output[:, :, start_idx:end_idx] = distance
+                logger.debug(f"Placed head_distance in channels [{start_idx}:{end_idx}]")
+
+            # Handle emotion
             emotion_tensor = conditions.get('emotion')
             if emotion_tensor is None:
                 emotion_tensor = torch.zeros(B, T, 2, device=device, dtype=dtype)
@@ -240,52 +274,68 @@ class EfficientConditionEmbedding(nn.Module):
                 emotion_tensor = self._ensure_float_tensor(emotion_tensor, dtype)
             emotion = self.emotion_proj(emotion_tensor)
 
-            # DEBUG: Log control projections to diagnose dominance issue
-            logger.debug(f"Gaze shape: {gaze.shape}, Values mean: {gaze.mean().item():.6f}, var: {gaze.var().item():.6f}")
-            logger.debug(f"Distance shape: {distance.shape}, Values mean: {distance.mean().item():.6f}, var: {distance.var().item():.6f}")
-            logger.debug(f"Emotion shape: {emotion.shape}, Values mean: {emotion.mean().item():.6f}, var: {emotion.var().item():.6f}")
+            if 'emotion' in self.channel_layout:
+                start_idx, end_idx = self.channel_layout['emotion']
+                output[:, :, start_idx:end_idx] = emotion
+                logger.debug(f"Placed emotion in channels [{start_idx}:{end_idx}]")
 
-            controls = torch.cat([gaze, distance, emotion], dim=-1)  # Removed speed
-            # JoyVASA approach: No normalization to preserve variance
-            controls_features = controls  # Use raw control features
-
-            # DEBUG: Check variance preservation
-            logger.debug(f"Controls variance (no norm): {controls.var().item():.6f}")
-
-            # Handle blink_state with None check
+            # Handle blink state
             blink_tensor = conditions.get('blink_state')
             if blink_tensor is None:
                 blink_tensor = torch.zeros(B, T, 3, device=device, dtype=dtype)
             blink_embedded = self.blink_embed(blink_tensor)
 
-            combined = torch.cat([audio_features, controls_features,  blink_embedded], dim=-1)
+            if 'blink_state' in self.channel_layout:
+                start_idx, end_idx = self.channel_layout['blink_state']
+                # Ensure blink features match expected size
+                expected_size = end_idx - start_idx
+                if blink_embedded.shape[-1] != expected_size:
+                    if blink_embedded.shape[-1] < expected_size:
+                        padding = torch.zeros(B, T, expected_size - blink_embedded.shape[-1], device=device, dtype=dtype)
+                        blink_embedded = torch.cat([blink_embedded, padding], dim=-1)
+                    else:
+                        blink_embedded = blink_embedded[:, :, :expected_size]
+                output[:, :, start_idx:end_idx] = blink_embedded
+                logger.debug(f"Placed blink_state in channels [{start_idx}:{end_idx}]")
 
-            # Project combined features to model dimension
-            # This maintains variance while fitting into model_dim
-            projected = self.final_proj(combined)
-            output = projected  # Direct assignment, shape is now [B, T, model_dim]
+            # DEBUG: Log feature placement
+            logger.debug(f"Gaze variance: {gaze.var().item():.6f}")
+            logger.debug(f"Distance variance: {distance.var().item():.6f}")
+            logger.debug(f"Emotion variance: {emotion.var().item():.6f}")
+            logger.debug(f"Blink variance: {blink_embedded.var().item():.6f}")
 
-            # JoyVASA approach: Skip normalization to preserve variance
-            final_output = output  # No normalization
-            logger.debug(f"[JOYVASA] Final output variance: {output.var().item():.6f}")
+            # Use output directly without additional projection since features are in dedicated channels
+            final_output = output  # No normalization or projection needed
+            logger.debug(f"[CHANNEL-BASED] Final output variance: {output.var().item():.6f}")
 
             final_var = final_output.var().item()
-            logger.debug(f" Combined variance: {combined.var().item():.6f}, Output variance: {output.var().item():.6f}, Final normalized: {final_var:.6f}")
+            logger.debug(f"Output variance: {output.var().item():.6f}, Final: {final_var:.6f}")
 
-            # Log individual component contributions and absolute values
-            audio_contrib = audio_features.var().item() / (combined.var().item() + 1e-8)
-            controls_contrib = controls_features.var().item() / (combined.var().item() + 1e-8)
-            blink_contrib = blink_embedded.var().item() / (combined.var().item() + 1e-8)
+            # Log individual component contributions based on channel placement
+            total_var = output.var().item() + 1e-8
 
-            # Also log absolute magnitudes to see if audio is being suppressed
-            audio_mag = torch.norm(audio_features).item()
-            controls_mag = torch.norm(controls_features).item()
+            # Calculate variance contributions from each channel region
+            if 'audio_features' in self.channel_layout:
+                start_idx, end_idx = self.channel_layout['audio_features']
+                audio_contrib = output[:, :, start_idx:end_idx].var().item() / total_var
+                audio_mag = torch.norm(output[:, :, start_idx:end_idx]).item()
+                audio_mean_mag = torch.abs(output[:, :, start_idx:end_idx]).mean().item()
+                logger.debug(f"Audio contribution: {audio_contrib:.2%}, L2: {audio_mag:.4f}, mean: {audio_mean_mag:.6f}")
 
-            # Check if variance preservation is working
-            audio_mean_mag = torch.abs(audio_features).mean().item()
+            if 'gaze' in self.channel_layout:
+                start_idx, end_idx = self.channel_layout['gaze']
+                gaze_contrib = output[:, :, start_idx:end_idx].var().item() / total_var
+                logger.debug(f"Gaze contribution: {gaze_contrib:.2%}")
 
-            logger.debug(f" Component contributions - Audio: {audio_contrib:.2%}, Controls: {controls_contrib:.2%}, Blink: {blink_contrib:.2%}")
-            logger.debug(f" Component magnitudes - Audio L2: {audio_mag:.4f}, Audio mean: {audio_mean_mag:.6f}, Controls: {controls_mag:.4f}")
+            if 'emotion' in self.channel_layout:
+                start_idx, end_idx = self.channel_layout['emotion']
+                emotion_contrib = output[:, :, start_idx:end_idx].var().item() / total_var
+                logger.debug(f"Emotion contribution: {emotion_contrib:.2%}")
+
+            if 'blink_state' in self.channel_layout:
+                start_idx, end_idx = self.channel_layout['blink_state']
+                blink_contrib = output[:, :, start_idx:end_idx].var().item() / total_var
+                logger.debug(f"Blink contribution: {blink_contrib:.2%}")
 
             return final_output
 
