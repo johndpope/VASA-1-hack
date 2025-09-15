@@ -9,7 +9,13 @@ This repository contains the VASA implementation separated from EMOPortraits, wi
 
 ### Setup Instructions
 
-1. **Clone the repository with submodules:**
+1. **MCP Server Setup (for Claude integration):**
+```bash
+# Add Weights & Biases MCP server for Claude
+claude mcp add wandb -- uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server && uvx wandb login
+```
+
+2. **Clone the repository with submodules:**
 ```bash
 # Clone with submodules included
 git clone --recurse-submodules https://github.com/johndpope/VASA-1-hack.git
