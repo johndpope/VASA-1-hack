@@ -113,9 +113,9 @@ def main():
     emo_config = OmegaConf.load('./models/stage_1/volumetric_avatar/va.yaml')
     volumetric_avatar = importlib.import_module(
         'models.stage_1.volumetric_avatar.va'
-    ).Model(emo_config.va_model).cuda()
+    ).Model(emo_config, training=False)
 
-    model_path = 'checkpoints/EMO_300000.pth'
+    model_path = './logs/Retrain_with_17_V1_New_rand_MM_SEC_4_drop_02_stm_10_CV_05_1_1/checkpoints/328_model.pth'
     if Path(model_path).exists():
         model_dict = torch.load(model_path, map_location='cuda')
         volumetric_avatar.load_state_dict(model_dict, strict=False)

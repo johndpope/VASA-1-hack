@@ -366,16 +366,23 @@ class WindowCache:
                     
                     # Load tensors
                     for key in window_group.keys():
-                        if key == 'metadata':
+                        if key == 'identity_frame':
+                            # Load identity frame and expand to full frames tensor
+                            identity_frame_data = window_group[key][()]
+                            identity_frame = torch.from_numpy(identity_frame_data)
+                            # Duplicate identity frame for all frame positions (for compatibility)
+                            window_data['frames'] = identity_frame.unsqueeze(0).repeat(self.window_size, 1, 1, 1)
                             continue
-                            
+                        elif key == 'metadata':
+                            continue
+
                         try:
                             # Get dataset
                             dataset = window_group[key]
-                            
+
                             # Load tensor data
                             data = dataset[()]
-                            
+
                             # Convert to tensor
                             tensor = torch.from_numpy(data)
 
@@ -913,7 +920,10 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 face_crop = cv2.resize(face_crop, (64, 64))
             
             # Get predictions - returns (label, scores) where scores includes VA values
-            _, scores = self.emotion_recognizer.predict_emotions(face_crop, logits=True)
+            labels, scores = self.emotion_recognizer.predict_emotions(face_crop, logits=True)
+            
+            logger.debug(f"Emotion scores: {scores}")
+            logger.debug(f"Emotion labels: {labels}")
             
             # Extract VA values (last two values in scores)
             if isinstance(scores, np.ndarray) and scores.size >= 2:
@@ -1123,7 +1133,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
 
     def _extract_emo_features(self, frames: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """Extract EMO features with proper batch and sequence dimensions"""
+        """Extract EMO features with proper batch and sequence dimensions, including warps"""
         with torch.no_grad():
             try:
                 logger.debug("\n=== EMO Feature Extraction Start ===")
@@ -1133,63 +1143,139 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
                 assert len(frames.shape) == 4, f"Expected 4D input [T,C,H,W], got shape {frames.shape}"
                 assert frames.shape[1] == 3, f"Expected 3 channels, got {frames.shape[1]}"
-                
+
                 T = frames.shape[0]
                 # Accept variable window sizes, not just 50
                 logger.debug(f"Processing sequence of length {T}")
 
                 # Add batch dimension and move to device
-                frames = frames.unsqueeze(0)  # [1,T,C,H,W] 
+                frames = frames.unsqueeze(0)  # [1,T,C,H,W]
                 frames = frames.to(next(self.emo_model.parameters()).device)
                 logger.debug(f"After adding batch dim - frames shape: {frames.shape}")
-                
+
                 outputs = {
                     'theta': [],
                     'scale': [],
                     'rotation': [],
                     'translation': [],
-                    'expression_embed': []
+                    'expression_embed': [],
+                    'rigid_warps': [],  # Add rigid warps
+                    'uv_warps': [],     # Add non-rigid target warps
+                    'xy_warps': []      # Add non-rigid source warps
                 }
 
+                # Use first frame as identity for warp generation
+                identity_frame = frames[:, 0]  # [1,C,H,W]
+
+                # Process identity frame once
+                identity_dict = {
+                    'source_img': identity_frame,
+                    'target_img': identity_frame.clone(),
+                    'source_mask': torch.ones_like(identity_frame[:, :1]),
+                    'target_mask': torch.ones_like(identity_frame[:, :1]),
+                    'crop': False
+                }
+
+                # Extract identity embedding
+                identity_dict = self.emo_model.expression_embedder_nw(identity_dict, True, False)
+                idt_embed = identity_dict.get('idt_embed')
+
+                # Get model dimensions for warps
+                if hasattr(self.emo_model, 'args'):
+                    d = self.emo_model.args.latent_volume_depth
+                    s = self.emo_model.args.latent_volume_size
+                    c = self.emo_model.args.latent_volume_channels
+                elif hasattr(self.emo_model, 'latent_volume_depth'):
+                    d = self.emo_model.latent_volume_depth
+                    s = self.emo_model.latent_volume_size
+                    c = 96  # Default channel count
+                else:
+                    d = 16  # Default values
+                    s = 64
+                    c = 96
+
+                # Extract source warps if we have InferenceWrapper
+                source_warps_extracted = False
+                if hasattr(self.emo_model, 'forward') and hasattr(self.emo_model, 'source_xy_warp_resize'):
+                    # This looks like InferenceWrapper, try to extract source warps
+                    try:
+                        from nemo.pipeline_face_attr_full import to_image
+                        identity_pil = to_image(identity_frame.squeeze(0))
+
+                        # Run forward to generate source warps
+                        _ = self.emo_model.forward(
+                            source_image=identity_pil,
+                            driver_image=identity_pil,
+                            crop=False,
+                            smooth_pose=False,
+                            target_theta=True,
+                            mix=True,
+                            mix_old=False,
+                            modnet_mask=False
+                        )
+
+                        # Extract the computed warps
+                        if hasattr(self.emo_model, 'source_xy_warp_resize'):
+                            outputs['source_xy_warp'] = self.emo_model.source_xy_warp_resize.clone().cpu()
+                            logger.info(f"Extracted source XY warp: {outputs['source_xy_warp'].shape}")
+
+                        if hasattr(self.emo_model, 'source_rotation_warp'):
+                            outputs['source_rotation_warp'] = self.emo_model.source_rotation_warp.clone().cpu()
+                            logger.info(f"Extracted source rotation warp: {outputs['source_rotation_warp'].shape}")
+
+                        if hasattr(self.emo_model, 'target_latent_volume'):
+                            outputs['canonical_volume'] = self.emo_model.target_latent_volume.clone().cpu()
+                            logger.info(f"Extracted canonical volume: {outputs['canonical_volume'].shape}")
+
+                        if hasattr(self.emo_model, 'pred_source_theta'):
+                            outputs['source_theta'] = self.emo_model.pred_source_theta.clone().cpu()
+                            logger.info(f"Extracted source theta: {outputs['source_theta'].shape}")
+
+                        source_warps_extracted = True
+                    except Exception as e:
+                        logger.warning(f"Could not extract source warps from InferenceWrapper: {e}")
+
+                # If we couldn't extract warps, set defaults
+                if not source_warps_extracted:
+                    outputs['source_xy_warp'] = torch.zeros(1, d, s, s, 3, device='cpu')
+                    outputs['source_rotation_warp'] = torch.zeros(1, d, s, s, 3, device='cpu')
+                    outputs['canonical_volume'] = torch.zeros(1, c, d, s, s, device='cpu')
+                    outputs['source_theta'] = torch.zeros(1, 3, 4, device='cpu')
+
                 # logger.debug("\nProcessing frames in sequence...")
-                
+
                 for t in range(T):
                     frame = frames[:, t]  # [1,C,H,W]
                     # logger.debug(f"\nFrame {t}:")
                     # logger.debug(f"  Current frame shape: {frame.shape}")
 
                     input_dict = {
-                        'source_img': frame,
-                        'target_img': frame.clone(),
+                        'source_img': identity_frame,  # Use identity as source
+                        'target_img': frame,
                         'source_mask': torch.ones_like(frame[:, :1]),
                         'target_mask': torch.ones_like(frame[:, :1]),
                         'crop': False
                     }
 
-                    # Get theta AND scale/rotation/translation 
+                    # Get theta AND scale/rotation/translation
                     theta, scale, rotation, translation = self.emo_model.head_pose_regressor.forward(
-                        input_dict['source_img'],
+                        frame,  # Use current frame for pose
                         return_srt=True
                     )
                     theta = self.convert_theta_format(theta)
                     expression_embed = self.emo_model.expression_embedder_nw.net_face(
-                        input_dict['source_img']
+                        frame  # Use current frame for expression
                     )[0]
 
+                    # Skip per-frame warp generation - we only need source warps which are extracted once above
+
                     # Verify feature shapes
-                    assert theta.shape == (1, 3, 4), f"Wrong theta shape: {theta.shape}" 
+                    assert theta.shape == (1, 3, 4), f"Wrong theta shape: {theta.shape}"
                     assert scale.shape == (1, 3), f"Wrong scale shape: {scale.shape}"
-                    assert rotation.shape == (1, 3), f"Wrong rotation shape: {rotation.shape}" 
+                    assert rotation.shape == (1, 3), f"Wrong rotation shape: {rotation.shape}"
                     assert translation.shape == (1, 3), f"Wrong translation shape: {translation.shape}"
                     assert expression_embed.shape == (1, 128), f"Wrong expression shape: {expression_embed.shape}"
-                    
-                    # logger.debug("  Feature shapes for current frame:")
-                    # logger.debug(f"    theta: {theta.shape} on {theta.device}")
-                    # logger.debug(f"    scale: {scale.shape} on {scale.device}")
-                    # logger.debug(f"    rotation: {rotation.shape} on {rotation.device}")
-                    # logger.debug(f"    translation: {translation.shape} on {translation.device}")
-                    # logger.debug(f"    expression_embed: {expression_embed.shape} on {expression_embed.device}")
-                    
+
                     # Store outputs
                     outputs['theta'].append(theta)
                     outputs['scale'].append(scale)
@@ -1197,11 +1283,11 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     outputs['translation'].append(translation)
                     outputs['expression_embed'].append(expression_embed)
 
-                # Stack along time dimension - keep on GPU for efficiency
-                outputs = {
-                    k: torch.stack(v, dim=1)  # [B=1, T=50, ...] stays on GPU
-                    for k, v in outputs.items()
-                }
+                # Stack along time dimension for per-frame features
+                per_frame_keys = ['theta', 'scale', 'rotation', 'translation', 'expression_embed']
+                for k in per_frame_keys:
+                    if k in outputs and isinstance(outputs[k], list):
+                        outputs[k] = torch.stack(outputs[k], dim=1)
 
                 # DEBUG: Check expression variation
                 expr_tensor = outputs['expression_embed']  # [1, T, 128]
@@ -1219,20 +1305,32 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 # Verify final output shapes
                 logger.debug("\nFinal output shapes:")
                 expected_shapes = {
-                    'theta': (1, T, 3, 4), # [B, T, 3, 4] 
+                    'theta': (1, T, 3, 4), # [B, T, 3, 4]
                     'scale': (1, T, 3),
                     'rotation': (1, T, 3),
                     'translation': (1, T, 3),
-                    'expression_embed': (1, T, 128)
+                    'expression_embed': (1, T, 128),
+                    'source_xy_warp': (1, d, s, s, 3),
+                    'source_rotation_warp': (1, d, s, s, 3),
+                    'canonical_volume': (1, c, d, s, s),
+                    'source_theta': (1, 3, 4)
                 }
 
                 for k, expected_shape in expected_shapes.items():
-                    actual_shape = outputs[k].shape
-                    assert actual_shape == expected_shape, f"Wrong {k} shape: expected {expected_shape}, got {actual_shape}"
-                    logger.debug(f"  {k}: {actual_shape} on {outputs[k].device}")
+                    if k in outputs:
+                        actual_shape = outputs[k].shape
+                        # Only check shapes for keys that exist
+                        if k in ['source_xy_warp', 'source_rotation_warp', 'canonical_volume', 'source_theta']:
+                            # These are optional warps, just log if present
+                            if actual_shape[0] > 0:  # Not a zero tensor
+                                logger.debug(f"  {k}: {actual_shape} on CPU")
+                        else:
+                            # Check per-frame features
+                            assert actual_shape == expected_shapes[k], f"Wrong {k} shape: expected {expected_shapes[k]}, got {actual_shape}"
+                            logger.debug(f"  {k}: {actual_shape} on {outputs[k].device if hasattr(outputs[k], 'device') else 'CPU'}")
 
-                logger.debug("=== EMO Feature Extraction Complete ===\n")
-                
+                logger.debug("=== EMO Feature Extraction Complete (with warps) ===\n")
+
                 return outputs
                 
             except Exception as e:
@@ -1388,7 +1486,13 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 # Load all cached data
                 cached_data = {}
                 for key in window_group.keys():
-                    if key == 'metadata':
+                    if key == 'identity_frame':
+                        # Load identity frame and expand to full frames tensor
+                        identity_frame_data = window_group[key][()]
+                        identity_frame = torch.from_numpy(identity_frame_data)
+                        # Duplicate identity frame for all frame positions (for compatibility)
+                        cached_data['frames'] = identity_frame.unsqueeze(0).repeat(self.window_size, 1, 1, 1)
+                    elif key == 'metadata':
                         # Handle metadata specially
                         cached_data['metadata'] = {
                             'video_path': window_group['metadata'].attrs['video_path'],
@@ -1434,8 +1538,21 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
                 window_group = f.create_group(window_key)
 
-                # Save all window data
+                # Save all window data (only save identity frame)
                 for key, value in window_data.items():
+                    # Handle frames specially - only save first frame as identity_frame
+                    if key == 'frames':
+                        if isinstance(value, torch.Tensor) and len(value) > 0:
+                            # Save only the first frame as identity_frame
+                            window_group.create_dataset(
+                                'identity_frame',
+                                data=value[0].cpu().numpy(),  # Just the first frame
+                                compression='gzip',
+                                compression_opts=4
+                            )
+                            logger.debug(f"Saved identity frame for window {window_idx}")
+                        continue
+
                     if key == 'metadata':
                         # Save metadata as attributes
                         meta_group = window_group.create_group('metadata')
@@ -2544,17 +2661,23 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         'emotion': torch.tensor(np.stack(emotion_logits), dtype=torch.float32),
                         'head_distance': torch.tensor(np.stack(distances), dtype=torch.float32),
                         'speed_bucket': torch.tensor(speed_buckets, dtype=torch.long).unsqueeze(-1),
-                        
+
                         # Store landmarks with correct keys
                         'lips': torch.tensor(np.stack(lips_landmarks), dtype=torch.float32),
                         'right_eye': torch.tensor(np.stack(right_eye_landmarks), dtype=torch.float32),
                         'left_eye': torch.tensor(np.stack(left_eye_landmarks), dtype=torch.float32),
                         'jaw': torch.tensor(np.stack(jaw_landmarks), dtype=torch.float32),
                         'nose': torch.tensor(np.stack(nose_landmarks), dtype=torch.float32),
-                        
+
                         'lip_motion': torch.tensor(lip_motion_sequence, dtype=torch.float32),
 
                         'blink_state': torch.tensor(np.stack(blink_states), dtype=torch.float32),
+
+                        # Add source warps (these are NOT per-frame, they're for the identity->canonical transformation)
+                        'source_xy_warp': emo_features.get('source_xy_warp', torch.zeros(1, 16, 64, 64, 3)),
+                        'source_rotation_warp': emo_features.get('source_rotation_warp', torch.zeros(1, 16, 64, 64, 3)),
+                        'canonical_volume': emo_features.get('canonical_volume', torch.zeros(1, 96, 16, 64, 64)),
+                        'source_theta_warp': emo_features.get('source_theta', torch.zeros(1, 3, 4)),
 
                         # Add lip metrics for audio-lip correlation loss
                         'lip_metrics': {

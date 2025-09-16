@@ -124,16 +124,29 @@ class SingleBucketCache:
                                     )
 
                         elif isinstance(value, torch.Tensor):
-                            # Save tensor data with compression
-                            ds = window_group.create_dataset(
-                                key,
-                                data=value.cpu().numpy(),
-                                compression=self.compression,
-                                compression_opts=self.compression_level
-                            )
-                            # Store original dtype
-                            ds.attrs['dtype'] = str(value.dtype)
-                            ds.attrs['shape'] = value.shape
+                            # Handle frames specially - only save first frame as identity_frame
+                            if key == 'frames':
+                                if len(value) > 0:
+                                    # Save only the first frame as identity_frame
+                                    ds = window_group.create_dataset(
+                                        'identity_frame',
+                                        data=value[0].cpu().numpy(),  # Just the first frame
+                                        compression=self.compression,
+                                        compression_opts=self.compression_level
+                                    )
+                                    ds.attrs['dtype'] = str(value.dtype)
+                                    ds.attrs['shape'] = value[0].shape
+                            else:
+                                # Save other tensor data normally
+                                ds = window_group.create_dataset(
+                                    key,
+                                    data=value.cpu().numpy(),
+                                    compression=self.compression,
+                                    compression_opts=self.compression_level
+                                )
+                                # Store original dtype
+                                ds.attrs['dtype'] = str(value.dtype)
+                                ds.attrs['shape'] = value.shape
 
                         elif isinstance(value, np.ndarray):
                             # Save numpy array
@@ -181,7 +194,25 @@ class SingleBucketCache:
 
                 # Load all data from window
                 for key in window_group.keys():
-                    if key == 'metadata':
+                    if key == 'identity_frame':
+                        # Load identity frame and expand to full frames tensor
+                        dataset = window_group[key]
+                        identity_frame_data = dataset[()]
+                        identity_frame = torch.from_numpy(identity_frame_data)
+
+                        # Restore original dtype if stored
+                        if 'dtype' in dataset.attrs:
+                            dtype_str = dataset.attrs['dtype']
+                            if 'float32' in dtype_str:
+                                identity_frame = identity_frame.float()
+                            elif 'float16' in dtype_str:
+                                identity_frame = identity_frame.half()
+
+                        # Duplicate identity frame for all frame positions (assuming window_size=50)
+                        # This ensures compatibility with models expecting full frame sequences
+                        window_data['frames'] = identity_frame.unsqueeze(0).repeat(50, 1, 1, 1)
+
+                    elif key == 'metadata':
                         # Load metadata
                         meta_group = window_group['metadata']
                         metadata = {}
