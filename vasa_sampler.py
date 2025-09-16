@@ -55,18 +55,10 @@ class WindowSequenceSampler(Sampler):
         # Sort windows within each video by window index
         for video_path in self.video_windows:
             self.video_windows[video_path].sort(key=lambda x: x['window_idx'])
-        
+
         # Create sequences of consecutive windows
         self.sequences = []
-        max_available_windows = max(len(windows) for windows in self.video_windows.values())
-        
-        # Warn if requested windows exceed available
-        if windows_per_sequence > max_available_windows:
-            logger.warning(f"⚠️ Requested windows_per_sequence ({windows_per_sequence}) exceeds maximum available ({max_available_windows})")
-            logger.warning(f"⚠️ Adjusting windows_per_sequence to {max_available_windows}")
-            self.windows_per_sequence = max_available_windows
-            windows_per_sequence = max_available_windows
-        
+
         for video_path, windows in self.video_windows.items():
             # Skip videos with insufficient windows
             if len(windows) < windows_per_sequence:
