@@ -163,50 +163,124 @@ class VASAVolumetricAvatarBridge:
                 # Get VASA-generated motion for this frame
                 target_expression = motion_outputs['expression_embed'][b:b+1, t]
                 target_theta = motion_outputs['theta'][b:b+1, t]
-                
+
                 # Convert theta format if needed
                 if target_theta.shape[-2] == 4:
                     target_theta = target_theta[:, :3, :]
-                
-                # Create data dict with proper source/target separation
-                # SOURCE: Identity's original expression/pose (static)
-                # TARGET: VASA's generated expression/pose (dynamic)
-                data_dict = {
-                    'source_img': source_img[b:b+1],
-                    'target_img': source_img[b:b+1],  # We're generating this
-                    'source_mask': source_data['source_mask'][b:b+1],
-                    'target_mask': source_data['source_mask'][b:b+1],
-                    'source_theta': source_data['source_theta'][b:b+1] if source_data['source_theta'] is not None else target_theta,
-                    'target_theta': target_theta,  # VASA-generated pose
-                    'idt_embed': source_data['idt_embed'][b:b+1],
-                    'source_pose_embed': source_data['source_pose_embed'][b:b+1],  # Identity's expression
-                    'target_pose_embed': target_expression  # VASA-generated expression
-                }
-                
-                # Generate embeddings for warping
-                _, target_warp_embed_dict, _, embed_dict = self.va.predict_embed(data_dict)
-                
-                # Generate UV warp from target expression
-                target_uv_warp, _ = self.va.uv_generator_nw(target_warp_embed_dict)
-                
-                # Handle resizing if needed
-                if self.va.resize_warp:
-                    stride = self.va.warp_resize_stride
-                    target_uv_warp = F.avg_pool3d(
-                        target_uv_warp.permute(0, 4, 1, 2, 3),
-                        kernel_size=stride,
-                        stride=stride
-                    ).permute(0, 2, 3, 4, 1)
-                
-                # Create rotation warp from target pose
-                grid = self.va.identity_grid_3d.repeat_interleave(1, dim=0)
-                target_rotation_warp = grid.bmm(target_theta.transpose(1, 2)).view(-1, d, s, s, 3)
-                
-                # Apply warps to canonical volume
-                aligned_volume = self.va.grid_sample(
-                    self.va.grid_sample(canonical_volume_b, target_uv_warp),
-                    target_rotation_warp
+
+                # Check if we have VASA-predicted warping fields
+                use_predicted_warps = (
+                    'xy_warps' in motion_outputs and
+                    'rigid_warps' in motion_outputs and
+                    'uv_warps' in motion_outputs
                 )
+
+                if use_predicted_warps:
+                    # USE VASA-PREDICTED WARPING FIELDS (as in nemo/pipeline_face_attr.py)
+                    logger.debug(f"Using VASA-predicted warps for frame {t}")
+
+                    # Extract warps for this frame and batch
+                    source_xy_warp = motion_outputs['xy_warps'][b:b+1, t]  # [1, D, H, W, 3]
+                    target_rotation_warp = motion_outputs['rigid_warps'][b:b+1, t]  # [1, D, H, W, 3]
+                    target_uv_warp = motion_outputs['uv_warps'][b:b+1, t]  # [1, D, H, W, 3]
+
+                    # Handle resizing if needed for xy warps
+                    if self.va.resize_warp and source_xy_warp.shape[2] != s:
+                        stride = self.va.warp_resize_stride
+                        source_xy_warp = F.avg_pool3d(
+                            source_xy_warp.permute(0, 4, 1, 2, 3),
+                            kernel_size=stride,
+                            stride=stride
+                        ).permute(0, 2, 3, 4, 1)
+
+                    # Handle resizing for uv warps
+                    if self.va.resize_warp and target_uv_warp.shape[2] != s:
+                        stride = self.va.warp_resize_stride
+                        target_uv_warp = F.avg_pool3d(
+                            target_uv_warp.permute(0, 4, 1, 2, 3),
+                            kernel_size=stride,
+                            stride=stride
+                        ).permute(0, 2, 3, 4, 1)
+
+                    # Create data dict for decoder (still needed for some parameters)
+                    data_dict = {
+                        'source_img': source_img[b:b+1],
+                        'target_img': source_img[b:b+1],
+                        'source_mask': source_data['source_mask'][b:b+1],
+                        'target_mask': source_data['source_mask'][b:b+1],
+                        'source_theta': source_data['source_theta'][b:b+1] if source_data['source_theta'] is not None else target_theta,
+                        'target_theta': target_theta,
+                        'idt_embed': source_data['idt_embed'][b:b+1],
+                        'source_pose_embed': source_data['source_pose_embed'][b:b+1],
+                        'target_pose_embed': target_expression
+                    }
+
+                    # Get embed_dict for decoder (minimal computation)
+                    _, _, _, embed_dict = self.va.predict_embed(data_dict)
+
+                else:
+                    # FALLBACK: Generate warps using volumetric avatar (original behavior)
+                    logger.debug(f"Generating warps using volumetric avatar for frame {t}")
+
+                    # Create data dict with proper source/target separation
+                    data_dict = {
+                        'source_img': source_img[b:b+1],
+                        'target_img': source_img[b:b+1],
+                        'source_mask': source_data['source_mask'][b:b+1],
+                        'target_mask': source_data['source_mask'][b:b+1],
+                        'source_theta': source_data['source_theta'][b:b+1] if source_data['source_theta'] is not None else target_theta,
+                        'target_theta': target_theta,
+                        'idt_embed': source_data['idt_embed'][b:b+1],
+                        'source_pose_embed': source_data['source_pose_embed'][b:b+1],
+                        'target_pose_embed': target_expression
+                    }
+
+                    # Generate embeddings for warping
+                    source_warp_embed_dict, target_warp_embed_dict, _, embed_dict = self.va.predict_embed(data_dict)
+
+                    # Generate XY warp from source
+                    source_xy_warp, _ = self.va.xy_generator_nw(source_warp_embed_dict)
+
+                    # Generate UV warp from target expression
+                    target_uv_warp, _ = self.va.uv_generator_nw(target_warp_embed_dict)
+
+                    # Handle resizing if needed
+                    if self.va.resize_warp:
+                        stride = self.va.warp_resize_stride
+                        source_xy_warp = F.avg_pool3d(
+                            source_xy_warp.permute(0, 4, 1, 2, 3),
+                            kernel_size=stride,
+                            stride=stride
+                        ).permute(0, 2, 3, 4, 1)
+                        target_uv_warp = F.avg_pool3d(
+                            target_uv_warp.permute(0, 4, 1, 2, 3),
+                            kernel_size=stride,
+                            stride=stride
+                        ).permute(0, 2, 3, 4, 1)
+
+                    # Create rotation warp from target pose
+                    grid = self.va.identity_grid_3d.repeat_interleave(1, dim=0)
+                    target_rotation_warp = grid.bmm(target_theta.transpose(1, 2)).view(-1, d, s, s, 3)
+                
+                # Apply warps to canonical volume (following nemo/pipeline_face_attr.py order)
+                # 1. Apply source XY warp (non-rigid deformation in source space) if using predicted warps
+                # 2. Apply rotation warp (rigid transformation)
+                # 3. Apply target UV warp (expression-specific deformation)
+                if use_predicted_warps:
+                    # When using VASA-predicted warps, apply source_xy_warp first
+                    aligned_volume = self.va.grid_sample(
+                        self.va.grid_sample(
+                            self.va.grid_sample(canonical_volume_b, source_xy_warp),
+                            target_rotation_warp
+                        ),
+                        target_uv_warp
+                    )
+                else:
+                    # Original order when generating warps (no source_xy_warp applied here)
+                    aligned_volume = self.va.grid_sample(
+                        self.va.grid_sample(canonical_volume_b, target_uv_warp),
+                        target_rotation_warp
+                    )
                 
                 target_latent_feats = aligned_volume.view(1, c * d, s, s)
                 

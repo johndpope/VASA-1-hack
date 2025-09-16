@@ -176,6 +176,12 @@ loss:
   disentangle_vis_freq: 100          # Visualize disentanglement every N steps
   cross_id_num_frames: 3             # Number of frames to use for identity comparison
   cross_id_normalize: true           # Normalize frames before identity extraction
+
+  # Warping field loss weights
+  lambda_warp: 1.0                   # Main warp reconstruction loss weight
+  lambda_warp_smooth: 0.01           # Spatial smoothness regularization for warps
+  lambda_warp_temporal: 0.1          # Temporal consistency for warps
+  lambda_source_theta: 0.5           # Source theta warp loss weight
   
   # Frame generation for disentanglement losses
   use_sparse_frames: false    # If true, only generate first and last frame (saves 90% memory)
@@ -239,7 +245,7 @@ paths:
   volumetric_config: "nemo/models/stage_1/volumetric_avatar/va.yaml"
   data_dir: "data"
   video_folder: "junk"
-  cache_dir: "cache_overfit"
+  cache_dir: "cache_single_bucket"
 
 # Hardware/environment settings
 device: "cuda"
@@ -247,7 +253,7 @@ seed: 42
 num_workers: 8                # Multi-threading for data loading
 debug: false
 wandb:
-  project: "vasa-overfit-hp"
+  project: "vasa-overfit"
   enabled: true
 
 # Additional components

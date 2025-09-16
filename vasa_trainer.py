@@ -897,9 +897,12 @@ class VASATrainer:
         # Initialize WandB metrics table for this epoch
         if self.config.wandb.enabled and self.accelerator.is_local_main_process:
             self.epoch_table = wandb.Table(columns=[
-                "batch_idx", "window_idx", "total_loss", "reconstruction", 
+                "batch_idx", "window_idx", "total_loss", "reconstruction",
                 "dynamics_loss", "expression_loss", "pose_loss", "perceptual",
-                "grad_norm", "l_consist", "l_cross_id"
+                "grad_norm", "l_consist", "l_cross_id",
+                # Warp losses
+                "xy_warp_loss", "rigid_warp_loss", "uv_warp_loss", "source_theta_warp_loss",
+                "warp_temporal_consistency"
             ])
 
         for batch_idx, batch in enumerate(self.train_loader):
@@ -1262,7 +1265,13 @@ class VASATrainer:
                                     metrics.get('perceptual', 0.0),
                                     grad_norm_value,
                                     metrics.get('l_consist', 0.0),
-                                    metrics.get('l_cross_id', 0.0)
+                                    metrics.get('l_cross_id', 0.0),
+                                    # Warp losses
+                                    metrics.get('xy_warp_loss', 0.0),
+                                    metrics.get('rigid_warp_loss', 0.0),
+                                    metrics.get('uv_warp_loss', 0.0),
+                                    metrics.get('source_theta_warp_loss', 0.0),
+                                    metrics.get('warp_temporal_consistency', 0.0)
                                 )
                             
                             # Generate thumbnail with single frame only to save memory
@@ -1705,6 +1714,9 @@ class VASATrainer:
             
             # Log the metrics table for this epoch
             wandb.log({"epoch_metrics_table": self.epoch_table}, step=self.global_step)
+
+            # Also add to wandb summary so it persists
+            wandb.run.summary["epoch_metrics_table"] = self.epoch_table
             
             # Add alert if loss is too high (for overfit detection)
             if epoch_averages.get('total', 0) > 50.0:
@@ -2160,7 +2172,7 @@ class VASATrainer:
                             # Generate sequence with CFG
                             generated_sequence = self.model.forward(
                                 motion_data={
-                                    'theta': window['theta'],  
+                                    'theta': window['theta'],
                                     'scale': window['scale'],
                                     'rotation': window['rotation'],
                                     'translation': window['translation'],

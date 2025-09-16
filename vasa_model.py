@@ -326,7 +326,7 @@ class MotionTransformer(nn.Module):
         self.translation_emb = nn.Linear(3, self.d_model // 4)
 
         # Warping field embeddings - use 3D CNN to reduce spatial dims
-        self.xy_warp_encoder = nn.Sequential(
+        self.xy_warp_encoder = nn.Sequential( 
             nn.Conv3d(3, 16, kernel_size=(4, 8, 8), stride=(4, 8, 8)),  # [B*T, 3, 16, 64, 64] -> [B*T, 16, 4, 8, 8]
             nn.ReLU(),
             nn.Conv3d(16, 32, kernel_size=(2, 4, 4), stride=(2, 4, 4)),  # -> [B*T, 32, 2, 2, 2]
@@ -413,6 +413,41 @@ class MotionTransformer(nn.Module):
             nn.Linear(self.d_model, self.d_model // 4),
             nn.SiLU(),
             nn.Linear(self.d_model // 4, 3)
+        )
+
+        # Warp prediction heads - predict 3D warping fields
+        # Output size: 16 * 64 * 64 * 3 = 196608 values per frame
+        warp_hidden_dim = self.d_model * 2  # Larger hidden dim for complex warp fields
+
+        self.xy_warp_head = nn.Sequential(
+            nn.Linear(self.d_model, warp_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(warp_hidden_dim, warp_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(warp_hidden_dim, 16 * 64 * 64 * 3)  # Full warp field
+        )
+
+        self.rigid_warp_head = nn.Sequential(
+            nn.Linear(self.d_model, warp_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(warp_hidden_dim, warp_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(warp_hidden_dim, 16 * 64 * 64 * 3)
+        )
+
+        self.uv_warp_head = nn.Sequential(
+            nn.Linear(self.d_model, warp_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(warp_hidden_dim, warp_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(warp_hidden_dim, 16 * 64 * 64 * 3)
+        )
+
+        # Source theta warp is smaller: 3 * 4 = 12 values per frame
+        self.source_theta_warp_head = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model // 2),
+            nn.SiLU(),
+            nn.Linear(self.d_model // 2, 3 * 4)
         )
 
     def _get_sinusoidal_embedding(self, ts, dim):
@@ -573,12 +608,23 @@ class MotionTransformer(nn.Module):
         rotation_pred = self.rotation_head(out)
         translation_pred = self.translation_head(out)
 
+        # Predict warping fields
+        xy_warps_pred = self.xy_warp_head(out).view(B, T, 16, 64, 64, 3)
+        rigid_warps_pred = self.rigid_warp_head(out).view(B, T, 16, 64, 64, 3)
+        uv_warps_pred = self.uv_warp_head(out).view(B, T, 16, 64, 64, 3)
+        source_theta_warp_pred = self.source_theta_warp_head(out).view(B, T, 3, 4)
+
         return {
             'theta': theta_pred,
             'expression_embed': expr_pred,
             'scale': scale_pred,
             'rotation': rotation_pred,
-            'translation': translation_pred
+            'translation': translation_pred,
+            # Warping field predictions
+            'xy_warps': xy_warps_pred,
+            'rigid_warps': rigid_warps_pred,
+            'uv_warps': uv_warps_pred,
+            'source_theta_warp': source_theta_warp_pred
         }
 
 class VASAModel(nn.Module):

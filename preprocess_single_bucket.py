@@ -234,7 +234,7 @@ def main():
         stride=args.stride,
         max_videos=args.max_videos,
         cache_dir=args.cache_dir,
-        use_single_bucket=False  # We'll handle caching manually
+        use_single_bucket=True  # Use SingleBucketCache for preprocessing
     )
 
     # Preprocess and cache

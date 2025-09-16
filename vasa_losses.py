@@ -1261,40 +1261,46 @@ class VASALossModule:
         """Compute regularization losses for warping fields."""
         losses = {}
 
+        # Get lambda values from config
+        lambda_warp = getattr(self.config.loss, 'lambda_warp', 1.0)
+        lambda_warp_smooth = getattr(self.config.loss, 'lambda_warp_smooth', 0.01)
+        lambda_warp_temporal = getattr(self.config.loss, 'lambda_warp_temporal', 0.1)
+        lambda_source_theta = getattr(self.config.loss, 'lambda_source_theta', 0.5)
+
         # Warp consistency losses
         if 'xy_warps' in pred and 'xy_warps' in target:
             # L2 loss for xy warps
-            losses['xy_warp_loss'] = F.mse_loss(pred['xy_warps'], target['xy_warps'])
+            losses['xy_warp_loss'] = F.mse_loss(pred['xy_warps'], target['xy_warps']) * lambda_warp
 
             # Smoothness regularization for xy warps (penalize large spatial gradients)
             xy_warp_smooth = self._compute_warp_smoothness(pred['xy_warps'])
-            losses['xy_warp_smooth'] = xy_warp_smooth * 0.01  # Small weight
+            losses['xy_warp_smooth'] = xy_warp_smooth * lambda_warp_smooth
 
         if 'rigid_warps' in pred and 'rigid_warps' in target:
             # L2 loss for rigid warps
-            losses['rigid_warp_loss'] = F.mse_loss(pred['rigid_warps'], target['rigid_warps'])
+            losses['rigid_warp_loss'] = F.mse_loss(pred['rigid_warps'], target['rigid_warps']) * lambda_warp
 
             # Rigid warps should be smoother than non-rigid
             rigid_warp_smooth = self._compute_warp_smoothness(pred['rigid_warps'])
-            losses['rigid_warp_smooth'] = rigid_warp_smooth * 0.02
+            losses['rigid_warp_smooth'] = rigid_warp_smooth * lambda_warp_smooth * 2  # Extra smoothness for rigid
 
         if 'uv_warps' in pred and 'uv_warps' in target:
             # L2 loss for uv warps
-            losses['uv_warp_loss'] = F.mse_loss(pred['uv_warps'], target['uv_warps'])
+            losses['uv_warp_loss'] = F.mse_loss(pred['uv_warps'], target['uv_warps']) * lambda_warp
 
             # Smoothness regularization
             uv_warp_smooth = self._compute_warp_smoothness(pred['uv_warps'])
-            losses['uv_warp_smooth'] = uv_warp_smooth * 0.01
+            losses['uv_warp_smooth'] = uv_warp_smooth * lambda_warp_smooth
 
         if 'source_theta_warp' in pred and 'source_theta_warp' in target:
             # L2 loss for source theta warp
-            losses['source_theta_warp_loss'] = F.mse_loss(pred['source_theta_warp'], target['source_theta_warp'])
+            losses['source_theta_warp_loss'] = F.mse_loss(pred['source_theta_warp'], target['source_theta_warp']) * lambda_source_theta
 
         # Temporal consistency loss for warps
         if pred.get('xy_warps', None) is not None and pred['xy_warps'].shape[1] > 1:
             # Penalize large temporal changes in warps
             temporal_diff = pred['xy_warps'][:, 1:] - pred['xy_warps'][:, :-1]
-            losses['warp_temporal_consistency'] = temporal_diff.abs().mean() * 0.1
+            losses['warp_temporal_consistency'] = temporal_diff.abs().mean() * lambda_warp_temporal
 
         return losses
 
