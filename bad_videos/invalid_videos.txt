@@ -1,34 +1,16 @@
 # Failed Videos Report
 
 
-junk/sameid_femail_0a.mp4:
-  2025-09-16 13:27:26 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:26 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:26 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:27 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:27 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:27 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:28 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:28 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:29 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:29 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:29 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:30 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:30 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:30 - processing_error: {'error': "Face attribute error: 'source_theta'"}
+junk/videovideoTwqES24jgRA-scene32_scene10.mp4:
+  2025-09-16 16:52:29 - face_detection_failed: {'frame_shape': (512, 512, 3), 'error': 'No face landmarks detected'}
+  2025-09-16 16:52:29 - landmark_detection_failed: {'error': 'Failed to extract valid landmarks'}
+  2025-09-16 16:52:30 - face_detection_failed: {'frame_shape': (512, 512, 3), 'error': 'No face landmarks detected'}
+  2025-09-16 16:52:30 - landmark_detection_failed: {'error': 'Failed to extract valid landmarks'}
+  2025-09-16 16:52:31 - face_detection_failed: {'frame_shape': (512, 512, 3), 'error': 'No face landmarks detected'}
+  2025-09-16 16:52:31 - landmark_detection_failed: {'error': 'Failed to extract valid landmarks'}
 
-junk/9.mp4:
-  2025-09-16 13:27:34 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:34 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:35 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:35 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:35 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:36 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:36 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:37 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:37 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:37 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:38 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:38 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:39 - processing_error: {'error': "Face attribute error: 'source_theta'"}
-  2025-09-16 13:27:39 - processing_error: {'error': "Face attribute error: 'source_theta'"}
+junk/videovideo2482_4v01hRqzlQg-scene69_scene9.mp4:
+  2025-09-16 16:59:35 - face_detection_failed: {'frame_shape': (512, 512, 3), 'error': 'No face landmarks detected'}
+  2025-09-16 16:59:35 - landmark_detection_failed: {'error': 'Failed to extract valid landmarks'}
+  2025-09-16 16:59:36 - face_detection_failed: {'frame_shape': (512, 512, 3), 'error': 'No face landmarks detected'}
+  2025-09-16 16:59:36 - landmark_detection_failed: {'error': 'Failed to extract valid landmarks'}

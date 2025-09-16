@@ -1322,11 +1322,11 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 diff_norm = torch.norm(frame_diff, dim=-1)  # [T-1]
                 is_constant = torch.allclose(expr_flat[0], expr_flat, atol=1e-5)
 
-                logger.info(f"[EXPRESSION DEBUG] Shape: {expr_tensor.shape}")
-                logger.info(f"[EXPRESSION DEBUG] Constant across frames? {is_constant}")
-                logger.info(f"[EXPRESSION DEBUG] Frame-to-frame diff - Mean: {diff_norm.mean():.6f}, Max: {diff_norm.max():.6f}")
-                logger.info(f"[EXPRESSION DEBUG] First frame values (first 5): {expr_flat[0, :5].tolist()}")
-                logger.info(f"[EXPRESSION DEBUG] Last frame values (first 5): {expr_flat[-1, :5].tolist()}")
+                logger.debug(f"Shape: {expr_tensor.shape}")
+                logger.debug(f"Constant across frames? {is_constant}")
+                logger.debug(f"Frame-to-frame diff - Mean: {diff_norm.mean():.6f}, Max: {diff_norm.max():.6f}")
+                logger.debug(f"First frame values (first 5): {expr_flat[0, :5].tolist()}")
+                logger.debug(f"Last frame values (first 5): {expr_flat[-1, :5].tolist()}")
 
                 # Verify final output shapes
                 logger.debug("\nFinal output shapes:")
