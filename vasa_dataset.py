@@ -1174,6 +1174,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     'target_img': identity_frame.clone(),
                     'source_mask': torch.ones_like(identity_frame[:, :1]),
                     'target_mask': torch.ones_like(identity_frame[:, :1]),
+                    'source_theta': torch.eye(3, 4).unsqueeze(0).to(identity_frame.device),  # Identity pose
+                    'target_theta': torch.eye(3, 4).unsqueeze(0).to(identity_frame.device),  # Identity pose
                     'crop': False
                 }
 
@@ -2754,6 +2756,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     event_type=VideoEvent.PROCESSING_ERROR,
                     details={"error": f"Face attribute error: {str(e)}"}
                 ))
+                import traceback
                 logger.error(traceback.format_exc())
                 return self._get_zero_sample()
 
