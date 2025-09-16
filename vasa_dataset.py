@@ -2546,12 +2546,14 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 # For single-bucket cache, load by index directly
                 cached_data = self.cache.load_window(idx)
                 if cached_data is not None:
+                    logger.info(f"👽 Getting cached window {idx} from H5 cache")
                     return cached_data
             else:
                 # For per-video caching
                 cache_key = f"{video_path}_window_{window['window_idx']}"
                 cached_data = self._load_cached_window(video_path, window['window_idx'])
                 if cached_data is not None:
+                    logger.info(f"👽 Getting cached window {window['window_idx']} for video {Path(video_path).name}")
                     return cached_data
             
             # Process the single window
