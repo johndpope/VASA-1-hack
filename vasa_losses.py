@@ -478,7 +478,17 @@ class VASALossModule:
                 if isinstance(v, torch.Tensor):
                     logger.debug(f"  {k}: {v.item():.6f}")
 
-            # 2. Expression Verification Loss
+            # 2. Warp Regularization Loss
+            logger.debug("\nComputing warp regularization losses:")
+            if 'xy_warps' in outputs and 'xy_warps' in targets:
+                warp_losses = self._compute_warp_regularization_losses(outputs, targets)
+                losses.update(warp_losses)
+                logger.debug("Warp regularization losses:")
+                for k, v in warp_losses.items():
+                    if isinstance(v, torch.Tensor):
+                        logger.debug(f"  {k}: {v.item():.6f}")
+
+            # 3. Expression Verification Loss
             logger.debug("\nChecking verification loss conditions:")
             should_compute_verify = (
                 current_epoch is not None and 
@@ -1242,6 +1252,69 @@ class VASALossModule:
                 'confidence': torch.zeros(1, device=frames.device)
             }
 
+
+    def _compute_warp_regularization_losses(
+        self,
+        pred: Dict[str, torch.Tensor],
+        target: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        """Compute regularization losses for warping fields."""
+        losses = {}
+
+        # Warp consistency losses
+        if 'xy_warps' in pred and 'xy_warps' in target:
+            # L2 loss for xy warps
+            losses['xy_warp_loss'] = F.mse_loss(pred['xy_warps'], target['xy_warps'])
+
+            # Smoothness regularization for xy warps (penalize large spatial gradients)
+            xy_warp_smooth = self._compute_warp_smoothness(pred['xy_warps'])
+            losses['xy_warp_smooth'] = xy_warp_smooth * 0.01  # Small weight
+
+        if 'rigid_warps' in pred and 'rigid_warps' in target:
+            # L2 loss for rigid warps
+            losses['rigid_warp_loss'] = F.mse_loss(pred['rigid_warps'], target['rigid_warps'])
+
+            # Rigid warps should be smoother than non-rigid
+            rigid_warp_smooth = self._compute_warp_smoothness(pred['rigid_warps'])
+            losses['rigid_warp_smooth'] = rigid_warp_smooth * 0.02
+
+        if 'uv_warps' in pred and 'uv_warps' in target:
+            # L2 loss for uv warps
+            losses['uv_warp_loss'] = F.mse_loss(pred['uv_warps'], target['uv_warps'])
+
+            # Smoothness regularization
+            uv_warp_smooth = self._compute_warp_smoothness(pred['uv_warps'])
+            losses['uv_warp_smooth'] = uv_warp_smooth * 0.01
+
+        if 'source_theta_warp' in pred and 'source_theta_warp' in target:
+            # L2 loss for source theta warp
+            losses['source_theta_warp_loss'] = F.mse_loss(pred['source_theta_warp'], target['source_theta_warp'])
+
+        # Temporal consistency loss for warps
+        if pred.get('xy_warps', None) is not None and pred['xy_warps'].shape[1] > 1:
+            # Penalize large temporal changes in warps
+            temporal_diff = pred['xy_warps'][:, 1:] - pred['xy_warps'][:, :-1]
+            losses['warp_temporal_consistency'] = temporal_diff.abs().mean() * 0.1
+
+        return losses
+
+    def _compute_warp_smoothness(self, warp: torch.Tensor) -> torch.Tensor:
+        """Compute smoothness regularization for warp fields."""
+        # warp shape: [B, T, D, H, W, 3] or similar
+        # Compute spatial gradients
+        if warp.dim() == 6:  # [B, T, D, H, W, 3]
+            # Compute differences along spatial dimensions
+            diff_h = warp[:, :, :, 1:, :, :] - warp[:, :, :, :-1, :, :]
+            diff_w = warp[:, :, :, :, 1:, :] - warp[:, :, :, :, :-1, :]
+            diff_d = warp[:, :, 1:, :, :, :] - warp[:, :, :-1, :, :, :]
+
+            # L2 norm of gradients
+            smoothness = (diff_h.pow(2).mean() + diff_w.pow(2).mean() + diff_d.pow(2).mean()) / 3.0
+        else:
+            # Fallback for different dimensions
+            smoothness = torch.tensor(0.0, device=warp.device)
+
+        return smoothness
 
     def _compute_reconstruction_losses(
         self,

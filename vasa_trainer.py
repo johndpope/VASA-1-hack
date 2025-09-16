@@ -1810,7 +1810,7 @@ class VASATrainer:
         
         # Add component losses
         for k, v in metrics.items():
-            if k.startswith('control_') or k.startswith('metric_'):
+            if k.startswith('control_') or k.startswith('metric_') or 'warp' in k:
                 step_metrics[f'train/{k}'] = v
                 
         # Add gradient statistics from manual tracking
