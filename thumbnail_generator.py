@@ -423,20 +423,48 @@ def generate_training_thumbnail(
             source_warp_embed_dict, target_warp_embed_dict, _, embed_dict = \
                 volumetric_avatar.predict_embed(data_dict)
             
-            # Apply motion to canonical volume
+            # Apply motion to canonical volume using warping fields
             if 'canonical_volume' in source_params:
                 canonical_volume = source_params['canonical_volume']
-                
-                # Create rotation warp
-                grid = volumetric_avatar.identity_grid_3d.repeat_interleave(1, dim=0)
-                if 'theta' in frame_params:
-                    target_rotation_warp = grid.bmm(frame_params['theta'][:, 0, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+
+                # Check if we have warping fields from the motion prediction
+                if 'xy_warps' in predicted_motion and 'rigid_warps' in predicted_motion and 'uv_warps' in predicted_motion:
+                    # Extract warping fields for the selected frame
+                    xy_warp = predicted_motion['xy_warps'][:, window_idx]  # [B, 16, 64, 64, 3]
+                    rigid_warp = predicted_motion['rigid_warps'][:, window_idx]  # [B, 16, 64, 64, 3]
+                    uv_warp = predicted_motion['uv_warps'][:, window_idx]  # [B, 16, 64, 64, 3]
+
+                    # Apply warps in sequence like pipeline_face_attr.py
+                    # 1. Apply source warps to canonical volume (neutralize identity)
+                    source_warped = volumetric_avatar.grid_sample(
+                        volumetric_avatar.grid_sample(canonical_volume, rigid_warp),
+                        xy_warp
+                    )
+
+                    # 2. Apply target warp to get final volume
+                    grid = volumetric_avatar.identity_grid_3d.repeat_interleave(1, dim=0)
+                    if 'theta' in frame_params:
+                        target_rotation_warp = grid.bmm(frame_params['theta'][:, 0, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+                    else:
+                        target_rotation_warp = grid.view(-1, d, s, s, 3)
+
+                    # Apply UV warp and then rotation
+                    warped_volume = volumetric_avatar.grid_sample(
+                        volumetric_avatar.grid_sample(source_warped, uv_warp),
+                        target_rotation_warp
+                    )
+                    target_latent_feats = warped_volume.view(1, c * d, s, s)
                 else:
-                    target_rotation_warp = grid.view(-1, d, s, s, 3)
-                
-                # Apply warping
-                warped_volume = volumetric_avatar.grid_sample(canonical_volume, target_rotation_warp)
-                target_latent_feats = warped_volume.view(1, c * d, s, s)
+                    # Fallback: simple rotation warp without xy/uv warps
+                    grid = volumetric_avatar.identity_grid_3d.repeat_interleave(1, dim=0)
+                    if 'theta' in frame_params:
+                        target_rotation_warp = grid.bmm(frame_params['theta'][:, 0, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+                    else:
+                        target_rotation_warp = grid.view(-1, d, s, s, 3)
+
+                    # Apply warping
+                    warped_volume = volumetric_avatar.grid_sample(canonical_volume, target_rotation_warp)
+                    target_latent_feats = warped_volume.view(1, c * d, s, s)
             else:
                 # Fallback: use zero volume
                 target_latent_feats = torch.zeros(1, c * d, s, s).cuda()

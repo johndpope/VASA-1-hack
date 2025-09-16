@@ -487,8 +487,16 @@ class MotionTransformer(nn.Module):
             prev_rotation_emb = self.rotation_emb(prev_context.get('rotation', torch.zeros(B, C, 3, device=device)))
             prev_translation_emb = self.translation_emb(prev_context.get('translation', torch.zeros(B, C, 3, device=device)))
 
+            # For prev_context, use zeros for warping fields (they're frame-specific, not transferable)
+            # Create zero embeddings with correct dimensions
+            prev_xy_warp_emb = torch.zeros(B, C, self.d_model // 8, device=device)
+            prev_rigid_warp_emb = torch.zeros(B, C, self.d_model // 8, device=device)
+            prev_uv_warp_emb = torch.zeros(B, C, self.d_model // 8, device=device)
+            prev_source_theta_warp_emb = torch.zeros(B, C, self.d_model // 8, device=device)
+
             prev_emb = torch.cat([
-                prev_theta_emb, prev_expr_emb, prev_scale_emb, prev_rotation_emb, prev_translation_emb
+                prev_theta_emb, prev_expr_emb, prev_scale_emb, prev_rotation_emb, prev_translation_emb,
+                prev_xy_warp_emb, prev_rigid_warp_emb, prev_uv_warp_emb, prev_source_theta_warp_emb
             ], dim=-1)
             prev_emb = self.motion_proj(prev_emb)  # [B, C, d_model]
 
