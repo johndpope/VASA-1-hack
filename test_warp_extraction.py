@@ -1,140 +1,96 @@
 #!/usr/bin/env python3
-"""
-Test that source warps are properly extracted and saved in the dataset.
-"""
+"""Test script to verify per-frame warp extraction in VASAIntegratedDataset"""
 
 import torch
-import h5py
-from pathlib import Path
 import logging
-import sys
+from vasa_dataset import VASAIntegratedDataset
 
-# Add nemo to path
-sys.path.append('./nemo')
-
-from infer import InferenceWrapper
-
+# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def test_warp_extraction():
+    """Test that per-frame warps are properly extracted"""
 
-def test_with_inference_wrapper():
-    """Test warp extraction using InferenceWrapper as the emo_model."""
+    # Load EMO model first
+    import sys
+    sys.path.append('nemo')
+    from infer import InferenceWrapper
 
-    logger.info("Loading InferenceWrapper...")
-    inferer = InferenceWrapper(
+    project_dir = 'nemo'
+    emo_model = InferenceWrapper(
         experiment_name='Retrain_with_17_V1_New_rand_MM_SEC_4_drop_02_stm_10_CV_05_1_1',
         model_file_name='328_model.pth',
-        project_dir='nemo',
+        project_dir=project_dir,
         folder='logs',
-        args_overwrite={'l1_vol_rgb': 0},
-        pose_momentum=0.1,
-        print_model=False,
-        print_params=False
+        args_overwrite={'l1_vol_rgb': 0}
     )
 
-    # Now create dataset with InferenceWrapper as emo_model
-    from vasa_dataset import VASAIntegratedDataset
-
-    # Monkey-patch to skip audio requirement for testing
-    import vasa_dataset
-    original_check_audio = vasa_dataset.VASAIntegratedDataset._check_videos_for_audio
-    def mock_check_audio(self, video_paths):
-        # Return all videos as having audio
-        return {path: {'has_audio': True, 'has_cache': False} for path in video_paths}
-    vasa_dataset.VASAIntegratedDataset._check_videos_for_audio = mock_check_audio
-
-    logger.info("Creating dataset with InferenceWrapper...")
+    # Create dataset with small window for testing
     dataset = VASAIntegratedDataset(
-        video_folder='nemo/data',  # Use a folder with test videos
-        emo_model=inferer,  # Pass InferenceWrapper instead of raw model
-        window_size=50,
-        stride=25,
-        max_videos=1,
-        cache_dir='../temp_test_cache',
-        use_single_bucket=False
+        video_folder='vasa_train_data/',
+        emo_model=emo_model,
+        window_size=4,
+        sequence_length=4,
+        cache_dir='cache_single_bucket/',
+        use_single_bucket=True,
+        max_videos=1  # Just test with one video
     )
 
-    logger.info(f"Dataset has {len(dataset)} windows")
+    logger.info(f"Dataset created with {len(dataset)} windows")
 
-    if len(dataset) > 0:
-        logger.info("Processing first window...")
-        window_data = dataset[0]
+    # Get a sample
+    sample = dataset[0]
 
-        if window_data is not None:
-            # Check if warps were extracted
-            logger.info("\nChecking extracted data:")
+    # Check if warps are present and have correct shapes
+    warp_keys = ['xy_warps', 'rigid_warps', 'uv_warps', 'canonical_volume', 'source_theta_warp']
 
-            if 'source_xy_warp' in window_data:
-                warp = window_data['source_xy_warp']
-                logger.info(f"✓ source_xy_warp: {warp.shape}, non-zero: {(warp != 0).any().item()}")
+    logger.info("\n=== Checking Per-Frame Warps ===")
+    for key in warp_keys:
+        if key in sample:
+            shape = sample[key].shape
+            logger.info(f"{key}: shape={shape}, dtype={sample[key].dtype}")
+
+            # Check if it's not just zeros
+            is_zero = torch.allclose(sample[key], torch.zeros_like(sample[key]))
+            if is_zero:
+                logger.warning(f"  -> {key} is all zeros (may indicate warps couldn't be extracted)")
             else:
-                logger.error("✗ source_xy_warp not found!")
+                logger.info(f"  -> {key} contains non-zero values ✓")
 
-            if 'source_rotation_warp' in window_data:
-                warp = window_data['source_rotation_warp']
-                logger.info(f"✓ source_rotation_warp: {warp.shape}, non-zero: {(warp != 0).any().item()}")
-            else:
-                logger.error("✗ source_rotation_warp not found!")
+            # Expected shapes (assuming sequence_length=4)
+            expected_shapes = {
+                'xy_warps': (4, 16, 64, 64, 3),
+                'rigid_warps': (4, 16, 64, 64, 3),
+                'uv_warps': (4, 16, 64, 64, 3),
+                'canonical_volume': (4, 96, 16, 64, 64),
+                'source_theta_warp': (4, 3, 4)
+            }
 
-            if 'canonical_volume' in window_data:
-                vol = window_data['canonical_volume']
-                logger.info(f"✓ canonical_volume: {vol.shape}, non-zero: {(vol != 0).any().item()}")
-            else:
-                logger.error("✗ canonical_volume not found!")
-
-            if 'source_theta_warp' in window_data:
-                theta = window_data['source_theta_warp']
-                logger.info(f"✓ source_theta_warp: {theta.shape}, non-zero: {(theta != 0).any().item()}")
-            else:
-                logger.error("✗ source_theta_warp not found!")
-
-            # Also check other critical data
-            logger.info("\nOther data shapes:")
-            for key in ['frames', 'expression_embed', 'theta', 'scale']:
-                if key in window_data:
-                    logger.info(f"  {key}: {window_data[key].shape}")
-
-            logger.info("\n✅ Test passed - warps extracted successfully!")
+            if key in expected_shapes:
+                expected = expected_shapes[key]
+                if shape == expected:
+                    logger.info(f"  -> Shape matches expected {expected} ✓")
+                else:
+                    logger.error(f"  -> Shape mismatch! Expected {expected}, got {shape}")
         else:
-            logger.error("Failed to get window data")
-    else:
-        logger.error("No windows in dataset")
+            logger.error(f"{key} not found in sample!")
 
+    # Check other features for comparison
+    logger.info("\n=== Other Features for Comparison ===")
+    other_keys = ['frames', 'theta', 'expression_embed', 'audio_features']
+    for key in other_keys:
+        if key in sample:
+            logger.info(f"{key}: shape={sample[key].shape}")
 
-def check_cached_h5():
-    """Check if warps are saved in H5 cache files."""
+    logger.info("\n=== Test Complete ===")
+    return sample
 
-    cache_dir = Path('../temp_test_cache')
-    h5_files = list(cache_dir.glob('*.h5'))
-
-    if not h5_files:
-        logger.warning("No H5 files found in cache")
-        return
-
-    logger.info(f"\nChecking H5 cache file: {h5_files[0]}")
-
-    with h5py.File(h5_files[0], 'r') as f:
-        if 'window_0' in f:
-            window = f['window_0']
-            logger.info("\nWindow 0 contents:")
-
-            for key in window.keys():
-                if key in ['source_xy_warp', 'source_rotation_warp', 'canonical_volume', 'source_theta_warp']:
-                    data = window[key][()]
-                    logger.info(f"  ✓ {key}: shape={data.shape}, non-zero={(data != 0).any()}")
-                elif key in ['frames', 'expression_embed', 'theta']:
-                    data = window[key][()]
-                    logger.info(f"  {key}: shape={data.shape}")
-
-
-def main():
-    # Test with InferenceWrapper
-    test_with_inference_wrapper()
-
-    # Check cached files
-    check_cached_h5()
-
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    try:
+        sample = test_warp_extraction()
+        logger.info("✓ Warp extraction test completed successfully")
+    except Exception as e:
+        logger.error(f"✗ Test failed with error: {e}")
+        import traceback
+        traceback.print_exc()

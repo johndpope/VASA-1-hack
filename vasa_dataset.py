@@ -1159,9 +1159,10 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     'rotation': [],
                     'translation': [],
                     'expression_embed': [],
-                    'rigid_warps': [],  # Add rigid warps
-                    'uv_warps': [],     # Add non-rigid target warps
-                    'xy_warps': []      # Add non-rigid source warps
+                    'rigid_warps': [],      # Per-frame rigid warps (source_rotation_warp)
+                    'uv_warps': [],         # Per-frame non-rigid target warps
+                    'xy_warps': [],         # Per-frame non-rigid source warps (source_xy_warp)
+                    'source_theta': []      # Per-frame source thetas
                 }
 
                 # Use first frame as identity for warp generation
@@ -1194,53 +1195,20 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     s = 64
                     c = 96
 
-                # Extract source warps if we have InferenceWrapper
-                source_warps_extracted = False
-                if hasattr(self.emo_model, 'forward') and hasattr(self.emo_model, 'source_xy_warp_resize'):
-                    # This looks like InferenceWrapper, try to extract source warps
+                # Check if we can extract warps from InferenceWrapper
+                can_extract_warps = hasattr(self.emo_model, 'forward') and hasattr(self.emo_model, 'source_xy_warp_resize')
+
+                # Try to import helper function if we can extract warps
+                to_image = None
+                if can_extract_warps:
                     try:
                         from nemo.pipeline_face_attr_full import to_image
-                        identity_pil = to_image(identity_frame.squeeze(0))
-
-                        # Run forward to generate source warps
-                        _ = self.emo_model.forward(
-                            source_image=identity_pil,
-                            driver_image=identity_pil,
-                            crop=False,
-                            smooth_pose=False,
-                            target_theta=True,
-                            mix=True,
-                            mix_old=False,
-                            modnet_mask=False
-                        )
-
-                        # Extract the computed warps
-                        if hasattr(self.emo_model, 'source_xy_warp_resize'):
-                            outputs['source_xy_warp'] = self.emo_model.source_xy_warp_resize.clone().cpu()
-                            logger.info(f"Extracted source XY warp: {outputs['source_xy_warp'].shape}")
-
-                        if hasattr(self.emo_model, 'source_rotation_warp'):
-                            outputs['source_rotation_warp'] = self.emo_model.source_rotation_warp.clone().cpu()
-                            logger.info(f"Extracted source rotation warp: {outputs['source_rotation_warp'].shape}")
-
-                        if hasattr(self.emo_model, 'target_latent_volume'):
-                            outputs['canonical_volume'] = self.emo_model.target_latent_volume.clone().cpu()
-                            logger.info(f"Extracted canonical volume: {outputs['canonical_volume'].shape}")
-
-                        if hasattr(self.emo_model, 'pred_source_theta'):
-                            outputs['source_theta'] = self.emo_model.pred_source_theta.clone().cpu()
-                            logger.info(f"Extracted source theta: {outputs['source_theta'].shape}")
-
-                        source_warps_extracted = True
-                    except Exception as e:
-                        logger.warning(f"Could not extract source warps from InferenceWrapper: {e}")
-
-                # If we couldn't extract warps, set defaults
-                if not source_warps_extracted:
-                    outputs['source_xy_warp'] = torch.zeros(1, d, s, s, 3, device='cpu')
-                    outputs['source_rotation_warp'] = torch.zeros(1, d, s, s, 3, device='cpu')
-                    outputs['canonical_volume'] = torch.zeros(1, c, d, s, s, device='cpu')
-                    outputs['source_theta'] = torch.zeros(1, 3, 4, device='cpu')
+                    except ImportError:
+                        try:
+                            from nemo.pipeline_face_attr import to_image
+                        except ImportError:
+                            logger.warning("Could not import to_image function, warps will be zeros")
+                            can_extract_warps = False
 
                 # logger.debug("\nProcessing frames in sequence...")
 
@@ -1267,7 +1235,62 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         frame  # Use current frame for expression
                     )[0]
 
-                    # Skip per-frame warp generation - we only need source warps which are extracted once above
+                    # Extract per-frame warps if we have InferenceWrapper
+                    if can_extract_warps and to_image is not None:
+                        try:
+                            # Convert frame to PIL for the model
+                            frame_pil = to_image(frame.squeeze(0))
+
+                            # Run forward to generate warps for this frame
+                            _ = self.emo_model.forward(
+                                source_image=to_image(identity_frame.squeeze(0)),  # Identity as source
+                                driver_image=frame_pil,  # Current frame as driver
+                                crop=False,
+                                smooth_pose=False,
+                                target_theta=True,
+                                mix=True,
+                                mix_old=False,
+                                modnet_mask=False
+                            )
+
+                            # Extract the computed warps for this frame
+                            if hasattr(self.emo_model, 'source_xy_warp_resize'):
+                                outputs['xy_warps'].append(self.emo_model.source_xy_warp_resize.clone().cpu())
+                            else:
+                                outputs['xy_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
+
+                            if hasattr(self.emo_model, 'source_rotation_warp'):
+                                outputs['rigid_warps'].append(self.emo_model.source_rotation_warp.clone().cpu())
+                            else:
+                                outputs['rigid_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
+
+                            # Try to get UV warps (target warps) if available
+                            if hasattr(self.emo_model, 'target_uv_warp'):
+                                outputs['uv_warps'].append(self.emo_model.target_uv_warp.clone().cpu())
+                            elif hasattr(self.emo_model, 'uv_generator_nw') and hasattr(self.emo_model, 'target_latent_volume'):
+                                # UV warps might be generated but not stored, use zeros for now
+                                outputs['uv_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
+                            else:
+                                outputs['uv_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
+
+                            if hasattr(self.emo_model, 'pred_source_theta'):
+                                outputs['source_theta'].append(self.emo_model.pred_source_theta.clone().cpu())
+                            else:
+                                outputs['source_theta'].append(torch.zeros(1, 3, 4, device='cpu'))
+
+                        except Exception as e:
+                            logger.warning(f"Could not extract warps for frame {t}: {e}")
+                            # Add zeros if extraction failed
+                            outputs['xy_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
+                            outputs['rigid_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
+                            outputs['uv_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
+                            outputs['source_theta'].append(torch.zeros(1, 3, 4, device='cpu'))
+                    else:
+                        # Add zeros if we can't extract warps
+                        outputs['xy_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
+                        outputs['rigid_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
+                        outputs['uv_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
+                        outputs['source_theta'].append(torch.zeros(1, 3, 4, device='cpu'))
 
                     # Verify feature shapes
                     assert theta.shape == (1, 3, 4), f"Wrong theta shape: {theta.shape}"
@@ -1284,9 +1307,10 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     outputs['expression_embed'].append(expression_embed)
 
                 # Stack along time dimension for per-frame features
-                per_frame_keys = ['theta', 'scale', 'rotation', 'translation', 'expression_embed']
+                per_frame_keys = ['theta', 'scale', 'rotation', 'translation', 'expression_embed',
+                                 'xy_warps', 'rigid_warps', 'uv_warps', 'source_theta']
                 for k in per_frame_keys:
-                    if k in outputs and isinstance(outputs[k], list):
+                    if k in outputs and isinstance(outputs[k], list) and len(outputs[k]) > 0:
                         outputs[k] = torch.stack(outputs[k], dim=1)
 
                 # DEBUG: Check expression variation
@@ -1310,17 +1334,17 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     'rotation': (1, T, 3),
                     'translation': (1, T, 3),
                     'expression_embed': (1, T, 128),
-                    'source_xy_warp': (1, d, s, s, 3),
-                    'source_rotation_warp': (1, d, s, s, 3),
-                    'canonical_volume': (1, c, d, s, s),
-                    'source_theta': (1, 3, 4)
+                    'xy_warps': (1, T, d, s, s, 3),  # Per-frame non-rigid source warps
+                    'rigid_warps': (1, T, d, s, s, 3),  # Per-frame rigid warps
+                    'uv_warps': (1, T, d, s, s, 3),  # Per-frame non-rigid target warps
+                    'source_theta': (1, T, 3, 4)  # Per-frame thetas
                 }
 
                 for k, expected_shape in expected_shapes.items():
                     if k in outputs:
                         actual_shape = outputs[k].shape
                         # Only check shapes for keys that exist
-                        if k in ['source_xy_warp', 'source_rotation_warp', 'canonical_volume', 'source_theta']:
+                        if k in ['xy_warps', 'rigid_warps', 'uv_warps', 'source_theta']:
                             # These are optional warps, just log if present
                             if actual_shape[0] > 0:  # Not a zero tensor
                                 logger.debug(f"  {k}: {actual_shape} on CPU")
@@ -2673,11 +2697,12 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
                         'blink_state': torch.tensor(np.stack(blink_states), dtype=torch.float32),
 
-                        # Add source warps (these are NOT per-frame, they're for the identity->canonical transformation)
-                        'source_xy_warp': emo_features.get('source_xy_warp', torch.zeros(1, 16, 64, 64, 3)),
-                        'source_rotation_warp': emo_features.get('source_rotation_warp', torch.zeros(1, 16, 64, 64, 3)),
-                        'canonical_volume': emo_features.get('canonical_volume', torch.zeros(1, 96, 16, 64, 64)),
-                        'source_theta_warp': emo_features.get('source_theta', torch.zeros(1, 3, 4)),
+                        # Add per-frame warps (now extracted for each frame)
+                        # Note: warps have shape [1, T, ...] so we squeeze the batch dimension
+                        'xy_warps': emo_features.get('xy_warps', torch.zeros(1, self.sequence_length, 16, 64, 64, 3)).squeeze(0),
+                        'rigid_warps': emo_features.get('rigid_warps', torch.zeros(1, self.sequence_length, 16, 64, 64, 3)).squeeze(0),
+                        'uv_warps': emo_features.get('uv_warps', torch.zeros(1, self.sequence_length, 16, 64, 64, 3)).squeeze(0),
+                        'source_theta_warp': emo_features.get('source_theta', torch.zeros(1, self.sequence_length, 3, 4)).squeeze(0),
 
                         # Add lip metrics for audio-lip correlation loss
                         'lip_metrics': {
@@ -2766,6 +2791,12 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             
             # Blink state: [phase, left_openness, right_openness]
             'blink_state': torch.zeros((self.sequence_length, 3)),
+
+            # Per-frame warps
+            'xy_warps': torch.zeros((self.sequence_length, 16, 64, 64, 3)),
+            'rigid_warps': torch.zeros((self.sequence_length, 16, 64, 64, 3)),
+            'uv_warps': torch.zeros((self.sequence_length, 16, 64, 64, 3)),
+            'source_theta_warp': torch.zeros((self.sequence_length, 3, 4)),
 
             # Lip metrics for audio-lip correlation
             'lip_metrics': {
