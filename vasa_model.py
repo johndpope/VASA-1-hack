@@ -325,8 +325,35 @@ class MotionTransformer(nn.Module):
         self.rotation_emb = nn.Linear(3, self.d_model // 4)
         self.translation_emb = nn.Linear(3, self.d_model // 4)
 
-        # Combine all motion embeddings
-        self.motion_proj = nn.Linear(self.d_model + self.d_model // 4 * 3, self.d_model)
+        # Warping field embeddings - use 3D CNN to reduce spatial dims
+        self.xy_warp_encoder = nn.Sequential(
+            nn.Conv3d(3, 16, kernel_size=(4, 8, 8), stride=(4, 8, 8)),  # [B*T, 3, 16, 64, 64] -> [B*T, 16, 4, 8, 8]
+            nn.ReLU(),
+            nn.Conv3d(16, 32, kernel_size=(2, 4, 4), stride=(2, 4, 4)),  # -> [B*T, 32, 2, 2, 2]
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(32 * 2 * 2 * 2, self.d_model // 8)
+        )
+        self.rigid_warp_encoder = nn.Sequential(
+            nn.Conv3d(3, 16, kernel_size=(4, 8, 8), stride=(4, 8, 8)),
+            nn.ReLU(),
+            nn.Conv3d(16, 32, kernel_size=(2, 4, 4), stride=(2, 4, 4)),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(32 * 2 * 2 * 2, self.d_model // 8)
+        )
+        self.uv_warp_encoder = nn.Sequential(
+            nn.Conv3d(3, 16, kernel_size=(4, 8, 8), stride=(4, 8, 8)),
+            nn.ReLU(),
+            nn.Conv3d(16, 32, kernel_size=(2, 4, 4), stride=(2, 4, 4)),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(32 * 2 * 2 * 2, self.d_model // 8)
+        )
+        self.source_theta_warp_emb = nn.Linear(3 * 4, self.d_model // 8)
+
+        # Combine all motion embeddings (including warps)
+        self.motion_proj = nn.Linear(self.d_model + self.d_model // 4 * 3 + self.d_model // 8 * 4, self.d_model)
 
         # Timestep embedding
         self.time_emb = nn.Sequential(
@@ -421,9 +448,28 @@ class MotionTransformer(nn.Module):
         rotation_emb = self.rotation_emb(motion_data.get('rotation', torch.zeros(B, T, 3, device=device)))
         translation_emb = self.translation_emb(motion_data.get('translation', torch.zeros(B, T, 3, device=device)))
 
-        # Combine all embeddings
+        # Process warping fields
+        xy_warps = motion_data['xy_warps']  # [B, T, 16, 64, 64, 3]
+        rigid_warps = motion_data['rigid_warps']  # [B, T, 16, 64, 64, 3]
+        uv_warps = motion_data['uv_warps']  # [B, T, 16, 64, 64, 3]
+        source_theta_warp = motion_data['source_theta_warp']  # [B, T, 3, 4]
+
+        # Reshape warps for 3D conv processing: [B*T, C, D, H, W]
+        BT = B * T
+        xy_warps_reshaped = xy_warps.reshape(BT, 16, 64, 64, 3).permute(0, 4, 1, 2, 3)  # [B*T, 3, 16, 64, 64]
+        rigid_warps_reshaped = rigid_warps.reshape(BT, 16, 64, 64, 3).permute(0, 4, 1, 2, 3)
+        uv_warps_reshaped = uv_warps.reshape(BT, 16, 64, 64, 3).permute(0, 4, 1, 2, 3)
+
+        # Encode warps
+        xy_warp_emb = self.xy_warp_encoder(xy_warps_reshaped).view(B, T, -1)  # [B, T, d_model//8]
+        rigid_warp_emb = self.rigid_warp_encoder(rigid_warps_reshaped).view(B, T, -1)
+        uv_warp_emb = self.uv_warp_encoder(uv_warps_reshaped).view(B, T, -1)
+        source_theta_warp_emb = self.source_theta_warp_emb(source_theta_warp.view(B, T, -1))  # [B, T, d_model//8]
+
+        # Combine all embeddings (including warps)
         current_emb = torch.cat([
-            theta_emb, expr_emb, scale_emb, rotation_emb, translation_emb
+            theta_emb, expr_emb, scale_emb, rotation_emb, translation_emb,
+            xy_warp_emb, rigid_warp_emb, uv_warp_emb, source_theta_warp_emb
         ], dim=-1)
         current_emb = self.motion_proj(current_emb)  # [B, T, d_model]
 

@@ -134,20 +134,34 @@ class MotionSequenceHandler:
             
     def prepare_motion_data(self, window: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Prepare motion data from window, ensuring batch dimension is preserved."""
+        # HARD VALIDATION: Ensure all required warping fields are present
+        required_warps = ['xy_warps', 'rigid_warps', 'uv_warps', 'source_theta_warp']
+        missing_warps = [k for k in required_warps if k not in window]
+        if missing_warps:
+            raise KeyError(
+                f"CRITICAL: Missing required warping fields: {missing_warps}. "
+                f"Dataset must provide these fields. Available keys: {list(window.keys())}"
+            )
+
         motion_data = {
             'theta': window['theta'],            # Should be [B, T, 3, 4]
             'scale': window['scale'],            # Should be [B, T, 3]
             'rotation': window['rotation'],      # Should be [B, T, 3]
             'translation': window['translation'], # Should be [B, T, 3]
-            'expression_embed': window['expression_embed']  # Should be [B, T, 128]
+            'expression_embed': window['expression_embed'],  # Should be [B, T, 128]
+            # REQUIRED warping fields for MotionTransformer
+            'xy_warps': window['xy_warps'],      # Should be [B, T, 16, 64, 64, 3]
+            'rigid_warps': window['rigid_warps'], # Should be [B, T, 16, 64, 64, 3]
+            'uv_warps': window['uv_warps'],      # Should be [B, T, 16, 64, 64, 3]
+            'source_theta_warp': window['source_theta_warp']  # Should be [B, T, 3, 4]
         }
-        
+
         # Include audio features for sync loss and other audio-related losses
         if 'audio_features' in window:
             motion_data['audio_features'] = window['audio_features']  # Should be [B, T, D]
         if 'mfcc' in window:
             motion_data['mfcc'] = window['mfcc']  # MFCC features for SyncNet
-        
+
         return motion_data  
 
     def merge_windows(self, windows, total_frames, device):

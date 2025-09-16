@@ -225,13 +225,15 @@ def create_window_sequence_collate_fn(context_size: int = 10):
         # Create batched dictionary
         batched = {}
         keys_to_stack = [
-            'frames', 'theta', 'scale', 'rotation', 'translation', 
+            'frames', 'theta', 'scale', 'rotation', 'translation',
             'expression_embed', 'audio_features', 'audio_mfcc',
             'gaze', 'emotion', 'head_distance', 'speed_bucket',
             'lips', 'right_eye', 'left_eye', 'jaw', 'nose',
             'lip_motion', 'blink_state',
-            'prev_theta', 'prev_rotation', 'prev_translation', 
-            'prev_expression', 'prev_audio'
+            'prev_theta', 'prev_rotation', 'prev_translation',
+            'prev_expression', 'prev_audio',
+            # REQUIRED warping fields for MotionTransformer
+            'xy_warps', 'rigid_warps', 'uv_warps', 'source_theta_warp'
         ]
         
         for key in keys_to_stack:

@@ -1341,9 +1341,83 @@ class VASATrainer:
                                             )
                                         }, step=self.global_step)
                                         logger.info(f"📸 Generated and logged training thumbnail for epoch {self.current_epoch}")
+
+                                        # Log warping field visualizations
+                                        try:
+                                            if 'xy_warps' in motion_data and 'rigid_warps' in motion_data:
+                                                import matplotlib.pyplot as plt
+                                                import numpy as np
+
+                                                # Get first batch, middle frame, middle depth slice
+                                                b_idx = 0
+                                                t_idx = motion_data['xy_warps'].shape[1] // 2  # Middle frame
+                                                d_idx = 8  # Middle depth slice (16/2)
+
+                                                # Create figure with subplots for different warps
+                                                fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+
+                                                # XY Warps (source non-rigid)
+                                                xy_warp_slice = motion_data['xy_warps'][b_idx, t_idx, d_idx].cpu().numpy()  # [64, 64, 3]
+                                                xy_magnitude = np.linalg.norm(xy_warp_slice, axis=-1)  # [64, 64]
+                                                im1 = axes[0, 0].imshow(xy_magnitude, cmap='viridis')
+                                                axes[0, 0].set_title(f'XY Warp Magnitude (frame {t_idx}, depth {d_idx})')
+                                                axes[0, 0].axis('off')
+                                                plt.colorbar(im1, ax=axes[0, 0])
+
+                                                # Rigid Warps (source rotation)
+                                                rigid_warp_slice = motion_data['rigid_warps'][b_idx, t_idx, d_idx].cpu().numpy()
+                                                rigid_magnitude = np.linalg.norm(rigid_warp_slice, axis=-1)
+                                                im2 = axes[0, 1].imshow(rigid_magnitude, cmap='plasma')
+                                                axes[0, 1].set_title(f'Rigid Warp Magnitude (frame {t_idx}, depth {d_idx})')
+                                                axes[0, 1].axis('off')
+                                                plt.colorbar(im2, ax=axes[0, 1])
+
+                                                # UV Warps (target non-rigid)
+                                                uv_warp_slice = motion_data['uv_warps'][b_idx, t_idx, d_idx].cpu().numpy()
+                                                uv_magnitude = np.linalg.norm(uv_warp_slice, axis=-1)
+                                                im3 = axes[0, 2].imshow(uv_magnitude, cmap='coolwarm')
+                                                axes[0, 2].set_title(f'UV Warp Magnitude (frame {t_idx}, depth {d_idx})')
+                                                axes[0, 2].axis('off')
+                                                plt.colorbar(im3, ax=axes[0, 2])
+
+                                                # Warp flow visualization (X and Y components)
+                                                axes[1, 0].quiver(
+                                                    np.arange(0, 64, 4), np.arange(0, 64, 4),
+                                                    xy_warp_slice[::4, ::4, 0], xy_warp_slice[::4, ::4, 1],
+                                                    angles='xy', scale_units='xy', scale=0.5, color='blue'
+                                                )
+                                                axes[1, 0].set_title('XY Warp Flow (X-Y plane)')
+                                                axes[1, 0].set_xlim(0, 64)
+                                                axes[1, 0].set_ylim(64, 0)
+                                                axes[1, 0].set_aspect('equal')
+
+                                                # Source theta warp visualization
+                                                source_theta = motion_data['source_theta_warp'][b_idx, t_idx].cpu().numpy()  # [3, 4]
+                                                axes[1, 1].imshow(source_theta, cmap='RdBu', aspect='auto')
+                                                axes[1, 1].set_title(f'Source Theta Warp (frame {t_idx})')
+                                                axes[1, 1].set_xlabel('Coefficients')
+                                                axes[1, 1].set_ylabel('Dimensions')
+                                                for i in range(3):
+                                                    for j in range(4):
+                                                        axes[1, 1].text(j, i, f'{source_theta[i, j]:.2f}',
+                                                                       ha='center', va='center', color='black')
+
+                                                # Temporal warp variation (std across time)
+                                                xy_temporal_std = torch.std(motion_data['xy_warps'][b_idx], dim=0).mean(dim=0).mean(dim=-1).cpu().numpy()
+                                                axes[1, 2].imshow(xy_temporal_std, cmap='hot')
+                                                axes[1, 2].set_title('XY Warp Temporal Variation (std)')
+                                                axes[1, 2].axis('off')
+
+                                                plt.tight_layout()
+                                                wandb.log({"visuals/warping_fields": wandb.Image(fig)}, step=self.global_step)
+                                                plt.close(fig)
+                                                logger.info("📊 Logged warping field visualizations")
+
+                                        except Exception as e:
+                                            logger.warning(f"Could not visualize warping fields: {e}")
                                     else:
                                         logger.warning("Thumbnail generation returned None")
-                                    
+
                                 except Exception as e:
                                     logger.warning(f"Could not generate thumbnail: {e}")
 

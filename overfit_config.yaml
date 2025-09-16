@@ -70,7 +70,7 @@ train:
     output_projections: 1e-4   # Further reduced for stability
 
   batch_size: 2               # Increased from 16 to maximize 32GB VRAM utilization
-  windows_per_batch: 28         # Number of consecutive windows per sequence (auto-adjusts if too large)
+  windows_per_batch: 14         # Maximum available windows in dataset (some videos have 14 windows)
   gradient_accumulation_steps: 4  # Increase effective batch size to break plateau
   num_epochs: 1000            # Reduced for quick testing
 
