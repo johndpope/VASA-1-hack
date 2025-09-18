@@ -1133,6 +1133,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
 
 
+
     def _extract_emo_features(self, frames: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Extract EMO features with proper batch and sequence dimensions, including warps"""
         with torch.no_grad():
@@ -1163,7 +1164,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     'rigid_warps': [],      # Per-frame rigid warps (source_rotation_warp)
                     'uv_warps': [],         # Per-frame non-rigid target warps
                     'xy_warps': [],         # Per-frame non-rigid source warps (source_xy_warp)
-                    'source_theta': []      # Per-frame source thetas
+                    'source_theta': []      # Per-frame source thetas 🤷 - i guess this is aduplication of the theta
                 }
 
                 # Use first frame as identity for warp generation
@@ -1177,50 +1178,30 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     'target_mask': torch.ones_like(identity_frame[:, :1]),
                     'source_theta': torch.eye(3, 4).unsqueeze(0).to(identity_frame.device),  # Identity pose
                     'target_theta': torch.eye(3, 4).unsqueeze(0).to(identity_frame.device),  # Identity pose
-                    'crop': False
+                    'crop': False # 🤷 maybe we should crop?
                 }
 
                 # Extract identity embedding
                 identity_dict = self.emo_model.expression_embedder_nw(identity_dict, True, False)
                 idt_embed = identity_dict.get('idt_embed')
 
-                # Get model dimensions for warps
-                if hasattr(self.emo_model, 'args'):
-                    d = self.emo_model.args.latent_volume_depth
-                    s = self.emo_model.args.latent_volume_size
-                    c = self.emo_model.args.latent_volume_channels
-                elif hasattr(self.emo_model, 'latent_volume_depth'):
-                    d = self.emo_model.latent_volume_depth
-                    s = self.emo_model.latent_volume_size
-                    c = 96  # Default channel count
-                else:
-                    d = 16  # Default values
-                    s = 64
-                    c = 96
 
+                d = 16  # depth
+                s = 64  # spatial size
+                c = 96  # channels for canonical volume
              
-
-                # logger.debug("\nProcessing frames in sequence...")
-
                 for t in range(T):
                     frame = frames[:, t]  # [1,C,H,W]
-                    # logger.debug(f"\nFrame {t}:")
-                    # logger.debug(f"  Current frame shape: {frame.shape}")
-
-                    input_dict = {
-                        'source_img': identity_frame,  # Use identity as source
-                        'target_img': frame,
-                        'source_mask': torch.ones_like(frame[:, :1]),
-                        'target_mask': torch.ones_like(frame[:, :1]),
-                        'crop': False
-                    }
-
-                    # Get theta AND scale/rotation/translation
+    
+                    # RIGID warping
+                    #  theta AND scale/rotation/translation
                     theta, scale, rotation, translation = self.emo_model.head_pose_regressor.forward(
                         frame,  # Use current frame for pose
                         return_srt=True
                     )
                     theta = self.convert_theta_format(theta)
+
+                    # Identity 
                     expression_embed = self.emo_model.expression_embedder_nw.net_face(
                         frame  # Use current frame for expression
                     )[0]
@@ -1228,25 +1209,20 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     # Extract per-frame warps using volumetric model directly
                     if to_image is not None:
                         try:
-                            # Set up the model for inference mode if needed
-                            if not hasattr(self.emo_model, 'optimizer_idx_to_mode'):
-                                # Set up the optimizer_idx_to_mode for inference
-                                self.emo_model.optimizer_idx_to_mode = {0: 'gen'}
+                            # Set up the optimizer_idx_to_mode for inference
+                            self.emo_model.optimizer_idx_to_mode = {0: 'gen'}
 
-                            # Create data dict for volumetric model
-                            # The model expects a specific format for warp extraction
+                            # To get XY warps: source=identity (canonical), target=current frame (expressive)
+                            # The warps will transform from current expression back to canonical
                             data_dict = {
-                                'source_img': identity_frame,  # Identity frame as source [1,3,H,W]
-                                'target_img': frame.unsqueeze(0),  # Current frame as target [1,3,H,W]
-                                'source_theta': theta,  # Source pose
-                                'target_theta': theta,  # Target pose (same frame)
+                                'source_img': identity_frame,  # Identity frame as canonical reference [1,3,H,W]
+                                'target_img': frame.unsqueeze(0),  # Current frame with expression [1,3,H,W]
                             }
 
-                            # If we have identity embedding, add it
-                            if idt_embed is not None:
+                            # Only add idt_embed after first frame to avoid recomputation
+                            if t > 0 and idt_embed is not None:
                                 data_dict['idt_embed'] = idt_embed
-
-                            # Run forward to generate warps - use test phase with optimizer_idx=0
+                            
                             with torch.no_grad():
                                 # Process through the model to generate warps
                                 _, _, _, output_dict = self.emo_model.forward(
