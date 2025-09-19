@@ -297,6 +297,99 @@ The trainer will:
 | Batch Size | 1 | 4 | 4x |
 | Workers | 0 | 8 | Parallel loading |
 | Epoch Time (RTX 5090) | ~5 min | ~1.5 min | 3.3x |
+
+## 🔍 Debugging Tools
+
+### Pipeline Debug Scripts
+
+The project includes several debugging pipelines for analyzing face swap and identity preservation issues:
+
+#### 1. **pipeline3.py** - Advanced Debug Pipeline
+```bash
+# Test with video (uses joint extraction to prevent identity drift)
+python nemo/pipeline3.py --target nemo/data/VID_1.mp4 --max-frames 10
+
+# Test with single image
+python nemo/pipeline3.py --target nemo/data/IMG_2.png
+
+# Use custom source identity
+python nemo/pipeline3.py --source path/to/source.png --target path/to/target.mp4
+
+# Swap identity mode (use driver's identity with source's expression)
+python nemo/pipeline3.py --default-video --swap-identity
+
+# This is useful when the model is extracting the wrong identity
+```
+
+Features:
+- **Joint extraction**: Processes source+first_driver_frame together to calibrate embeddings
+- **Identity swapping**: `--swap-identity` flag to use driver's identity with source's expression
+- **Comprehensive tracing**: Every step logged with images and tensors
+- **Comparison grids**: Side-by-side visualization of results
+- **Warp visualization**: XY/UV warp magnitude heatmaps
+- **Debug output**: All intermediates saved to `debug_pipeline3/`
+
+#### 2. **pipeline2.py** - Reference Implementation
+```bash
+# The reference pipeline that produces correct results
+python nemo/pipeline2.py
+```
+
+This is the baseline implementation that pipeline3.py was designed to match.
+
+#### 3. **Debug Analysis Scripts**
+
+Various analysis scripts for specific debugging:
+- `check_identity_confusion.py` - Analyze identity preservation
+- `debug_identity_extraction.py` - Test identity feature extraction
+- `test_polished_face_swap.py` - Test face swap quality
+- `extract_and_apply_warps_properly.py` - Analyze warp field application
+
+### Understanding XY/UV Warps
+
+The volumetric avatar system uses two types of warps:
+
+1. **XY Warps (Rigid + Non-rigid 3D warping)**
+   - Transform from posed face → canonical (neutral) space
+   - Removes head pose and expression from source
+   - Creates identity-preserving canonical volume
+
+2. **UV Warps (Expression transfer)**
+   - Transform from canonical → target expression
+   - Applies target's expression and pose
+   - Preserves source identity while adopting target motion
+
+### Common Issues and Solutions
+
+#### Identity Drift
+**Problem**: Generated face morphs away from source identity
+**Cause**: Solo extraction (processing source alone without driver context)
+**Solution**: Joint extraction - process source+first_driver_frame together
+
+#### Feminine Appearance on Male Faces
+**Problem**: Male faces (e.g., IMG_1.png) appear feminine in results
+**Cause**: Identity embeddings not properly calibrated to driver motion space
+**Solution**: Joint extraction ensures embeddings are aligned with driver poses
+
+#### Debugging Output Structure
+```
+debug_pipeline3/
+├── trace_YYYYMMDD_HHMMSS.json    # Complete execution trace
+├── step_NNNN_*.png                # Intermediate images at each step
+├── step_NNNN_*.pt                 # Tensor checkpoints
+├── frame_NNN_result.png           # Final output frames
+└── video_comparison.png           # Grid comparison of all frames
+```
+
+### Trace Analysis
+
+The trace files contain detailed information about each processing step:
+- Entry/exit points for all major functions
+- Tensor shapes and statistics
+- Mask generation and compositing steps
+- Warp field generation and application
+
+Use the trace to identify where identity drift or other issues occur in the pipeline.
 | Convergence | 1000+ epochs | 10-20 epochs | 50x+ |
 
 ## 🔄 Warping System: XY vs UV Warps

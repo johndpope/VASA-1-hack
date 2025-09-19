@@ -1,0 +1,364 @@
+2025-09-19 10:31:41,930 - __main__ - INFO - 
+================================================================================
+2025-09-19 10:31:41,931 - __main__ - INFO - STARTING DEBUG FACE SWAP PIPELINE
+2025-09-19 10:31:41,931 - __main__ - INFO - ================================================================================
+2025-09-19 10:31:41,931 - __main__ - INFO - 
+Loading volumetric avatar model...
+2025-09-19 10:31:49,559 - __main__ - INFO - Model weights loaded successfully
+2025-09-19 10:31:50,450 - __main__ - INFO - 
+Loading images...
+2025-09-19 10:31:50,568 - __main__ - INFO - Source image loaded: torch.Size([1, 3, 512, 512])
+2025-09-19 10:31:50,568 - __main__ - INFO - Target image loaded: torch.Size([1, 3, 512, 512])
+2025-09-19 10:31:50,568 - __main__ - INFO - 
+################################################################################
+2025-09-19 10:31:50,568 - __main__ - INFO - PHASE 1: PROCESSING SOURCE IMAGE (IDENTITY EXTRACTION)
+2025-09-19 10:31:50,568 - __main__ - INFO - ################################################################################
+2025-09-19 10:31:50,568 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,568 - __main__ - INFO - STEP 1: Face IDT Forward
+2025-09-19 10:31:50,568 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,592 - __main__ - DEBUG -   input: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32, range=[-1.0000, 1.0000], mean=-0.4038, std=0.4596
+2025-09-19 10:31:50,737 - __main__ - DEBUG -   face_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.int64
+2025-09-19 10:31:50,737 - __main__ - DEBUG -   cloth_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.int64
+2025-09-19 10:31:50,742 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,742 - __main__ - INFO - STEP 2: Masking Source Image
+2025-09-19 10:31:50,742 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,742 - __main__ - DEBUG -   masked_source: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32, range=[-1.0000, 1.0000], mean=-0.2083, std=0.3940
+2025-09-19 10:31:50,742 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,742 - __main__ - INFO - STEP 3: Identity Embedder
+2025-09-19 10:31:50,742 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,743 - __main__ - DEBUG -   masked_input: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32, range=[-1.0000, 1.0000], mean=-0.2083, std=0.3940
+2025-09-19 10:31:50,786 - __main__ - DEBUG -   idt_embed: shape=[1, 512, 4, 4], device=cuda:0, dtype=torch.float32, range=[-2.5306, 2.1158], mean=-0.0056, std=0.4666
+2025-09-19 10:31:50,786 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,786 - __main__ - INFO - STEP 4: Head Pose Regressor
+2025-09-19 10:31:50,786 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,787 - __main__ - DEBUG -   input: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32, range=[-1.0000, 1.0000], mean=-0.4038, std=0.4596
+2025-09-19 10:31:50,802 - __main__ - DEBUG -   theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32, range=[-0.1151, 1.0000], mean=0.1820, std=0.3541
+2025-09-19 10:31:50,838 - __main__ - DEBUG -   scale=tensor([[0.6465, 0.7250, 0.6786]], device='cuda:0'), rotation=tensor([[-0.0089, -0.1232,  0.1605]], device='cuda:0'), translation=tensor([[ 0.0101, -0.1019, -0.0373]], device='cuda:0')
+2025-09-19 10:31:50,838 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,838 - __main__ - INFO - STEP 5: Creating Source Data Dict
+2025-09-19 10:31:50,838 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,838 - __main__ - DEBUG - 
+=== source_data_dict ===
+2025-09-19 10:31:50,838 - __main__ - DEBUG -   source_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,838 - __main__ - DEBUG -   source_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,838 - __main__ - DEBUG -   source_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,838 - __main__ - DEBUG -   target_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,838 - __main__ - DEBUG -   target_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,838 - __main__ - DEBUG -   target_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,838 - __main__ - DEBUG -   idt_embed: shape=[1, 512, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,838 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,838 - __main__ - INFO - STEP 6: Expression Embedder
+2025-09-19 10:31:50,838 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,838 - __main__ - DEBUG - 
+=== input_data_dict ===
+2025-09-19 10:31:50,838 - __main__ - DEBUG -   source_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,838 - __main__ - DEBUG -   source_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,838 - __main__ - DEBUG -   source_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,838 - __main__ - DEBUG -   target_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,838 - __main__ - DEBUG -   target_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,838 - __main__ - DEBUG -   target_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,838 - __main__ - DEBUG -   idt_embed: shape=[1, 512, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,868 - __main__ - DEBUG - 
+=== output_data_dict ===
+2025-09-19 10:31:50,868 - __main__ - DEBUG -   source_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,868 - __main__ - DEBUG -   source_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,868 - __main__ - DEBUG -   source_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,868 - __main__ - DEBUG -   target_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,868 - __main__ - DEBUG -   target_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,868 - __main__ - DEBUG -   target_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,868 - __main__ - DEBUG -   idt_embed: shape=[1, 512, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,868 - __main__ - DEBUG -   pred_source_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,868 - __main__ - DEBUG -   pred_target_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,868 - __main__ - DEBUG -   source_img_align: shape=[1, 3, 128, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,868 - __main__ - DEBUG -   target_img_align: shape=[1, 3, 128, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,868 - __main__ - DEBUG -   align_warp: shape=[2, 128, 128, 2], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,868 - __main__ - DEBUG -   align_warp_full: shape=[2, 512, 512, 2], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,868 - __main__ - DEBUG -   source_pose_embed: shape=[1, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,868 - __main__ - DEBUG -   target_pose_embed: shape=[1, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,869 - __main__ - DEBUG -   source_pose_embed: shape=[1, 128], device=cuda:0, dtype=torch.float32, range=[-1.6122, 2.0202], mean=0.0039, std=0.5080
+2025-09-19 10:31:50,869 - __main__ - DEBUG -   target_pose_embed: shape=[1, 128], device=cuda:0, dtype=torch.float32, range=[-1.6122, 2.0202], mean=0.0039, std=0.5080
+2025-09-19 10:31:50,869 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,869 - __main__ - INFO - STEP 7: Predict Embed
+2025-09-19 10:31:50,869 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,869 - __main__ - DEBUG - 
+=== input_data_dict ===
+2025-09-19 10:31:50,869 - __main__ - DEBUG -   source_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,869 - __main__ - DEBUG -   source_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,869 - __main__ - DEBUG -   source_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,869 - __main__ - DEBUG -   target_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,869 - __main__ - DEBUG -   target_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,869 - __main__ - DEBUG -   target_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,869 - __main__ - DEBUG -   idt_embed: shape=[1, 512, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,869 - __main__ - DEBUG -   pred_source_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,869 - __main__ - DEBUG -   pred_target_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,869 - __main__ - DEBUG -   source_img_align: shape=[1, 3, 128, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,869 - __main__ - DEBUG -   target_img_align: shape=[1, 3, 128, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,869 - __main__ - DEBUG -   align_warp: shape=[2, 128, 128, 2], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,869 - __main__ - DEBUG -   align_warp_full: shape=[2, 512, 512, 2], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,869 - __main__ - DEBUG -   source_pose_embed: shape=[1, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,869 - __main__ - DEBUG -   target_pose_embed: shape=[1, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,871 - __main__ - DEBUG - Source warp embed dict:
+2025-09-19 10:31:50,871 - __main__ - DEBUG -     source_warp[orig]: shape=[1, 512, 16], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,871 - __main__ - DEBUG -     source_warp[orig_d]: shape=[1, 512, 16], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,871 - __main__ - DEBUG -     source_warp[ada_v]: shape=[1, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,871 - __main__ - DEBUG - Target warp embed dict:
+2025-09-19 10:31:50,871 - __main__ - DEBUG -     target_warp[orig]: shape=[1, 512, 16], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,871 - __main__ - DEBUG -     target_warp[orig_d]: shape=[1, 512, 16], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,871 - __main__ - DEBUG -     target_warp[ada_v]: shape=[1, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,871 - __main__ - DEBUG - 
+=== embed_dict ===
+2025-09-19 10:31:50,871 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,871 - __main__ - INFO - STEP 8: XY Warp Generator
+2025-09-19 10:31:50,871 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,884 - __main__ - DEBUG -   xy_warp: shape=[1, 16, 64, 64, 3], device=cuda:0, dtype=torch.float32, range=[-1.3948, 2.0000], mean=0.0049, std=0.7132
+2025-09-19 10:31:50,885 - __main__ - DEBUG -   xy_conf: shape=[1, 3, 16, 64, 64], device=cuda:0, dtype=torch.float32, range=[-1.0000, 1.0000], mean=0.0049, std=0.2581
+2025-09-19 10:31:50,885 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,885 - __main__ - INFO - STEP 9: Local Encoder
+2025-09-19 10:31:50,885 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,885 - __main__ - DEBUG -   masked_input: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32, range=[-1.0000, 1.0000], mean=-0.2083, std=0.3940
+2025-09-19 10:31:50,906 - __main__ - DEBUG -   source_latents: shape=[1, 1536, 64, 64], device=cuda:0, dtype=torch.float32, range=[-43.6333, 36.9271], mean=0.1253, std=5.8706
+2025-09-19 10:31:50,906 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,906 - __main__ - INFO - STEP 10: Creating Source Volume
+2025-09-19 10:31:50,906 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,906 - __main__ - DEBUG -   Volume dimensions: c=96, d=16, s=64
+2025-09-19 10:31:50,906 - __main__ - DEBUG -   source_volume: shape=[1, 96, 16, 64, 64], device=cuda:0, dtype=torch.float32, range=[-43.6333, 36.9271], mean=0.1253, std=5.8706
+2025-09-19 10:31:50,906 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,906 - __main__ - INFO - STEP 11: Volume Source Network
+2025-09-19 10:31:50,906 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,906 - __main__ - DEBUG -   input_volume: shape=[1, 96, 16, 64, 64], device=cuda:0, dtype=torch.float32, range=[-43.6333, 36.9271], mean=0.1253, std=5.8706
+2025-09-19 10:31:50,911 - __main__ - DEBUG -   processed_volume: shape=[1, 96, 16, 64, 64], device=cuda:0, dtype=torch.float32, range=[-49.9362, 44.7376], mean=0.1965, std=6.2137
+2025-09-19 10:31:50,911 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,911 - __main__ - INFO - STEP 12: Creating Source Rotation Warp
+2025-09-19 10:31:50,911 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,911 - __main__ - DEBUG -   identity_grid: shape=[1, 65536, 4], device=cuda:0, dtype=torch.float32, range=[-1.0000, 1.0000], mean=0.2500, std=0.6737
+2025-09-19 10:31:50,912 - __main__ - DEBUG -   source_rotation_warp: shape=[1, 16, 64, 64, 3], device=cuda:0, dtype=torch.float32, range=[-0.9060, 0.8209], mean=-0.0312, std=0.4089
+2025-09-19 10:31:50,912 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,912 - __main__ - INFO - STEP 13: Grid Sample (source rotation)
+2025-09-19 10:31:50,912 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,912 - __main__ - DEBUG -   input_volume: shape=[1, 96, 16, 64, 64], device=cuda:0, dtype=torch.float32, range=[-49.9362, 44.7376], mean=0.1965, std=6.2137
+2025-09-19 10:31:50,912 - __main__ - DEBUG -   warp_field: shape=[1, 16, 64, 64, 3], device=cuda:0, dtype=torch.float32, range=[-0.9060, 0.8209], mean=-0.0312, std=0.4089
+2025-09-19 10:31:50,913 - __main__ - DEBUG -   warped_volume: shape=[1, 96, 16, 64, 64], device=cuda:0, dtype=torch.float32, range=[-43.2830, 37.7650], mean=0.2225, std=5.8920
+2025-09-19 10:31:50,913 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,913 - __main__ - INFO - STEP 14: Grid Sample (source XY)
+2025-09-19 10:31:50,913 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,913 - __main__ - DEBUG -   input_volume: shape=[1, 96, 16, 64, 64], device=cuda:0, dtype=torch.float32, range=[-43.2830, 37.7650], mean=0.2225, std=5.8920
+2025-09-19 10:31:50,913 - __main__ - DEBUG -   warp_field: shape=[1, 16, 64, 64, 3], device=cuda:0, dtype=torch.float32, range=[-1.3948, 2.0000], mean=0.0049, std=0.7132
+2025-09-19 10:31:50,913 - __main__ - DEBUG -   warped_volume: shape=[1, 96, 16, 64, 64], device=cuda:0, dtype=torch.float32, range=[-41.4566, 36.6019], mean=0.2094, std=4.4236
+2025-09-19 10:31:50,913 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,913 - __main__ - INFO - STEP 15: Volume Process Network
+2025-09-19 10:31:50,913 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,914 - __main__ - DEBUG -   input_volume: shape=[1, 96, 16, 64, 64], device=cuda:0, dtype=torch.float32, range=[-41.4566, 36.6019], mean=0.2094, std=4.4236
+2025-09-19 10:31:50,914 - __main__ - DEBUG - 
+=== embed_dict ===
+2025-09-19 10:31:50,954 - __main__ - DEBUG -   processed_volume: shape=[1, 96, 16, 64, 64], device=cuda:0, dtype=torch.float32, range=[-2.9867, 2.4477], mean=0.0034, std=0.1904
+2025-09-19 10:31:50,954 - __main__ - INFO - 
+>>> SOURCE PROCESSING COMPLETE <<<
+2025-09-19 10:31:50,954 - __main__ - INFO -   Identity embedding shape: torch.Size([1, 512, 4, 4])
+2025-09-19 10:31:50,954 - __main__ - INFO -   Processed canonical shape: torch.Size([1, 96, 16, 64, 64])
+2025-09-19 10:31:50,954 - __main__ - INFO - 
+################################################################################
+2025-09-19 10:31:50,954 - __main__ - INFO - PHASE 2: PROCESSING TARGET IMAGE (EXPRESSION APPLICATION)
+2025-09-19 10:31:50,954 - __main__ - INFO - ################################################################################
+2025-09-19 10:31:50,954 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,954 - __main__ - INFO - STEP 16: Face IDT Forward
+2025-09-19 10:31:50,954 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,954 - __main__ - DEBUG -   input: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32, range=[-0.9922, 1.0000], mean=-0.1945, std=0.4144
+2025-09-19 10:31:50,957 - __main__ - DEBUG -   face_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.int64
+2025-09-19 10:31:50,957 - __main__ - DEBUG -   cloth_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.int64
+2025-09-19 10:31:50,957 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,957 - __main__ - INFO - STEP 17: Head Pose Regressor
+2025-09-19 10:31:50,957 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,958 - __main__ - DEBUG -   input: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32, range=[-0.9922, 1.0000], mean=-0.1945, std=0.4144
+2025-09-19 10:31:50,959 - __main__ - DEBUG -   theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32, range=[-0.0629, 1.0000], mean=0.1981, std=0.3764
+2025-09-19 10:31:50,961 - __main__ - DEBUG -   scale=tensor([[0.7080, 0.8128, 0.7647]], device='cuda:0'), rotation=tensor([[-0.0245,  0.0359, -0.0242]], device='cuda:0'), translation=tensor([[ 0.0058, -0.0759, -0.0638]], device='cuda:0')
+2025-09-19 10:31:50,961 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,961 - __main__ - INFO - STEP 18: Creating Target Data Dict (with Source Identity)
+2025-09-19 10:31:50,961 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,961 - __main__ - DEBUG - 
+=== target_data_dict ===
+2025-09-19 10:31:50,961 - __main__ - DEBUG -   source_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,961 - __main__ - DEBUG -   source_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,961 - __main__ - DEBUG -   source_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,961 - __main__ - DEBUG -   target_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,961 - __main__ - DEBUG -   target_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,961 - __main__ - DEBUG -   target_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,961 - __main__ - DEBUG -   idt_embed: shape=[1, 512, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,961 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,961 - __main__ - INFO - STEP 19: Expression Embedder
+2025-09-19 10:31:50,961 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,961 - __main__ - DEBUG - 
+=== input_data_dict ===
+2025-09-19 10:31:50,961 - __main__ - DEBUG -   source_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,961 - __main__ - DEBUG -   source_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,961 - __main__ - DEBUG -   source_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,961 - __main__ - DEBUG -   target_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,961 - __main__ - DEBUG -   target_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,961 - __main__ - DEBUG -   target_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,961 - __main__ - DEBUG -   idt_embed: shape=[1, 512, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,964 - __main__ - DEBUG - 
+=== output_data_dict ===
+2025-09-19 10:31:50,964 - __main__ - DEBUG -   source_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,964 - __main__ - DEBUG -   source_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,964 - __main__ - DEBUG -   source_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,964 - __main__ - DEBUG -   target_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,964 - __main__ - DEBUG -   target_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,964 - __main__ - DEBUG -   target_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,964 - __main__ - DEBUG -   idt_embed: shape=[1, 512, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,964 - __main__ - DEBUG -   pred_source_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,964 - __main__ - DEBUG -   pred_target_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,964 - __main__ - DEBUG -   source_img_align: shape=[1, 3, 128, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,964 - __main__ - DEBUG -   target_img_align: shape=[1, 3, 128, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,964 - __main__ - DEBUG -   align_warp: shape=[2, 128, 128, 2], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,964 - __main__ - DEBUG -   align_warp_full: shape=[2, 512, 512, 2], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,964 - __main__ - DEBUG -   source_pose_embed: shape=[1, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,964 - __main__ - DEBUG -   target_pose_embed: shape=[1, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,964 - __main__ - DEBUG -   source_pose_embed: shape=[1, 128], device=cuda:0, dtype=torch.float32, range=[-2.1612, 1.7617], mean=0.0099, std=0.5643
+2025-09-19 10:31:50,965 - __main__ - DEBUG -   target_pose_embed: shape=[1, 128], device=cuda:0, dtype=torch.float32, range=[-2.1612, 1.7617], mean=0.0099, std=0.5643
+2025-09-19 10:31:50,965 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,965 - __main__ - INFO - STEP 20: Predict Embed
+2025-09-19 10:31:50,965 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,965 - __main__ - DEBUG - 
+=== input_data_dict ===
+2025-09-19 10:31:50,965 - __main__ - DEBUG -   source_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,965 - __main__ - DEBUG -   source_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,965 - __main__ - DEBUG -   source_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,965 - __main__ - DEBUG -   target_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,965 - __main__ - DEBUG -   target_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,965 - __main__ - DEBUG -   target_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,965 - __main__ - DEBUG -   idt_embed: shape=[1, 512, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,965 - __main__ - DEBUG -   pred_source_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,965 - __main__ - DEBUG -   pred_target_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,965 - __main__ - DEBUG -   source_img_align: shape=[1, 3, 128, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,965 - __main__ - DEBUG -   target_img_align: shape=[1, 3, 128, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,965 - __main__ - DEBUG -   align_warp: shape=[2, 128, 128, 2], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,965 - __main__ - DEBUG -   align_warp_full: shape=[2, 512, 512, 2], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,965 - __main__ - DEBUG -   source_pose_embed: shape=[1, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,965 - __main__ - DEBUG -   target_pose_embed: shape=[1, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,966 - __main__ - DEBUG - Source warp embed dict:
+2025-09-19 10:31:50,966 - __main__ - DEBUG -     source_warp[orig]: shape=[1, 512, 16], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,966 - __main__ - DEBUG -     source_warp[orig_d]: shape=[1, 512, 16], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,966 - __main__ - DEBUG -     source_warp[ada_v]: shape=[1, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,966 - __main__ - DEBUG - Target warp embed dict:
+2025-09-19 10:31:50,966 - __main__ - DEBUG -     target_warp[orig]: shape=[1, 512, 16], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,966 - __main__ - DEBUG -     target_warp[orig_d]: shape=[1, 512, 16], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,966 - __main__ - DEBUG -     target_warp[ada_v]: shape=[1, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,966 - __main__ - DEBUG - 
+=== embed_dict ===
+2025-09-19 10:31:50,966 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,966 - __main__ - INFO - STEP 21: UV Warp Generator
+2025-09-19 10:31:50,966 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,970 - __main__ - DEBUG -   uv_warp: shape=[1, 16, 64, 64, 3], device=cuda:0, dtype=torch.float32, range=[-1.4054, 1.9993], mean=0.1466, std=0.7513
+2025-09-19 10:31:50,970 - __main__ - DEBUG -   uv_conf: shape=[1, 3, 16, 64, 64], device=cuda:0, dtype=torch.float32, range=[-1.0000, 1.0000], mean=0.1466, std=0.3403
+2025-09-19 10:31:50,970 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,970 - __main__ - INFO - STEP 22: Grid Sample (target UV)
+2025-09-19 10:31:50,970 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,971 - __main__ - DEBUG -   input_volume: shape=[1, 96, 16, 64, 64], device=cuda:0, dtype=torch.float32, range=[-2.9867, 2.4477], mean=0.0034, std=0.1904
+2025-09-19 10:31:50,971 - __main__ - DEBUG -   warp_field: shape=[1, 16, 64, 64, 3], device=cuda:0, dtype=torch.float32, range=[-1.4054, 1.9993], mean=0.1466, std=0.7513
+2025-09-19 10:31:50,971 - __main__ - DEBUG -   warped_volume: shape=[1, 96, 16, 64, 64], device=cuda:0, dtype=torch.float32, range=[-2.6772, 1.8829], mean=0.0046, std=0.1081
+2025-09-19 10:31:50,971 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,971 - __main__ - INFO - STEP 23: Creating Target Rotation Warp
+2025-09-19 10:31:50,971 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,971 - __main__ - DEBUG -   target_rotation_warp: shape=[1, 16, 64, 64, 3], device=cuda:0, dtype=torch.float32, range=[-0.9142, 0.7883], mean=-0.0364, std=0.4556
+2025-09-19 10:31:50,971 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,971 - __main__ - INFO - STEP 24: Grid Sample (target rotation)
+2025-09-19 10:31:50,972 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,972 - __main__ - DEBUG -   input_volume: shape=[1, 96, 16, 64, 64], device=cuda:0, dtype=torch.float32, range=[-2.6772, 1.8829], mean=0.0046, std=0.1081
+2025-09-19 10:31:50,972 - __main__ - DEBUG -   warp_field: shape=[1, 16, 64, 64, 3], device=cuda:0, dtype=torch.float32, range=[-0.9142, 0.7883], mean=-0.0364, std=0.4556
+2025-09-19 10:31:50,972 - __main__ - DEBUG -   warped_volume: shape=[1, 96, 16, 64, 64], device=cuda:0, dtype=torch.float32, range=[-2.0513, 1.3437], mean=0.0071, std=0.1258
+2025-09-19 10:31:50,972 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,972 - __main__ - INFO - STEP 25: Preparing Decoder Input
+2025-09-19 10:31:50,972 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,973 - __main__ - DEBUG -   target_latent_feats: shape=[1, 1536, 64, 64], device=cuda:0, dtype=torch.float32, range=[-2.0513, 1.3437], mean=0.0071, std=0.1258
+2025-09-19 10:31:50,973 - __main__ - DEBUG - 
+=== decode_dict ===
+2025-09-19 10:31:50,973 - __main__ - DEBUG -   target_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,973 - __main__ - DEBUG -   target_pose_embed: shape=[1, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,973 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:50,973 - __main__ - INFO - STEP 26: Decoder Network
+2025-09-19 10:31:50,973 - __main__ - INFO - ============================================================
+2025-09-19 10:31:50,973 - __main__ - DEBUG - 
+=== data_dict ===
+2025-09-19 10:31:50,973 - __main__ - DEBUG -   target_theta: shape=[1, 4, 4], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,973 - __main__ - DEBUG -   target_pose_embed: shape=[1, 128], device=cuda:0, dtype=torch.float32
+2025-09-19 10:31:50,973 - __main__ - DEBUG - 
+=== embed_dict ===
+2025-09-19 10:31:50,973 - __main__ - DEBUG -   latent_feats: shape=[1, 1536, 64, 64], device=cuda:0, dtype=torch.float32, range=[-2.0513, 1.3437], mean=0.0071, std=0.1258
+2025-09-19 10:31:50,973 - __main__ - DEBUG -   stage_two=True
+2025-09-19 10:31:51,001 - __main__ - DEBUG -   generated_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32, range=[0.0000, 1.0000], mean=0.2411, std=0.3128
+2025-09-19 10:31:51,001 - __main__ - DEBUG -   deep_features: shape=[1, 512, 64, 64], device=cuda:0, dtype=torch.float32, range=[-38.4213, 25.2028], mean=-0.0059, std=0.5857
+2025-09-19 10:31:51,002 - __main__ - DEBUG -   img_features: shape=[1, 128, 512, 512], device=cuda:0, dtype=torch.float32, range=[-206.2700, 94.2017], mean=-0.0297, std=2.0088
+2025-09-19 10:31:51,002 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:51,002 - __main__ - INFO - STEP 27: Face IDT Forward
+2025-09-19 10:31:51,002 - __main__ - INFO - ============================================================
+2025-09-19 10:31:51,002 - __main__ - DEBUG -   input: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32, range=[0.0000, 1.0000], mean=0.2411, std=0.3128
+2025-09-19 10:31:51,005 - __main__ - DEBUG -   face_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.int64
+2025-09-19 10:31:51,005 - __main__ - DEBUG -   cloth_mask: shape=[1, 1, 512, 512], device=cuda:0, dtype=torch.int64
+2025-09-19 10:31:51,005 - __main__ - INFO - 
+============================================================
+2025-09-19 10:31:51,005 - __main__ - INFO - STEP 28: Final Compositing
+2025-09-19 10:31:51,005 - __main__ - INFO - ============================================================
+2025-09-19 10:31:51,006 - __main__ - DEBUG -   final_img: shape=[1, 3, 512, 512], device=cuda:0, dtype=torch.float32, range=[-0.9529, 1.0000], mean=0.0041, std=0.3580
+2025-09-19 10:31:51,006 - __main__ - INFO - 
+################################################################################
+2025-09-19 10:31:51,006 - __main__ - INFO - PHASE 3: SAVING RESULTS
+2025-09-19 10:31:51,006 - __main__ - INFO - ################################################################################
+2025-09-19 10:31:51,669 - __main__ - INFO - Saved result to debug_face_swap_result.png
+2025-09-19 10:31:51,732 - __main__ - INFO - Saved final output to debug_final_output.png
+2025-09-19 10:31:51,732 - __main__ - INFO - 
+================================================================================
+2025-09-19 10:31:51,732 - __main__ - INFO - DEBUG PIPELINE COMPLETE
+2025-09-19 10:31:51,732 - __main__ - INFO - ================================================================================
+2025-09-19 10:31:51,732 - __main__ - INFO - 
+Summary:
+2025-09-19 10:31:51,732 - __main__ - INFO -   Total steps logged: 28
+2025-09-19 10:31:51,732 - __main__ - INFO -   Source identity shape: torch.Size([1, 512, 4, 4])
+2025-09-19 10:31:51,732 - __main__ - INFO -   Final output shape: torch.Size([1, 3, 512, 512])
+2025-09-19 10:31:51,732 - __main__ - INFO -   Output range: [-0.953, 1.000]
+Hybrid stages [True, True, True]
+bbbbbbbbbbb
+Hybrid stages [True, True, True]
+SN applied to local_encoder_nw
+SN applied to idt_embedder_nw
+SN applied to expression_embedder_nw
+SN applied to xy_generator_nw
+SN applied to uv_generator_nw
+SN applied to warp_embed_head_orig_nw
+SN applied to volume_process_nw
+SN applied to volume_source_nw
+SN applied to decoder_nw
+WS applied to local_encoder_nw
+WS applied to idt_embedder_nw
+WS applied to expression_embedder_nw
+WS applied to xy_generator_nw
+WS applied to uv_generator_nw
+WS applied to warp_embed_head_orig_nw
+WS applied to volume_process_nw
+WS applied to volume_source_nw
+WS applied to decoder_nw
