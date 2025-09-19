@@ -1,0 +1,9 @@
+{
+  "step": 5,
+  "method": "source_processing",
+  "stage": "after_expression_embedder",
+  "timestamp": "2025-09-19T19:59:50.802700",
+  "data": {
+    "has_source_pose_embed": true
+  }
+}

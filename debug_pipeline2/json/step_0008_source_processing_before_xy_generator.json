@@ -1,0 +1,9 @@
+{
+  "step": 8,
+  "method": "source_processing",
+  "stage": "before_xy_generator",
+  "timestamp": "2025-09-19T19:59:50.808796",
+  "data": {
+    "input_type": "dict"
+  }
+}

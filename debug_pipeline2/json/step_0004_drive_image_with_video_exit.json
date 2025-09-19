@@ -1,0 +1,9 @@
+{
+  "step": 4,
+  "method": "drive_image_with_video",
+  "stage": "exit",
+  "timestamp": "2025-09-19T19:59:53.459296",
+  "data": {
+    "num_output_frames": 3
+  }
+}

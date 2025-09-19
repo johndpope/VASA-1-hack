@@ -1,0 +1,14 @@
+{
+  "step": 2,
+  "method": "source_processing",
+  "stage": "idt_embed",
+  "timestamp": "2025-09-19T19:59:49.981835",
+  "data": {
+    "idt_embed_shape": [
+      1,
+      512,
+      4,
+      4
+    ]
+  }
+}

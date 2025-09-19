@@ -1,0 +1,9 @@
+{
+  "step": 4,
+  "method": "source_processing",
+  "stage": "before_expression_embedder",
+  "timestamp": "2025-09-19T19:59:50.736663",
+  "data": {
+    "call_args": "(data_dict, True, False)"
+  }
+}

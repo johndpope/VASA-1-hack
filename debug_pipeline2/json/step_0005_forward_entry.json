@@ -1,0 +1,11 @@
+{
+  "step": 5,
+  "method": "forward",
+  "stage": "entry",
+  "timestamp": "2025-09-19T16:04:48.157470",
+  "data": {
+    "has_source": false,
+    "has_driver": true,
+    "frame_idx": 2
+  }
+}

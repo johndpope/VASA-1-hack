@@ -1,0 +1,5 @@
+{
+  "orig": "torch.Size([1, 512, 16])",
+  "orig_d": "torch.Size([1, 512, 16])",
+  "ada_v": "torch.Size([1, 128])"
+}

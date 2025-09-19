@@ -1,0 +1,15 @@
+{
+  "step": 7,
+  "method": "source_processing",
+  "stage": "after_predict_embed",
+  "timestamp": "2025-09-19T19:59:50.807800",
+  "data": {
+    "has_orig": false,
+    "warp_dict_keys": [
+      "orig",
+      "orig_d",
+      "ada_v"
+    ],
+    "embed_dict_keys": []
+  }
+}

@@ -1,0 +1,37 @@
+[
+  {
+    "step": 1,
+    "method": "drive_image_with_video",
+    "stage": "entry",
+    "timestamp": "2025-09-19T16:04:41.555318",
+    "data": {
+      "video_path": "junk/15.mp4",
+      "max_len": 3
+    }
+  },
+  {
+    "step": 2,
+    "method": "video_frames",
+    "stage": "loaded",
+    "timestamp": "2025-09-19T16:04:42.454940",
+    "data": {
+      "num_frames": 3
+    }
+  },
+  {
+    "step": 3,
+    "method": "first_frame",
+    "stage": "processed",
+    "timestamp": "2025-09-19T16:04:47.958512",
+    "data": {}
+  },
+  {
+    "step": 4,
+    "method": "drive_image_with_video",
+    "stage": "exit",
+    "timestamp": "2025-09-19T16:04:48.353930",
+    "data": {
+      "num_output_frames": 3
+    }
+  }
+]
