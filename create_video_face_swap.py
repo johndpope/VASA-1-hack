@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import numpy as np
 import sys
 import logging
+import math
 from pathlib import Path
 import importlib
 from omegaconf import OmegaConf
@@ -187,8 +188,8 @@ def extract_identity_features(model, source_img: torch.Tensor, face_detector, po
         idt_embed = model.idt_embedder_nw(masked_source)
         logger.debug(f"Identity embedding shape: {idt_embed.shape}")
 
-        # Get head pose
-        source_theta = get_pose_matrix(model, source_img, face_detector, pose_estimator)
+        # Get head pose using model's head_pose_regressor (matching pipeline)
+        source_theta = model.head_pose_regressor.forward(source_img)
 
         # Prepare data dict
         data_dict = {
@@ -229,10 +230,13 @@ def extract_identity_features(model, source_img: torch.Tensor, face_detector, po
             source_volume = model.volume_source_nw(source_volume)
             logger.debug(f"Processed source volume shape: {source_volume.shape}")
 
-        # Apply source rotation and XY warp to get canonical volume
-        grid = model.identity_grid_3d[:1]
-        source_rot_warp = grid.bmm(source_theta[:, :3, :].transpose(1, 2)).view(1, d, s, s, 3)
-        rotated_source = model.grid_sample(source_volume, source_rot_warp)
+        # Apply INVERSE source rotation and XY warp to get canonical volume (matching pipeline4.py)
+        grid = model.identity_grid_3d.repeat_interleave(1, dim=0)
+        inv_source_theta = source_theta.float().inverse().type(source_theta.type())
+        source_rotation_warp = grid.bmm(inv_source_theta[:, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+
+        # Apply warps in correct order: rotation first, then XY warp
+        rotated_source = model.grid_sample(source_volume, source_rotation_warp)
         canonical_volume = model.grid_sample(rotated_source, source_xy_warp)
         logger.debug(f"Canonical volume shape: {canonical_volume.shape}")
 
@@ -261,8 +265,8 @@ def apply_target_to_identity(model, identity_info: Dict, target_img: torch.Tenso
         target_mask = F.avg_pool2d(target_mask, 3, stride=1, padding=1)
         logger.debug(f"Target mask shape: {target_mask.shape}")
 
-        # Get target pose
-        target_theta = get_pose_matrix(model, target_img, face_detector, pose_estimator)
+        # Get target pose using model's head_pose_regressor (matching pipeline)
+        target_theta = model.head_pose_regressor.forward(target_img)
 
         # Create target data dict with source identity
         data_dict = {
@@ -288,19 +292,9 @@ def apply_target_to_identity(model, identity_info: Dict, target_img: torch.Tenso
         target_uv_warp, target_delta_uv = model.uv_generator_nw(target_warp_embed)
         logger.debug(f"Target UV warp shape: {target_uv_warp.shape}")
 
-        # Resize UV warp if needed (consistent with pipeline5.py)
-        if hasattr(model.args, 'warp_output_size') and hasattr(model.args, 'gen_latent_texture_size'):
-            resize_warp = model.args.warp_output_size != model.args.gen_latent_texture_size
-            if resize_warp:
-                stride = (1, model.args.warp_output_size // model.args.gen_latent_texture_size,
-                          model.args.warp_output_size // model.args.gen_latent_texture_size)
-                target_uv_warp_resize = F.avg_pool3d(target_uv_warp.permute(0, 4, 1, 2, 3),
-                                                     kernel_size=stride, stride=stride).permute(0, 2, 3, 4, 1)
-            else:
-                target_uv_warp_resize = target_uv_warp
-        else:
-            target_uv_warp_resize = target_uv_warp
-            logger.warning("Warp resize parameters not found, using original UV warp")
+        # Match pipeline5.py logic - no resizing, just use the UV warp as-is
+        target_uv_warp_resize = target_uv_warp
+        logger.debug(f"Using UV warp without resizing, shape: {target_uv_warp_resize.shape}")
 
         # Cache warps to H5 if requested
         if cache_h5_path:
@@ -318,22 +312,24 @@ def apply_target_to_identity(model, identity_info: Dict, target_img: torch.Tenso
                 logger.error(f"Failed to cache warps: {str(e)}")
                 raise
 
-        # Apply UV warp to canonical volume
-        volume_with_expression = model.grid_sample(identity_info['canonical_volume'], target_uv_warp_resize)
-        logger.debug(f"Volume with expression shape: {volume_with_expression.shape}")
-
-        # Apply target rotation
+        # Get volume dimensions (matching pipeline5.py)
         c = model.args.latent_volume_channels
         d = model.args.latent_volume_depth
         s = model.args.latent_volume_size
 
-        grid = model.identity_grid_3d[:1]
-        target_rot_warp = grid.bmm(target_theta[:, :3, :].transpose(1, 2)).view(1, d, s, s, 3)
-        final_volume = model.grid_sample(volume_with_expression, target_rot_warp)
-        logger.debug(f"Final volume shape: {final_volume.shape}")
+        # Generate 3D grid and rotation warp for target (matching pipeline5.py)
+        grid = model.identity_grid_3d.repeat_interleave(1, dim=0)
+        target_rotation_warp = grid.bmm(target_theta[:, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+
+        # Apply warps exactly like pipeline5.py - nested grid_sample calls
+        aligned_target_volume = model.grid_sample(
+            model.grid_sample(identity_info['canonical_volume'], target_uv_warp_resize),
+            target_rotation_warp
+        )
+        logger.debug(f"Aligned target volume shape: {aligned_target_volume.shape}")
 
         # Decode
-        target_latent_feats = final_volume.view(1, c * d, s, s)
+        target_latent_feats = aligned_target_volume.view(1, c * d, s, s)
         decode_dict = {
             'target_theta': target_theta,
             'target_pose_embed': target_pose_embed
