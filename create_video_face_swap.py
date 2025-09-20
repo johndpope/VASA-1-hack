@@ -253,10 +253,10 @@ def extract_identity_features(model, source_img: torch.Tensor, face_detector, po
         }
 
 
-def apply_target_to_identity(model, identity_info: Dict, target_img: torch.Tensor, face_detector, pose_estimator,
-                            cache_h5_path: Optional[str] = None, frame_idx: int = 0) -> Tuple[torch.Tensor, Dict]:
-    """Apply target expression/pose to source identity, with optional warp caching."""
-    logger.info(f"Applying target to identity for frame {frame_idx}...")
+def calculate_target_warps(model, identity_info: Dict, target_img: torch.Tensor,
+                          cache_h5_path: Optional[str] = None, frame_idx: int = 0) -> Dict:
+    """Calculate warps for target image and optionally cache them."""
+    logger.info(f"Calculating warps for frame {frame_idx}...")
 
     with torch.no_grad():
         # Get target face mask
@@ -304,13 +304,36 @@ def apply_target_to_identity(model, identity_info: Dict, target_img: torch.Tenso
                     if f'frame_{frame_idx}' in f:
                         del f[f'frame_{frame_idx}']  # Overwrite if exists
                     grp = f.create_group(f'frame_{frame_idx}')
-                    grp.create_dataset('uv_warp', data=target_uv_warp_resize.cpu().numpy())
-                    grp.create_dataset('theta', data=target_theta.cpu().numpy())
-                    grp.create_dataset('target_pose_embed', data=target_pose_embed.cpu().numpy())
-                    grp.create_dataset('frame', data=target_img.cpu().numpy())  # Cache frame for reference
+                    # Save with compression to reduce file size
+                    grp.create_dataset('uv_warp', data=target_uv_warp_resize.cpu().numpy(),
+                                      compression='gzip', compression_opts=4)
+                    grp.create_dataset('theta', data=target_theta.cpu().numpy(),
+                                      compression='gzip', compression_opts=4)
+                    grp.create_dataset('target_pose_embed', data=target_pose_embed.cpu().numpy(),
+                                      compression='gzip', compression_opts=4)
             except Exception as e:
                 logger.error(f"Failed to cache warps: {str(e)}")
                 raise
+
+        # Return warp data
+        return {
+            'uv_warp': target_uv_warp_resize,
+            'theta': target_theta,
+            'target_pose_embed': target_pose_embed,
+            'target_mask': target_mask
+        }
+
+
+def decode_with_warps(model, identity_info: Dict, warp_data: Dict,
+                     target_img: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """Decode using pre-calculated warps to generate the final image."""
+    logger.info("Decoding with warps...")
+
+    with torch.no_grad():
+        # Extract warp data
+        target_uv_warp_resize = warp_data['uv_warp']
+        target_theta = warp_data['theta']
+        target_pose_embed = warp_data['target_pose_embed']
 
         # Get volume dimensions (matching pipeline5.py)
         c = model.args.latent_volume_channels
@@ -355,19 +378,64 @@ def apply_target_to_identity(model, identity_info: Dict, target_img: torch.Tenso
             gen_mask = F.avg_pool2d(gen_mask, 3, stride=1, padding=1)
         logger.debug(f"Generated mask shape: {gen_mask.shape}")
 
-        # Composite with target background
-        background = target_img * (1 - gen_mask)
-        final_img = generated_img * gen_mask + background
+        # Composite with target background if target image provided
+        if target_img is not None:
+            background = target_img * (1 - gen_mask)
+            final_img = generated_img * gen_mask + background
+        else:
+            final_img = generated_img
+
         final_img = torch.clamp(final_img, -1, 1)
 
-        # Return result and cache data (for potential reuse)
-        cache_data = {
-            'uv_warp': target_uv_warp_resize,
-            'theta': target_theta,
-            'target_pose_embed': target_pose_embed
-        }
+        return final_img
 
-        return final_img, cache_data
+
+def load_cached_warps(cache_h5_path: str, frame_idx: int, device: str = 'cuda') -> Optional[Dict]:
+    """Load cached warps from H5 file."""
+    try:
+        with h5py.File(cache_h5_path, 'r') as f:
+            frame_key = f'frame_{frame_idx}'
+            if frame_key not in f:
+                logger.warning(f"Frame {frame_idx} not found in cache")
+                return None
+
+            grp = f[frame_key]
+            warp_data = {
+                'uv_warp': torch.from_numpy(grp['uv_warp'][:]).to(device),
+                'theta': torch.from_numpy(grp['theta'][:]).to(device),
+                'target_pose_embed': torch.from_numpy(grp['target_pose_embed'][:]).to(device)
+            }
+            logger.info(f"Loaded cached warps for frame {frame_idx}")
+            return warp_data
+    except Exception as e:
+        logger.error(f"Failed to load cached warps: {str(e)}")
+        return None
+
+
+def apply_target_to_identity(model, identity_info: Dict, target_img: torch.Tensor,
+                            cache_h5_path: Optional[str] = None, frame_idx: int = 0,
+                            use_cached: bool = True) -> Tuple[torch.Tensor, Dict]:
+    """Apply target expression/pose to source identity using refactored workflow.
+
+    This is now a convenience wrapper that combines warp calculation and decoding.
+    Set use_cached=True to try loading cached warps first.
+    """
+    logger.info(f"Applying target to identity for frame {frame_idx}...")
+
+    # Try to load cached warps first if requested
+    warp_data = None
+    if use_cached and cache_h5_path:
+        warp_data = load_cached_warps(cache_h5_path, frame_idx, device=target_img.device)
+
+    # Calculate warps if not cached
+    if warp_data is None:
+        warp_data = calculate_target_warps(model, identity_info, target_img,
+                                          cache_h5_path, frame_idx)
+
+    # Decode with warps
+    final_img = decode_with_warps(model, identity_info, warp_data, target_img)
+
+    return final_img, warp_data
 
 
 def main(cache_h5_path: Optional[str] = None):
@@ -441,7 +509,7 @@ def main(cache_h5_path: Optional[str] = None):
     for frame_idx, (name, target_img) in enumerate(targets):
         try:
             final_img, cache_data = apply_target_to_identity(
-                model, identity_info, target_img, face_detector, pose_estimator,
+                model, identity_info, target_img,
                 cache_h5_path=cache_h5_path, frame_idx=frame_idx
             )
             results.append({
@@ -534,4 +602,7 @@ def main(cache_h5_path: Optional[str] = None):
 
 
 if __name__ == "__main__":
-    main(cache_h5_path="proper_face_attributes_img1.h5")
+    # Use cleaned cache file if it exists (11MB vs 330MB)
+    import os
+    cache_file = "proper_face_attributes_img1_cleaned.h5" if os.path.exists("proper_face_attributes_img1_cleaned.h5") else "proper_face_attributes_img1.h5"
+    main(cache_h5_path=cache_file)

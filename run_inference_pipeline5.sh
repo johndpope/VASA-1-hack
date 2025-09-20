@@ -1,17 +1,16 @@
 #!/bin/bash
 
-# Pipeline4 Inference Script
+# Pipeline5 Inference Script
 # Enhanced version with motion warp extraction and driving capabilities
 
 # Default values
 SOURCE_IMAGE=""
 DRIVEN_VIDEO=""
-OUTPUT_PATH="output/result_pipeline4.mp4"
+OUTPUT_PATH="output/result_pipeline5.mp4"
 MAX_LEN=1000
 FPS=25.0
 MODE="drive"  # Options: drive, extract, apply
 WARPS_FILE=""
-USE_UV_WARPS=true
 
 # Colors for output
 RED='\033[0;31m'
@@ -23,23 +22,22 @@ NC='\033[0m' # No Color
 usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
-    echo "Pipeline4 inference script with motion warp capabilities"
+    echo "Pipeline5 inference script with motion warp capabilities"
     echo ""
     echo "OPTIONS:"
-    echo "  -s, --source IMAGE       Source image path (required for drive/apply modes)"
+    echo "  -s, --source IMAGE       Source image path (required for all modes)"
     echo "  -d, --driven VIDEO       Driving video path (required for drive/extract modes)"
-    echo "  -o, --output PATH        Output path (default: output/result_pipeline4.mp4)"
+    echo "  -o, --output PATH        Output path (default: output/result_pipeline5.mp4)"
     echo "  -m, --max-len NUM        Maximum frames to process (default: 1000)"
     echo "  -f, --fps FPS           Output video FPS (default: 25.0)"
     echo "  --mode MODE             Operation mode: drive|extract|apply (default: drive)"
     echo "  --extract-warps FILE    Extract warps to H5 file (sets mode to extract)"
     echo "  --apply-warps FILE      Apply warps from H5 file (sets mode to apply)"
-    echo "  --no-uv-warps          Disable UV warps (rigid only)"
     echo "  -h, --help             Display this help message"
     echo ""
     echo "MODES:"
     echo "  drive   - Standard video driving (requires -s and -d)"
-    echo "  extract - Extract motion warps to H5 (requires -d and --extract-warps)"
+    echo "  extract - Extract motion warps to H5 (requires -s, -d and --extract-warps)"
     echo "  apply   - Apply saved warps (requires -s and --apply-warps)"
     echo ""
     echo "EXAMPLES:"
@@ -47,7 +45,7 @@ usage() {
     echo "  $0 -s data/source.jpg -d data/driver.mp4 -o output/result.mp4"
     echo ""
     echo "  # Extract motion warps"
-    echo "  $0 --mode extract -d data/driver.mp4 --extract-warps warps.h5"
+    echo "  $0 --mode extract -s data/source.jpg -d data/driver.mp4 --extract-warps warps.h5"
     echo ""
     echo "  # Apply saved warps"
     echo "  $0 --mode apply -s data/source.jpg --apply-warps warps.h5 -o output/driven.mp4"
@@ -91,10 +89,6 @@ while [[ $# -gt 0 ]]; do
             WARPS_FILE="$2"
             shift 2
             ;;
-        --no-uv-warps)
-            USE_UV_WARPS=false
-            shift
-            ;;
         -h|--help)
             usage
             ;;
@@ -124,41 +118,40 @@ ensure_output_dir() {
 
 # Validate inputs based on mode
 case $MODE in
-    drive)
-        if [ -z "$SOURCE_IMAGE" ] || [ -z "$DRIVEN_VIDEO" ]; then
-            echo -e "${RED}Error: Drive mode requires both source image (-s) and driving video (-d)${NC}"
+    drive|extract|apply)
+        if [ -z "$SOURCE_IMAGE" ]; then
+            echo -e "${RED}Error: All modes require source image (-s)${NC}"
             usage
         fi
         check_file "$SOURCE_IMAGE"
-        check_file "$DRIVEN_VIDEO"
-        ensure_output_dir "$OUTPUT_PATH"
-        ;;
-    extract)
-        if [ -z "$DRIVEN_VIDEO" ] || [ -z "$WARPS_FILE" ]; then
-            echo -e "${RED}Error: Extract mode requires driving video (-d) and output warps file (--extract-warps)${NC}"
-            usage
-        fi
-        check_file "$DRIVEN_VIDEO"
-        ensure_output_dir "$WARPS_FILE"
-        ;;
-    apply)
-        if [ -z "$SOURCE_IMAGE" ] || [ -z "$WARPS_FILE" ]; then
-            echo -e "${RED}Error: Apply mode requires source image (-s) and warps file (--apply-warps)${NC}"
-            usage
-        fi
-        check_file "$SOURCE_IMAGE"
-        check_file "$WARPS_FILE"
-        ensure_output_dir "$OUTPUT_PATH"
-        ;;
-    *)
-        echo -e "${RED}Error: Invalid mode: $MODE${NC}"
-        echo "Valid modes are: drive, extract, apply"
-        exit 1
         ;;
 esac
 
+case $MODE in
+    drive|extract)
+        if [ -z "$DRIVEN_VIDEO" ]; then
+            echo -e "${RED}Error: Drive/Extract modes require driving video (-d)${NC}"
+            usage
+        fi
+        check_file "$DRIVEN_VIDEO"
+        ;;
+    apply)
+        if [ -z "$WARPS_FILE" ]; then
+            echo -e "${RED}Error: Apply mode requires warps file (--apply-warps)${NC}"
+            usage
+        fi
+        check_file "$WARPS_FILE"
+        ensure_output_dir "$OUTPUT_PATH"
+        ;;
+esac
+
+if [ "$MODE" = "extract" ] && [ -z "$WARPS_FILE" ]; then
+    echo -e "${RED}Error: Extract mode requires --extract-warps FILE${NC}"
+    usage
+fi
+
 # Build command based on mode
-echo -e "${GREEN}Running Pipeline4 in $MODE mode...${NC}"
+echo -e "${GREEN}Running Pipeline5 in $MODE mode...${NC}"
 echo "======================================"
 
 case $MODE in
@@ -170,7 +163,7 @@ case $MODE in
         echo "FPS: $FPS"
         echo ""
 
-        CMD="python nemo/pipeline4.py \
+        CMD="python nemo/pipeline5.py \
             --source_image_path \"$SOURCE_IMAGE\" \
             --driven_video_path \"$DRIVEN_VIDEO\" \
             --saved_to_path \"$OUTPUT_PATH\" \
@@ -179,14 +172,16 @@ case $MODE in
         ;;
 
     extract)
+        echo "Source Image: $SOURCE_IMAGE"
         echo "Driving Video: $DRIVEN_VIDEO"
         echo "Output Warps: $WARPS_FILE"
         echo "Max Frames: $MAX_LEN"
         echo ""
 
-        CMD="python nemo/pipeline4.py \
+        CMD="python nemo/pipeline5.py \
+            --source_image_path \"$SOURCE_IMAGE\" \
             --driven_video_path \"$DRIVEN_VIDEO\" \
-            --extract-warps \"$WARPS_FILE\" \
+            --cache_h5_path \"$WARPS_FILE\" \
             --max_len $MAX_LEN"
         ;;
 
@@ -195,23 +190,15 @@ case $MODE in
         echo "Warps File: $WARPS_FILE"
         echo "Output: $OUTPUT_PATH"
         echo "FPS: $FPS"
-        echo -n "UV Warps: "
-        if [ "$USE_UV_WARPS" = true ]; then
-            echo "Enabled"
-        else
-            echo "Disabled (rigid only)"
-        fi
+        echo "Num Frames: $MAX_LEN"
         echo ""
 
-        CMD="python nemo/pipeline4.py \
+        CMD="python nemo/pipeline5.py \
             --source_image_path \"$SOURCE_IMAGE\" \
-            --drive-with-warps \"$WARPS_FILE\" \
+            --load_h5_path \"$WARPS_FILE\" \
             --saved_to_path \"$OUTPUT_PATH\" \
-            --fps $FPS"
-
-        if [ "$USE_UV_WARPS" = true ]; then
-            CMD="$CMD --use-uv-warps"
-        fi
+            --fps $FPS \
+            --num_frames $MAX_LEN"
         ;;
 esac
 
