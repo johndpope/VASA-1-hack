@@ -1278,13 +1278,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         target_warp_embed, _, _, _ = self.emo_model.predict_embed(data_dict)
                         target_uv_warp, _ = self.emo_model.uv_generator_nw(target_warp_embed)
 
-                        # Resize UV warps to match canonical volume size
-                        target_uv_warp_resize = F.interpolate(
-                            target_uv_warp.view(1, 16 * 3, 64, 64),
-                            size=(64, 64),
-                            mode='bilinear',
-                            align_corners=False
-                        ).view(1, 16, 64, 64, 3)
+                        # Match create_video_face_swap.py logic - no resizing, just use the UV warp as-is
+                        target_uv_warp_resize = target_uv_warp
 
                     # Verify feature shapes
                     assert target_theta.shape == (1, 3, 4), f"Wrong theta shape: {target_theta.shape}"
@@ -1292,7 +1287,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     assert rotation.shape == (1, 3), f"Wrong rotation shape: {rotation.shape}"
                     assert translation.shape == (1, 3), f"Wrong translation shape: {translation.shape}"
                     assert expression_embed.shape == (1, 128), f"Wrong expression shape: {expression_embed.shape}"
-                    assert target_pose_embed.shape == (1, 512), f"Wrong target_pose_embed shape: {target_pose_embed.shape}"
+                    assert target_pose_embed.shape == (1, 128), f"Wrong target_pose_embed shape: {target_pose_embed.shape}"
                     assert target_uv_warp_resize.shape == (1, 16, 64, 64, 3), f"Wrong uv_warp shape: {target_uv_warp_resize.shape}"
 
                     # Compute rigid warps from theta for MotionTransformer compatibility
@@ -1301,12 +1296,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
                     # Use source XY warp for all frames (identity warps)
                     # This is the warp that transforms source to canonical space
-                    source_xy_warp_resize = F.interpolate(
-                        source_xy_warp.view(1, 16 * 3, 64, 64),
-                        size=(64, 64),
-                        mode='bilinear',
-                        align_corners=False
-                    ).view(1, 16, 64, 64, 3)
+                    # Match create_video_face_swap.py logic - no resizing
+                    source_xy_warp_resize = source_xy_warp
 
                     # Store outputs (aligned with create_video_face_swap.py)
                     outputs['theta'].append(target_theta.cpu())
