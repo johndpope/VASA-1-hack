@@ -1156,154 +1156,173 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 logger.debug(f"After adding batch dim - frames shape: {frames.shape}")
 
                 outputs = {
-                    'theta': [],
+                    'theta': [],            # Target pose (matches create_video_face_swap)
                     'scale': [],
                     'rotation': [],
                     'translation': [],
                     'expression_embed': [],
-                    'rigid_warps': [],      # Per-frame rigid warps (source_rotation_warp)
-                    'uv_warps': [],         # Per-frame non-rigid target warps
-                    'xy_warps': [],         # Per-frame non-rigid source warps (source_xy_warp)
-                    'source_theta': []      # Per-frame source thetas 🤷 - i guess this is aduplication of the theta
+                    'uv_warps': [],         # Target non-rigid warps (matches create_video_face_swap)
+                    'target_pose_embed': [], # Target expression embeddings (matches create_video_face_swap)
+                    # For compatibility with MotionTransformer
+                    'xy_warps': [],         # Source non-rigid warps (will compute from identity)
+                    'rigid_warps': []       # Rigid rotation warps (will compute from theta)
                 }
 
                 # Use first frame as identity for warp generation
                 identity_frame = frames[:, 0]  # [1,C,H,W]
 
-                # Process identity frame once
-                identity_dict = {
-                    'source_img': identity_frame,
-                    'target_img': identity_frame.clone(),
-                    'source_mask': torch.ones_like(identity_frame[:, :1]),
-                    'target_mask': torch.ones_like(identity_frame[:, :1]),
-                    'source_theta': torch.eye(3, 4).unsqueeze(0).to(identity_frame.device),  # Identity pose
-                    'target_theta': torch.eye(3, 4).unsqueeze(0).to(identity_frame.device),  # Identity pose
-                    'crop': False # 🤷 maybe we should crop?
-                }
+                # Extract identity features once (similar to extract_identity_features in create_video_face_swap.py)
+                with torch.no_grad():
+                    # Get face mask
+                    identity_mask, _, _, _ = self.emo_model.face_idt.forward(identity_frame)
+                    identity_mask = (identity_mask > 0.6).float()
+                    identity_mask = F.avg_pool2d(identity_mask, 3, stride=1, padding=1)
 
-                # Extract identity embedding
-                identity_dict = self.emo_model.expression_embedder_nw(identity_dict, True, False)
-                idt_embed = identity_dict.get('idt_embed')
+                    # Mask source image
+                    masked_identity = identity_frame * identity_mask
+
+                    # Extract identity embedding
+                    idt_embed = self.emo_model.idt_embedder_nw(masked_identity)
+
+                    # Get head pose for identity
+                    identity_theta = self.emo_model.head_pose_regressor.forward(identity_frame)
+
+                    # Prepare identity data dict
+                    identity_dict = {
+                        'source_img': identity_frame,
+                        'source_mask': identity_mask,
+                        'source_theta': identity_theta,
+                        'target_img': identity_frame,
+                        'target_mask': identity_mask,
+                        'target_theta': identity_theta,
+                        'idt_embed': idt_embed
+                    }
+
+                    # Get expression embedding for identity
+                    identity_dict = self.emo_model.expression_embedder_nw(identity_dict, True, False, False)
+
+                    # Get warp embeddings
+                    source_warp_embed, _, _, embed_dict = self.emo_model.predict_embed(identity_dict)
+
+                    # Generate XY warps for source
+                    source_xy_warp, _ = self.emo_model.xy_generator_nw(source_warp_embed)
+
+                    # Extract source volume
+                    source_latents = self.emo_model.local_encoder_nw(masked_identity)
+                    c = self.emo_model.args.latent_volume_channels
+                    d = self.emo_model.args.latent_volume_depth
+                    s = self.emo_model.args.latent_volume_size
+                    source_volume = source_latents.view(1, c, d, s, s)
+
+                    # Generate 3D grid for transformations
+                    identity_grid_3d = self.emo_model.identity_grid_3d.repeat_interleave(1, dim=0)
+
+                    # Apply inverse theta to create canonical volume
+                    theta_inv = torch.zeros(1, 3, 4, device=identity_frame.device)
+                    theta_inv[:, :3, :3] = identity_theta[:, :3, :3].transpose(1, 2)
+                    theta_inv[:, :3, 3] = -identity_theta[:, :3, :3].transpose(1, 2).bmm(identity_theta[:, :3, 3:4]).squeeze(-1)
+
+                    source_rotation_warp = identity_grid_3d.bmm(theta_inv[:, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+
+                    # Create canonical volume by applying inverse warps
+                    canonical_volume = self.emo_model.grid_sample(
+                        self.emo_model.grid_sample(source_volume, source_xy_warp),
+                        source_rotation_warp
+                    )
+
+                    # Store identity info
+                    identity_info = {
+                        'idt_embed': idt_embed,
+                        'embed_dict': embed_dict,
+                        'canonical_volume': canonical_volume,
+                        'source_theta': identity_theta,
+                        'source_mask': identity_mask
+                    }
 
 
-                d = 16  # depth
-                s = 64  # spatial size
-                c = 96  # channels for canonical volume
-             
+                # Process each frame (matching calculate_target_warps in create_video_face_swap.py)
                 for t in range(T):
                     frame = frames[:, t]  # [1,C,H,W]
-    
-                    # RIGID warping
-                    #  theta AND scale/rotation/translation
-                    theta, scale, rotation, translation = self.emo_model.head_pose_regressor.forward(
-                        frame,  # Use current frame for pose
-                        return_srt=True
-                    )
-                    theta = self.convert_theta_format(theta)
 
-                    # Identity 
-                    expression_embed = self.emo_model.expression_embedder_nw.net_face(
-                        frame  # Use current frame for expression
-                    )[0]
+                    with torch.no_grad():
+                        # Get target face mask
+                        target_mask, _, _, _ = self.emo_model.face_idt.forward(frame)
+                        target_mask = (target_mask > 0.6).float()
+                        target_mask = F.avg_pool2d(target_mask, 3, stride=1, padding=1)
 
-                    # Extract per-frame warps using volumetric model directly
-                    if to_image is not None:
-                        try:
-                            # Set up the optimizer_idx_to_mode for inference
-                            self.emo_model.optimizer_idx_to_mode = {0: 'gen'}
+                        # Get target pose using model's head_pose_regressor
+                        target_theta, scale, rotation, translation = self.emo_model.head_pose_regressor.forward(
+                            frame, return_srt=True
+                        )
+                        target_theta = self.convert_theta_format(target_theta)
 
-                            # To get XY warps: source=identity (canonical), target=current frame (expressive)
-                            # The warps will transform from current expression back to canonical
-                            data_dict = {
-                                'source_img': identity_frame,  # Identity frame as canonical reference [1,3,H,W]
-                                'target_img': frame.unsqueeze(0),  # Current frame with expression [1,3,H,W]
-                            }
+                        # Create target data dict with source identity
+                        data_dict = {
+                            'source_img': frame,
+                            'source_mask': target_mask,
+                            'source_theta': target_theta,
+                            'target_img': frame,
+                            'target_mask': target_mask,
+                            'target_theta': target_theta,
+                            'idt_embed': identity_info['idt_embed']  # Use source identity
+                        }
 
-                            # Only add idt_embed after first frame to avoid recomputation
-                            if t > 0 and idt_embed is not None:
-                                data_dict['idt_embed'] = idt_embed
-                            
-                            with torch.no_grad():
-                                # Process through the model to generate warps
-                                _, _, _, output_dict = self.emo_model.forward(
-                                    data_dict,
-                                    phase='test',
-                                    optimizer_idx=0,
-                                    visualize=False
-                                )
+                        # Get target expression
+                        data_dict = self.emo_model.expression_embedder_nw(data_dict, True, False, False)
+                        target_pose_embed = data_dict['source_pose_embed']
 
-                            # Extract the computed warps from the output dict
-                            # The model stores warps in output_dict during forward pass
-                            if 'source_xy_warp' in output_dict:
-                                outputs['xy_warps'].append(output_dict['source_xy_warp'].clone().cpu())
-                            elif hasattr(self.emo_model, 'source_xy_warp_resize'):
-                                outputs['xy_warps'].append(self.emo_model.source_xy_warp_resize.clone().cpu())
-                            else:
-                                outputs['xy_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
+                        # Get expression embed for legacy compatibility
+                        expression_embed = self.emo_model.expression_embedder_nw.net_face(frame)[0]
 
-                            if 'source_rotation_warp' in output_dict:
-                                outputs['rigid_warps'].append(output_dict['source_rotation_warp'].clone().cpu())
-                            elif hasattr(self.emo_model, 'source_rotation_warp'):
-                                outputs['rigid_warps'].append(self.emo_model.source_rotation_warp.clone().cpu())
-                            else:
-                                outputs['rigid_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
+                        # Generate target UV warps
+                        target_warp_embed, _, _, _ = self.emo_model.predict_embed(data_dict)
+                        target_uv_warp, _ = self.emo_model.uv_generator_nw(target_warp_embed)
 
-                            # Try to get UV warps (target warps) if available
-                            if 'target_uv_warp' in output_dict:
-                                outputs['uv_warps'].append(output_dict['target_uv_warp'].clone().cpu())
-                            elif hasattr(self.emo_model, 'target_uv_warp'):
-                                outputs['uv_warps'].append(self.emo_model.target_uv_warp.clone().cpu())
-                            elif hasattr(self.emo_model, 'uv_generator_nw') and hasattr(self.emo_model, 'target_latent_volume'):
-                                # UV warps might be generated but not stored, use zeros for now
-                                outputs['uv_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
-                            else:
-                                outputs['uv_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
-
-                            if 'source_theta' in output_dict:
-                                # Take only first 3 rows if it's 4x4 (homogeneous coordinates)
-                                theta = output_dict['source_theta'].clone().cpu()
-                                if theta.shape[-2:] == (4, 4):
-                                    theta = theta[..., :3, :]  # Take first 3 rows to get 3x4
-                                outputs['source_theta'].append(theta)
-                            elif hasattr(self.emo_model, 'pred_source_theta'):
-                                theta = self.emo_model.pred_source_theta.clone().cpu()
-                                if theta.shape[-2:] == (4, 4):
-                                    theta = theta[..., :3, :]  # Take first 3 rows to get 3x4
-                                outputs['source_theta'].append(theta)
-                            else:
-                                outputs['source_theta'].append(torch.zeros(1, 3, 4, device='cpu'))
-
-                        except Exception as e:
-                            logger.warning(f"Could not extract warps for frame {t}: {e}")
-                            # Add zeros if extraction failed
-                            outputs['xy_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
-                            outputs['rigid_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
-                            outputs['uv_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
-                            outputs['source_theta'].append(torch.zeros(1, 3, 4, device='cpu'))
-                    else:
-                        # Add zeros if we can't extract warps
-                        outputs['xy_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
-                        outputs['rigid_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
-                        outputs['uv_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
-                        outputs['source_theta'].append(torch.zeros(1, 3, 4, device='cpu'))
+                        # Resize UV warps to match canonical volume size
+                        target_uv_warp_resize = F.interpolate(
+                            target_uv_warp.view(1, 16 * 3, 64, 64),
+                            size=(64, 64),
+                            mode='bilinear',
+                            align_corners=False
+                        ).view(1, 16, 64, 64, 3)
 
                     # Verify feature shapes
-                    assert theta.shape == (1, 3, 4), f"Wrong theta shape: {theta.shape}"
+                    assert target_theta.shape == (1, 3, 4), f"Wrong theta shape: {target_theta.shape}"
                     assert scale.shape == (1, 3), f"Wrong scale shape: {scale.shape}"
                     assert rotation.shape == (1, 3), f"Wrong rotation shape: {rotation.shape}"
                     assert translation.shape == (1, 3), f"Wrong translation shape: {translation.shape}"
                     assert expression_embed.shape == (1, 128), f"Wrong expression shape: {expression_embed.shape}"
+                    assert target_pose_embed.shape == (1, 512), f"Wrong target_pose_embed shape: {target_pose_embed.shape}"
+                    assert target_uv_warp_resize.shape == (1, 16, 64, 64, 3), f"Wrong uv_warp shape: {target_uv_warp_resize.shape}"
 
-                    # Store outputs
-                    outputs['theta'].append(theta)
-                    outputs['scale'].append(scale)
-                    outputs['rotation'].append(rotation)
-                    outputs['translation'].append(translation)
-                    outputs['expression_embed'].append(expression_embed)
+                    # Compute rigid warps from theta for MotionTransformer compatibility
+                    grid = self.emo_model.identity_grid_3d.repeat_interleave(1, dim=0)
+                    target_rotation_warp = grid.bmm(target_theta[:, :3].transpose(1, 2)).view(-1, 16, 64, 64, 3)
+
+                    # Use source XY warp for all frames (identity warps)
+                    # This is the warp that transforms source to canonical space
+                    source_xy_warp_resize = F.interpolate(
+                        source_xy_warp.view(1, 16 * 3, 64, 64),
+                        size=(64, 64),
+                        mode='bilinear',
+                        align_corners=False
+                    ).view(1, 16, 64, 64, 3)
+
+                    # Store outputs (aligned with create_video_face_swap.py)
+                    outputs['theta'].append(target_theta.cpu())
+                    outputs['scale'].append(scale.cpu())
+                    outputs['rotation'].append(rotation.cpu())
+                    outputs['translation'].append(translation.cpu())
+                    outputs['expression_embed'].append(expression_embed.cpu())
+                    outputs['uv_warps'].append(target_uv_warp_resize.cpu())
+                    outputs['target_pose_embed'].append(target_pose_embed.cpu())
+                    # For MotionTransformer
+                    outputs['xy_warps'].append(source_xy_warp_resize.cpu())
+                    outputs['rigid_warps'].append(target_rotation_warp.cpu())
 
                 # Stack along time dimension for per-frame features
                 per_frame_keys = ['theta', 'scale', 'rotation', 'translation', 'expression_embed',
-                                 'xy_warps', 'rigid_warps', 'uv_warps', 'source_theta']
+                                 'uv_warps', 'target_pose_embed', 'xy_warps', 'rigid_warps']
                 for k in per_frame_keys:
                     if k in outputs and isinstance(outputs[k], list) and len(outputs[k]) > 0:
                         outputs[k] = torch.stack(outputs[k], dim=1)
@@ -1321,19 +1340,23 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 logger.debug(f"First frame values (first 5): {expr_flat[0, :5].tolist()}")
                 logger.debug(f"Last frame values (first 5): {expr_flat[-1, :5].tolist()}")
 
+                # Add identity info to outputs
+                outputs['identity_info'] = identity_info
+
                 # Verify final output shapes
                 logger.debug("\nFinal output shapes:")
+                d = 16  # depth
+                s = 64  # spatial size
                 expected_shapes = {
-                    'theta': (1, T, 3, 4), # [B, T, 3, 4]
+                    'theta': (1, T, 3, 4), # [B, T, 3, 4] - target pose
                     'scale': (1, T, 3),
                     'rotation': (1, T, 3),
                     'translation': (1, T, 3),
                     'expression_embed': (1, T, 128),
-                    'xy_warps': (1, T, d, s, s, 3),  # Per-frame non-rigid source warps
-                    'rigid_warps': (1, T, d, s, s, 3),  # Per-frame rigid warps
-                    'uv_warps': (1, T, d, s, s, 3),  # Per-frame non-rigid target warps
-                    'source_theta': (1, T, 3, 4)  # Per-frame thetas 🤷 this is redundant
-
+                    'uv_warps': (1, T, d, s, s, 3),  # Per-frame non-rigid target warps (matches create_video_face_swap)
+                    'target_pose_embed': (1, T, 512),  # Per-frame target expression embeddings (matches create_video_face_swap)
+                    'xy_warps': (1, T, d, s, s, 3),  # Source warps for MotionTransformer
+                    'rigid_warps': (1, T, d, s, s, 3)  # Rigid warps for MotionTransformer
                 }
 
                 for k, expected_shape in expected_shapes.items():

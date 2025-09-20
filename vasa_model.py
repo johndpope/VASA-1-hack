@@ -1000,3 +1000,63 @@ class VASAModel(nn.Module):
                 'translation': torch.zeros(B, total_T, 3, device=device),
                 'expression_embed': torch.zeros(B, total_T, self.config.model.expression_dim, device=device)
             }
+
+    def decode_frame_with_warps(
+        self,
+        identity_info: Dict[str, torch.Tensor],
+        warp_data: Dict[str, torch.Tensor]
+    ) -> torch.Tensor:
+        """
+        Decode a frame using pre-calculated warps and identity info.
+        This matches the approach in create_video_face_swap.py's decode_with_warps.
+
+        Args:
+            identity_info: Dictionary containing:
+                - canonical_volume: [B, C, D, S, S] canonical 3D volume
+                - embed_dict: Identity embeddings
+                - idt_embed: Identity embedding
+            warp_data: Dictionary containing:
+                - uv_warp: [B, D, S, S, 3] target UV warps
+                - theta: [B, 3, 4] target pose matrix
+                - target_pose_embed: [B, 512] target expression embedding
+
+        Returns:
+            Generated frame [B, 3, H, W]
+        """
+        with torch.no_grad():
+            # Extract warp data
+            target_uv_warp = warp_data['uv_warp']
+            target_theta = warp_data['theta']
+            target_pose_embed = warp_data['target_pose_embed']
+
+            # Get volume dimensions
+            c = self.volumetric_avatar.args.latent_volume_channels
+            d = self.volumetric_avatar.args.latent_volume_depth
+            s = self.volumetric_avatar.args.latent_volume_size
+
+            # Generate 3D grid and rotation warp for target
+            grid = self.volumetric_avatar.identity_grid_3d.repeat_interleave(target_theta.shape[0], dim=0)
+            target_rotation_warp = grid.bmm(target_theta[:, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+
+            # Apply warps to canonical volume (nested grid_sample)
+            aligned_target_volume = self.volumetric_avatar.grid_sample(
+                self.volumetric_avatar.grid_sample(identity_info['canonical_volume'], target_uv_warp),
+                target_rotation_warp
+            )
+
+            # Decode
+            target_latent_feats = aligned_target_volume.view(target_theta.shape[0], c * d, s, s)
+            decode_dict = {
+                'target_theta': target_theta,
+                'target_pose_embed': target_pose_embed
+            }
+
+            generated_img, _, _, _ = self.volumetric_avatar.decoder_nw(
+                decode_dict,
+                identity_info['embed_dict'],  # Source identity
+                target_latent_feats,
+                False,
+                stage_two=True
+            )
+
+            return generated_img
