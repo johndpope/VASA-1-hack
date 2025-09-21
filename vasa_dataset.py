@@ -923,8 +923,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             # Get predictions - returns (label, scores) where scores includes VA values
             labels, scores = self.emotion_recognizer.predict_emotions(face_crop, logits=True)
             
-            logger.debug(f"Emotion scores: {scores}")
-            logger.debug(f"Emotion labels: {labels}")
+            # logger.debug(f"Emotion scores: {scores}")
+            # logger.debug(f"Emotion labels: {labels}")
             
             # Extract VA values (last two values in scores)
             if isinstance(scores, np.ndarray) and scores.size >= 2:
@@ -1875,6 +1875,17 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
     def __len__(self) -> int:
         return len(self.windows)
 
+    def save_cache(self):
+        """Explicitly save any pending cache data."""
+        if hasattr(self, 'cache_type') and self.cache_type == 'single_bucket' and hasattr(self, '_pending_windows'):
+            self._save_pending_windows()
+            logger.info("Cache saved successfully")
+
+    def __del__(self):
+        """Cleanup - save any pending windows before destruction."""
+        if hasattr(self, 'cache_type') and self.cache_type == 'single_bucket' and hasattr(self, '_pending_windows'):
+            self._save_pending_windows()
+
 
 
             
@@ -2526,9 +2537,16 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 if cached_data is not None:
                     logger.info(f"👽 Getting cached window {idx} from H5 cache")
                     return cached_data
+            elif self.cache_type == 'chunked':
+                # For chunked cache (WindowCache), load from chunk
+                chunk_idx = window['start_frame'] // self.cache.chunk_size
+                chunk = self.cache.load_chunk(video_path, chunk_idx)
+                if chunk is not None and f"window_{window['window_idx']}" in chunk:
+                    cached_data = chunk[f"window_{window['window_idx']}"]
+                    logger.info(f"👽 Getting cached window {window['window_idx']} from chunk {chunk_idx} for {Path(video_path).name}")
+                    return cached_data
             else:
-                # For per-video caching
-                cache_key = f"{video_path}_window_{window['window_idx']}"
+                # For built-in cache
                 cached_data = self._load_cached_window(video_path, window['window_idx'])
                 if cached_data is not None:
                     logger.info(f"👽 Getting cached window {window['window_idx']} for video {Path(video_path).name}")
@@ -2723,8 +2741,30 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                             window_data[key] = torch.zeros(expected_shape, dtype=torch.float32)
                     
                     # Save to cache before returning
-                    # Only save to per-video cache if not using single-bucket
-                    if self.cache_type != 'single_bucket':
+                    if self.cache_type == 'chunked':
+                        # For chunked cache (WindowCache), use save_chunk
+                        chunk_idx = window['start_frame'] // self.cache.chunk_size
+                        self.cache.save_chunk(
+                            video_path=video_path,
+                            chunk_idx=chunk_idx,
+                            chunk_data={f"window_{window['window_idx']}": window_data},
+                            start_frame=window['start_frame'],
+                            end_frame=window['start_frame'] + self.sequence_length
+                        )
+                        logger.info(f"Saved window {window['window_idx']} to chunk {chunk_idx} for {Path(video_path).name}")
+                    elif self.cache_type == 'single_bucket':
+                        # For single-bucket cache, append the window
+                        # Store the window with index for later batch saving
+                        if not hasattr(self, '_pending_windows'):
+                            self._pending_windows = []
+                        self._pending_windows.append((idx, window_data))
+
+                        # Batch save every 100 windows or at the end
+                        if len(self._pending_windows) >= 100:
+                            self._save_pending_windows()
+
+                    elif self.cache_type == 'built_in':
+                        # For built-in cache, use the original save method
                         self._save_window_to_cache(video_path, window['window_idx'], window_data)
 
                     # Return the single window data directly
@@ -2746,6 +2786,28 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             import traceback
             logger.error(traceback.format_exc())
             return self._get_zero_sample()
+
+    def _save_pending_windows(self):
+        """Save any pending windows to SingleBucketCache."""
+        if not hasattr(self, '_pending_windows') or not self._pending_windows:
+            return
+
+        try:
+            # Sort windows by index
+            self._pending_windows.sort(key=lambda x: x[0])
+
+            # Prepare windows list for appending
+            windows_to_save = [window_data for _, window_data in self._pending_windows]
+
+            # Append to cache
+            self.cache.append_windows(windows_to_save)
+            logger.info(f"Saved {len(self._pending_windows)} windows to SingleBucketCache")
+
+            # Clear pending windows
+            self._pending_windows = []
+
+        except Exception as e:
+            logger.error(f"Error saving pending windows: {str(e)}")
 
     def _get_zero_sample(self) -> Dict[str, torch.Tensor]:
         """Return a zero-filled sample with all required features including landmarks and lip motion"""

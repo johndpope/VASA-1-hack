@@ -897,12 +897,16 @@ class VASATrainer:
         # Initialize WandB metrics table for this epoch
         if self.config.wandb.enabled and self.accelerator.is_local_main_process:
             self.epoch_table = wandb.Table(columns=[
-                "batch_idx", "window_idx", "total_loss", "reconstruction",
-                "dynamics_loss", "expression_loss", "pose_loss", "perceptual",
-                "grad_norm", "l_consist", "l_cross_id",
-                # Warp losses
-                "xy_warp_loss", "rigid_warp_loss", "uv_warp_loss", "source_theta_warp_loss",
-                "warp_temporal_consistency"
+                "batch_idx", "window_idx", "total_loss",
+                # Core reconstruction losses
+                "reconstruction", "perceptual", "temporal",
+                # Motion prediction losses (matching H5 cache structure)
+                "uv_warp_loss", "theta_loss", "expression_loss",
+                "scale_loss", "rotation_loss", "translation_loss",
+                # Consistency losses
+                "l_consist", "l_cross_id", "velocity_smoothness",
+                # Training metrics
+                "grad_norm", "learning_rate"
             ])
 
         for batch_idx, batch in enumerate(self.train_loader):
@@ -1254,24 +1258,31 @@ class VASATrainer:
                                     logger.info(f"DEBUG: l_consist value: {metrics.get('l_consist', 'NOT FOUND')}")
                                     logger.info(f"DEBUG: l_cross_id value: {metrics.get('l_cross_id', 'NOT FOUND')}")
                                 
+                                # Get current learning rate
+                                current_lr = self.optimizer.param_groups[0]['lr'] if self.optimizer.param_groups else 0.0001
+
                                 self.epoch_table.add_data(
                                     batch_idx,
                                     window_idx,
-                                    window_loss,  # Use the stored value
+                                    window_loss,  # total_loss
+                                    # Core reconstruction losses
                                     metrics.get('reconstruction', 0.0),
-                                    metrics.get('dynamics_loss', 0.0),
-                                    metrics.get('expression_loss', 0.0),
-                                    metrics.get('pose_loss', 0.0),
                                     metrics.get('perceptual', 0.0),
-                                    grad_norm_value,
+                                    metrics.get('temporal', 0.0),
+                                    # Motion prediction losses (matching H5 cache structure)
+                                    metrics.get('uv_warp_loss', 0.0),
+                                    metrics.get('theta_loss', metrics.get('pose_loss', 0.0)),  # theta is pose
+                                    metrics.get('expression_loss', 0.0),
+                                    metrics.get('scale_loss', 0.0),
+                                    metrics.get('rotation_loss', 0.0),
+                                    metrics.get('translation_loss', 0.0),
+                                    # Consistency losses
                                     metrics.get('l_consist', 0.0),
                                     metrics.get('l_cross_id', 0.0),
-                                    # Warp losses
-                                    metrics.get('xy_warp_loss', 0.0),
-                                    metrics.get('rigid_warp_loss', 0.0),
-                                    metrics.get('uv_warp_loss', 0.0),
-                                    metrics.get('source_theta_warp_loss', 0.0),
-                                    metrics.get('warp_temporal_consistency', 0.0)
+                                    metrics.get('velocity_smoothness', 0.0),  # Combined velocity/smoothness
+                                    # Training metrics
+                                    grad_norm_value,
+                                    current_lr
                                 )
                             
                             # Generate thumbnail with single frame only to save memory
