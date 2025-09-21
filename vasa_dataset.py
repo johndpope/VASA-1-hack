@@ -2536,6 +2536,16 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 cached_data = self.cache.load_window(idx)
                 if cached_data is not None:
                     logger.info(f"👽 Getting cached window {idx} from H5 cache")
+                    # Ensure metadata contains required fields from the window
+                    if 'metadata' not in cached_data:
+                        cached_data['metadata'] = {}
+                    cached_data['metadata'].update({
+                        'video_path': str(video_path),
+                        'start_frame': window['start_frame'],
+                        'window_idx': window['window_idx'],
+                        'fps': window.get('fps', 30),
+                        'has_context': window.get('has_context', False)
+                    })
                     return cached_data
             elif self.cache_type == 'chunked':
                 # For chunked cache (WindowCache), load from chunk
@@ -2544,12 +2554,32 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 if chunk is not None and f"window_{window['window_idx']}" in chunk:
                     cached_data = chunk[f"window_{window['window_idx']}"]
                     logger.info(f"👽 Getting cached window {window['window_idx']} from chunk {chunk_idx} for {Path(video_path).name}")
+                    # Ensure metadata contains required fields from the window
+                    if 'metadata' not in cached_data:
+                        cached_data['metadata'] = {}
+                    cached_data['metadata'].update({
+                        'video_path': str(video_path),
+                        'start_frame': window['start_frame'],
+                        'window_idx': window['window_idx'],
+                        'fps': window.get('fps', 30),
+                        'has_context': window.get('has_context', False)
+                    })
                     return cached_data
             else:
                 # For built-in cache
                 cached_data = self._load_cached_window(video_path, window['window_idx'])
                 if cached_data is not None:
                     logger.info(f"👽 Getting cached window {window['window_idx']} for video {Path(video_path).name}")
+                    # Ensure metadata contains required fields from the window
+                    if 'metadata' not in cached_data:
+                        cached_data['metadata'] = {}
+                    cached_data['metadata'].update({
+                        'video_path': str(video_path),
+                        'start_frame': window['start_frame'],
+                        'window_idx': window['window_idx'],
+                        'fps': window.get('fps', 30),
+                        'has_context': window.get('has_context', False)
+                    })
                     return cached_data
             
             # Process the single window

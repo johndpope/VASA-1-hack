@@ -2433,16 +2433,16 @@ class VASATrainer:
             unwrapped_model = self.accelerator.unwrap_model(self.model)
             state_dict = unwrapped_model.state_dict()
 
-            # Filter out volumetric_avatar parameters
-            # filtered_state_dict = {
-            #     k: v for k, v in state_dict.items()
-            #     if not k.startswith('volumetric_avatar.')
-            # }
+            # Filter out volumetric_avatar parameters (it's frozen and pre-trained)
+            filtered_state_dict = {
+                k: v for k, v in state_dict.items()
+                if not k.startswith('volumetric_avatar.')
+            }
 
             checkpoint = {
                 'epoch': self.current_epoch,
                 'global_step': self.global_step,
-                'model_state_dict': state_dict, # filtered_state_dict to exclude volumetric_avatar,
+                'model_state_dict': filtered_state_dict,  # Exclude volumetric_avatar
                 'optimizer_state_dict': self.optimizer.state_dict(),
                 'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
                 'loss': self.best_val_loss,
@@ -2458,12 +2458,14 @@ class VASATrainer:
             torch.save(checkpoint, save_path)
             logger.info(f"Saved checkpoint to {save_path}")
 
-            # Log saved parameters
+            # Log saved parameters (count from filtered state dict)
             total_params = sum(p.numel() for p in unwrapped_model.parameters())
-            saved_params = sum(v.numel() for v in state_dict.values())
-            logger.info(f"Total parameters: {total_params:,}")
+            saved_params = sum(v.numel() for v in filtered_state_dict.values())
+            excluded_params = sum(v.numel() for k, v in state_dict.items() if k.startswith('volumetric_avatar.'))
+
+            logger.info(f"Total model parameters: {total_params:,}")
             logger.info(f"Saved parameters: {saved_params:,}")
-            logger.info(f"Excluded parameters: {total_params - saved_params:,}")
+            logger.info(f"Excluded volumetric_avatar parameters: {excluded_params:,}")
 
         except Exception as e:
             logger.error(f"Error saving checkpoint: {str(e)}")
@@ -2471,22 +2473,28 @@ class VASATrainer:
     
     def save_epoch_checkpoint(self, save_path: Path):
         """Save checkpoint for current epoch (called every epoch).
-        
+
         Args:
             save_path: Path to save the checkpoint
         """
         if self.output_dir is None:
             return
-            
+
         try:
             # Get unwrapped model state dict
             unwrapped_model = self.accelerator.unwrap_model(self.model)
             state_dict = unwrapped_model.state_dict()
-            
+
+            # Filter out volumetric_avatar parameters (consistent with save_checkpoint)
+            filtered_state_dict = {
+                k: v for k, v in state_dict.items()
+                if not k.startswith('volumetric_avatar.')
+            }
+
             checkpoint = {
                 'epoch': self.current_epoch,
                 'global_step': self.global_step,
-                'model_state_dict': state_dict,
+                'model_state_dict': filtered_state_dict,
                 'optimizer_state_dict': self.optimizer.state_dict(),
                 'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
                 'loss': self.best_val_loss,
@@ -2531,14 +2539,14 @@ class VASATrainer:
             logger.info(f"Loading checkpoint from {checkpoint_path}")
             # PyTorch 2.6 requires weights_only=False for checkpoints with configs
             checkpoint = torch.load(checkpoint_path, map_location=self.accelerator.device, weights_only=False)
-            
+
             # Get original diffusion schedule configuration
             old_steps = checkpoint['config'].diffusion.num_steps
             new_steps = self.config.diffusion.num_steps
-            
+
             if old_steps != new_steps:
                 logger.info(f"Adjusting diffusion schedule from {old_steps} to {new_steps} steps")
-                
+
                 # Remove diffusion scheduler buffers - they'll be reinitialized
                 skip_keys = [
                     'scheduler.alpha_cumprod',
@@ -2552,15 +2560,15 @@ class VASATrainer:
                     'scheduler.sqrt_recipm1_alphas_cumprod',
                     'scheduler.posterior_variance'
                 ]
-                
+
                 filtered_state_dict = {
                     k: v for k, v in checkpoint['model_state_dict'].items()
                     if not any(skip_key in k for skip_key in skip_keys)
                 }
-                
+
                 # Load filtered state dict
                 self.model.load_state_dict(filtered_state_dict, strict=False)
-                
+
                 # Reinitialize scheduler with new steps
                 from diffusers import DDIMScheduler
                 self.model.scheduler = DDIMScheduler(
@@ -2570,16 +2578,31 @@ class VASATrainer:
                     clip_sample=True
                 )
                 self.model.scheduler.set_timesteps(50)  # Default inference steps
-                
+
             else:
                 # Load model state dict directly if steps match
                 self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+
+            # Restore volumetric_avatar from original pre-trained model
+            # (since we exclude it from checkpoints to save space)
+            if hasattr(self.model, 'volumetric_avatar'):
+                logger.info("Restoring volumetric_avatar from pre-trained model...")
+                va_model_path = self.config.paths.volumetric_model
+                va_state_dict = torch.load(va_model_path, map_location=self.accelerator.device)
+
+                # Load volumetric avatar state
+                missing_keys, unexpected_keys = self.model.volumetric_avatar.load_state_dict(va_state_dict, strict=False)
+                if missing_keys:
+                    logger.warning(f"Missing {len(missing_keys)} keys when loading volumetric_avatar")
+                if unexpected_keys:
+                    logger.debug(f"Found {len(unexpected_keys)} unexpected keys (likely discriminator weights)")
+                logger.info("Volumetric avatar restored successfully")
 
             # Load optimizer and scheduler state
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             if 'scheduler_state_dict' in checkpoint and self.scheduler:
                 self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-                
+
             self.current_epoch = checkpoint.get('epoch', -1) + 1
             self.global_step = checkpoint.get('global_step', 0)
             self.best_val_loss = checkpoint.get('loss', float('inf'))
