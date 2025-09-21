@@ -480,7 +480,10 @@ class VASALossModule:
 
             # 2. Warp Regularization Loss
             logger.debug("\nComputing warp regularization losses:")
-            if 'xy_warps' in outputs and 'xy_warps' in targets:
+            # Check for any warp fields (UV warps is our main one now)
+            if ('uv_warps' in outputs and 'uv_warps' in targets) or \
+               ('xy_warps' in outputs and 'xy_warps' in targets) or \
+               ('rigid_warps' in outputs and 'rigid_warps' in targets):
                 warp_losses = self._compute_warp_regularization_losses(outputs, targets)
                 losses.update(warp_losses)
                 logger.debug("Warp regularization losses:")
@@ -685,12 +688,25 @@ class VASALossModule:
             disentangle_term = losses.get('disentangle_total', torch.tensor(0.0, device=device))
             vel_smooth_term = losses.get('velocity_smoothness', torch.tensor(0.0, device=device))
 
+            # Aggregate warp losses (UV warps is the main one now)
+            warp_term = (
+                losses.get('uv_warp_loss', torch.tensor(0.0, device=device)) +
+                losses.get('uv_warp_smooth', torch.tensor(0.0, device=device)) +
+                losses.get('xy_warp_loss', torch.tensor(0.0, device=device)) +
+                losses.get('xy_warp_smooth', torch.tensor(0.0, device=device)) +
+                losses.get('rigid_warp_loss', torch.tensor(0.0, device=device)) +
+                losses.get('rigid_warp_smooth', torch.tensor(0.0, device=device)) +
+                losses.get('source_theta_warp_loss', torch.tensor(0.0, device=device)) +
+                losses.get('warp_temporal_consistency', torch.tensor(0.0, device=device))
+            )
+
             logger.debug(f"  Reconstruction term: {recon_term.item():.6f}")
             logger.debug(f"  Verification term: {verify_term.item():.6f}")
             logger.debug(f"  Control term: {control_term.item():.6f}")
             logger.debug(f"  Sync term: {sync_term.item():.6f}")
             logger.debug(f"  Disentangle term: {disentangle_term.item():.6f}")
             logger.debug(f"  Velocity/smoothness term: {vel_smooth_term.item():.6f}")
+            logger.debug(f"  Warp term (UV + smoothness): {warp_term.item():.6f}")
             
             # Get diversity term
             diversity_term = losses.get('motion_diversity', torch.tensor(0.0, device=device))
@@ -768,7 +784,7 @@ class VASALossModule:
                 logger.debug("  No frames provided for perceptual loss")
                 losses['perceptual'] = torch.tensor(0.0, device=device)
 
-            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + diversity_term + perceptual_term + audio_lip_term
+            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + warp_term + diversity_term + perceptual_term + audio_lip_term
             losses['total'] = total_loss
             logger.debug(f"Total loss (with perceptual): {total_loss.item():.6f}")
 
@@ -1297,9 +1313,16 @@ class VASALossModule:
             losses['source_theta_warp_loss'] = F.mse_loss(pred['source_theta_warp'], target['source_theta_warp']) * lambda_source_theta
 
         # Temporal consistency loss for warps
-        if pred.get('xy_warps', None) is not None and pred['xy_warps'].shape[1] > 1:
+        # Check for any available warp field for temporal consistency
+        warp_field = None
+        if pred.get('uv_warps', None) is not None:
+            warp_field = pred['uv_warps']
+        elif pred.get('xy_warps', None) is not None:
+            warp_field = pred['xy_warps']
+
+        if warp_field is not None and warp_field.shape[1] > 1:
             # Penalize large temporal changes in warps
-            temporal_diff = pred['xy_warps'][:, 1:] - pred['xy_warps'][:, :-1]
+            temporal_diff = warp_field[:, 1:] - warp_field[:, :-1]
             losses['warp_temporal_consistency'] = temporal_diff.abs().mean() * lambda_warp_temporal
 
         return losses
