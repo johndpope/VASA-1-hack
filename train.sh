@@ -82,6 +82,28 @@ case $mode_choice in
 esac
 
 echo ""
+echo "Select cache mode:"
+echo "1) H5 cache (default - uses pre-computed warps from create_video_face_swap.py)"
+echo "2) No cache (compute warps on the fly)"
+echo ""
+read -p "Enter your choice (1-2): " cache_choice
+
+case $cache_choice in
+    1)
+        export USE_H5_CACHE="true"
+        echo "Using H5 cache with pre-computed warps..."
+        ;;
+    2)
+        export USE_H5_CACHE="false"
+        echo "Computing warps on the fly (no H5 cache)..."
+        ;;
+    *)
+        export USE_H5_CACHE="true"
+        echo "Defaulting to H5 cache..."
+        ;;
+esac
+
+echo ""
 echo "Select log level:"
 echo "1) INFO (normal logging)"
 echo "2) ERROR (minimal output)"
@@ -136,6 +158,7 @@ echo "================================"
 echo "Starting training with:"
 echo "  Config: $CONFIG_FILE"
 echo "  Mode: $mode_choice"
+echo "  Cache: $([ "$USE_H5_CACHE" == "true" ] && echo "H5 cache" || echo "No cache")"
 echo "  Log Level: $VASA_LOG_LEVEL"
 echo "  Options: $debug_choice"
 echo "================================"
