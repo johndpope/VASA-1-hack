@@ -341,6 +341,15 @@ class SingleBucketCache:
                             for meta_key, meta_value in value.items():
                                 if isinstance(meta_value, (list, dict)):
                                     meta_group.attrs[meta_key] = json.dumps(meta_value)
+                                elif isinstance(meta_value, (np.integer, np.int64, np.int32)):
+                                    # Convert numpy integers to Python int
+                                    meta_group.attrs[meta_key] = int(meta_value)
+                                elif isinstance(meta_value, (np.floating, np.float64, np.float32)):
+                                    # Convert numpy floats to Python float
+                                    meta_group.attrs[meta_key] = float(meta_value)
+                                elif isinstance(meta_value, np.ndarray):
+                                    # Convert numpy arrays to lists
+                                    meta_group.attrs[meta_key] = meta_value.tolist()
                                 else:
                                     meta_group.attrs[meta_key] = meta_value
 
@@ -371,13 +380,25 @@ class SingleBucketCache:
                     f.attrs['metadata'] = json.dumps({})
 
                 metadata = json.loads(f.attrs.get('metadata', '{}'))
-                metadata['num_windows'] = current_num_windows + len(new_windows)
+                # Ensure the count is a Python int, not numpy int64
+                metadata['num_windows'] = int(current_num_windows + len(new_windows))
                 f.attrs['metadata'] = json.dumps(metadata)
 
             logger.info(f"Appended {len(new_windows)} windows, total: {current_num_windows + len(new_windows)}")
 
         except Exception as e:
             logger.error(f"Error appending windows: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+            # Try to identify the problematic data type
+            if "JSON" in str(e):
+                logger.error("JSON serialization issue detected. Checking data types...")
+                for i, window_data in enumerate(new_windows[:1]):  # Check first window
+                    if 'metadata' in window_data:
+                        for k, v in window_data['metadata'].items():
+                            logger.debug(f"  metadata[{k}]: type={type(v)}, value={v}")
+
             # Fall back to the old method if direct append fails
             logger.warning("Falling back to load-all-and-save method (memory intensive)")
             existing_windows = self.load_all_windows()
