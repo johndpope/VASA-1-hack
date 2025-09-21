@@ -946,10 +946,15 @@ class VASATrainer:
                     with self.accelerator.accumulate(self.model):
                         try:
                             logger.debug(f"  Preparing motion data for window {window_idx}")
-                            # Extract target motion parameters
+                            # Extract target motion parameters and move to GPU immediately
                             motion_data = self.motion_handler.prepare_motion_data(window)
+
+                            # Move all motion_data tensors to GPU if not already there
+                            device = self.accelerator.device
+                            motion_data = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                                         for k, v in motion_data.items()}
+
                             B = motion_data['theta'].shape[0]
-                            device = motion_data['theta'].device
 
                             # In train_epoch:
                             if self.config.train.turn_off_noise:
@@ -973,19 +978,20 @@ class VASATrainer:
                                 logger.error(f"audio_features not in window! Available keys: {list(window.keys())}")
                                 raise ValueError("audio_features missing from window data")
 
-                            control_signals = {
-                                'gaze': window.get('gaze'),
-                                'head_distance': window.get('head_distance'),
-                                'emotion': window.get('emotion'),
-                                'speed_bucket': window.get('speed_bucket'),
-                                'lips': window.get('lips'),
-                                'right_eye': window.get('right_eye'),
-                                'left_eye': window.get('left_eye'),
-                                'jaw': window.get('jaw'),
-                                'nose': window.get('nose'),
-                                'blink_state': window.get('blink_state'),
-                                'audio_features': window.get('audio_features')
-                            }
+                            # Extract control signals and move to GPU immediately
+                            control_signals = {}
+                            control_keys = ['gaze', 'head_distance', 'emotion', 'speed_bucket',
+                                          'lips', 'right_eye', 'left_eye', 'jaw', 'nose',
+                                          'blink_state', 'audio_features']
+                            for key in control_keys:
+                                value = window.get(key)
+                                if value is not None:
+                                    if isinstance(value, torch.Tensor):
+                                        control_signals[key] = value.to(device, non_blocking=True)
+                                    else:
+                                        control_signals[key] = value
+                                else:
+                                    control_signals[key] = None
 
                             # Debug: Verify audio_features is included
                             if 'audio_features' not in control_signals or control_signals['audio_features'] is None:
@@ -3028,8 +3034,10 @@ if __name__ == "__main__":
         train_dataset,
         batch_sampler=train_sampler,
         collate_fn=collate_fn,
-        num_workers=0,  # Set to 0 to avoid CUDA multiprocessing issues
-        # pin_memory=True
+        num_workers=2,  # Use 2 workers for parallel data loading
+        pin_memory=True,  # Enable pin memory for faster GPU transfer
+        persistent_workers=True,  # Keep workers alive between epochs
+        prefetch_factor=2  # Prefetch 2 batches per worker
     )
 
     val_loader = DataLoader(
@@ -3037,10 +3045,10 @@ if __name__ == "__main__":
         batch_size=1,  # Use batch size 1 for testing
         shuffle=False,
         num_workers=1,  # Single worker for validation
-        # pin_memory=True,  # Pin memory for faster GPU transfer
+        pin_memory=True,  # Pin memory for faster GPU transfer
         collate_fn=collate_vasa_batch,
         multiprocessing_context='spawn',
-        persistent_workers=False,
+        persistent_workers=True,
         worker_init_fn=worker_init_fn  # Ensure worker consistency
     )
 

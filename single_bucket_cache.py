@@ -295,7 +295,7 @@ class SingleBucketCache:
         new_windows: List[Dict[str, Any]]
     ):
         """
-        Append new windows to existing cache.
+        Append new windows to existing cache without loading all into memory.
 
         Args:
             new_windows: List of new window dictionaries to append
@@ -305,16 +305,85 @@ class SingleBucketCache:
             self.save_all_windows(new_windows)
             return
 
-        # Load existing windows
-        existing_windows = self.load_all_windows()
+        # Get current number of windows without loading them
+        current_num_windows = self.get_num_windows()
 
-        # Append new windows
-        all_windows = existing_windows + new_windows
+        # Append directly to the HDF5 file without loading existing windows
+        try:
+            with h5py.File(self.cache_path, 'a') as f:  # 'a' mode for append
+                # Add new windows starting from the next available index
+                for i, window_data in enumerate(new_windows):
+                    window_idx = current_num_windows + i
+                    window_group_name = f'window_{window_idx}'
 
-        # Save all windows
-        self.save_all_windows(all_windows)
+                    if window_group_name in f:
+                        del f[window_group_name]  # Remove if exists
 
-        logger.info(f"Appended {len(new_windows)} windows, total: {len(all_windows)}")
+                    window_group = f.create_group(window_group_name)
+
+                    # Save each tensor/data in the window
+                    for key, value in window_data.items():
+                        if key == 'frames':
+                            # Store only identity frame to save space
+                            identity_frame = value[0] if value.ndim == 4 else value
+                            dataset = window_group.create_dataset(
+                                'identity_frame',
+                                data=identity_frame.numpy() if isinstance(identity_frame, torch.Tensor) else identity_frame,
+                                compression='gzip',
+                                compression_opts=1
+                            )
+                            if isinstance(identity_frame, torch.Tensor):
+                                dataset.attrs['dtype'] = str(identity_frame.dtype)
+
+                        elif key == 'metadata':
+                            # Store metadata as attributes
+                            meta_group = window_group.create_group('metadata')
+                            for meta_key, meta_value in value.items():
+                                if isinstance(meta_value, (list, dict)):
+                                    meta_group.attrs[meta_key] = json.dumps(meta_value)
+                                else:
+                                    meta_group.attrs[meta_key] = meta_value
+
+                        elif key == 'lip_metrics':
+                            # Store lip metrics
+                            lip_group = window_group.create_group('lip_metrics')
+                            for metric_key, metric_value in value.items():
+                                if isinstance(metric_value, torch.Tensor):
+                                    lip_group.create_dataset(
+                                        metric_key,
+                                        data=metric_value.numpy(),
+                                        compression='gzip'
+                                    )
+
+                        elif isinstance(value, torch.Tensor):
+                            # Store tensor data
+                            dataset = window_group.create_dataset(
+                                key,
+                                data=value.numpy(),
+                                compression='gzip',
+                                compression_opts=1
+                            )
+                            dataset.attrs['dtype'] = str(value.dtype)
+                            dataset.attrs['shape'] = value.shape
+
+                # Update the total window count
+                if 'metadata' not in f.attrs:
+                    f.attrs['metadata'] = json.dumps({})
+
+                metadata = json.loads(f.attrs.get('metadata', '{}'))
+                metadata['num_windows'] = current_num_windows + len(new_windows)
+                f.attrs['metadata'] = json.dumps(metadata)
+
+            logger.info(f"Appended {len(new_windows)} windows, total: {current_num_windows + len(new_windows)}")
+
+        except Exception as e:
+            logger.error(f"Error appending windows: {str(e)}")
+            # Fall back to the old method if direct append fails
+            logger.warning("Falling back to load-all-and-save method (memory intensive)")
+            existing_windows = self.load_all_windows()
+            all_windows = existing_windows + new_windows
+            self.save_all_windows(all_windows)
+            logger.info(f"Appended {len(new_windows)} windows, total: {len(all_windows)}")
 
     def get_cache_info(self) -> Dict[str, Any]:
         """Get information about the cache."""

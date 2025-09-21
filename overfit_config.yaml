@@ -37,7 +37,7 @@ motion:
   warmup_steps: 500          # Extended warmup for VASA-1 alignment
   scheduler:
     type: "cosine"            # Learning rate scheduler type
-    min_lr: 5e-5              # Increased minimum LR to prevent decay too low
+    min_lr: 1e-4             # Increased minimum LR to prevent decay too low
     warmup_ratio: 0.1         # Extended warmup ratio for stability
   
   # Progressive training

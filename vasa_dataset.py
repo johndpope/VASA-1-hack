@@ -502,11 +502,12 @@ class WindowCache:
 class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
     def __init__(
-        self, 
+        self,
         video_folder: str,
         emo_model,
         window_size: int = 50,
         stride: int = 25,
+        max_batch_size: int = 20,  # Max windows to save at once
         context_size: int = 10,
         frame_size: Tuple[int, int] = (512, 512),
         sequence_length: int = 50,
@@ -526,6 +527,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         self.emo_model = emo_model
         self.window_size = window_size
         self.stride = stride
+        self.max_batch_size = max_batch_size
         self.context_size = context_size
         self.cache_audio = cache_audio
         self.frame_size = frame_size
@@ -2789,8 +2791,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                             self._pending_windows = []
                         self._pending_windows.append((idx, window_data))
 
-                        # Batch save every 100 windows or at the end
-                        if len(self._pending_windows) >= 100:
+                        # Batch save periodically to avoid memory issues
+                        if len(self._pending_windows) >= self.max_batch_size:
                             self._save_pending_windows()
 
                     elif self.cache_type == 'built_in':
@@ -2833,8 +2835,13 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             self.cache.append_windows(windows_to_save)
             logger.info(f"Saved {len(self._pending_windows)} windows to SingleBucketCache")
 
-            # Clear pending windows
+            # Clear pending windows and force garbage collection
             self._pending_windows = []
+            del windows_to_save
+
+            # Force memory cleanup
+            import gc
+            gc.collect()
 
         except Exception as e:
             logger.error(f"Error saving pending windows: {str(e)}")
