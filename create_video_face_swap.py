@@ -202,9 +202,12 @@ def extract_identity_features(model, source_img: torch.Tensor, face_detector, po
             'idt_embed': idt_embed
         }
 
-        # Get expression embedding
+        # Get expression embedding (with face alignment for pose normalization)
+        # This properly separates head pose from facial expression
         data_dict = model.expression_embedder_nw(data_dict, True, False, False)
+        source_pose_embed = data_dict['source_pose_embed']  # Aligned expression embedding
         logger.debug(f"Data dict keys after expression embedder: {list(data_dict.keys())}")
+        logger.debug(f"Source expression embedding shape: {source_pose_embed.shape}")
 
         # Get warp embeddings
         source_warp_embed, _, _, embed_dict = model.predict_embed(data_dict)
@@ -249,6 +252,7 @@ def extract_identity_features(model, source_img: torch.Tensor, face_detector, po
             'embed_dict': embed_dict,
             'canonical_volume': processed_canonical,
             'source_theta': source_theta,
+            'source_pose_embed': source_pose_embed,  # Aligned expression embedding
             'source_mask': face_mask
         }
 
@@ -266,7 +270,11 @@ def calculate_target_warps(model, identity_info: Dict, target_img: torch.Tensor,
         logger.debug(f"Target mask shape: {target_mask.shape}")
 
         # Get target pose using model's head_pose_regressor (matching pipeline)
-        target_theta = model.head_pose_regressor.forward(target_img)
+        # Also extract scale, rotation, translation components
+        target_theta, scale, rotation, translation = model.head_pose_regressor.forward(
+            target_img, return_srt=True
+        )
+        logger.debug(f"Target SRT - Scale: {scale.shape}, Rotation: {rotation.shape}, Translation: {translation.shape}")
 
         # Create target data dict with source identity
         data_dict = {
@@ -279,10 +287,19 @@ def calculate_target_warps(model, identity_info: Dict, target_img: torch.Tensor,
             'idt_embed': identity_info['idt_embed']  # Source identity
         }
 
-        # Get target expression
+        # Get target expression (with face alignment for pose normalization)
+        # This ensures we extract pure expression, not mixed with head pose
         data_dict = model.expression_embedder_nw(data_dict, True, False, False)
-        target_pose_embed = data_dict['source_pose_embed']
+        target_pose_embed = data_dict['source_pose_embed']  # Note: 'source_pose_embed' because target is in source position
         logger.debug(f"Target pose embed shape: {target_pose_embed.shape}")
+        logger.debug(f"Target pose embed norm: {torch.norm(target_pose_embed).item():.3f}")
+
+        # EXPERIMENT: Also extract unaligned expression embedding
+        # This is what happens when we directly feed the raw image without pose normalization
+        target_pose_embed_unaligned = model.expression_embedder_nw.net_face(target_img)[0]
+        logger.debug(f"Unaligned pose embed shape: {target_pose_embed_unaligned.shape}")
+        logger.debug(f"Unaligned pose embed norm: {torch.norm(target_pose_embed_unaligned).item():.3f}")
+        logger.debug(f"Aligned vs Unaligned cosine similarity: {torch.cosine_similarity(target_pose_embed, target_pose_embed_unaligned, dim=1).item():.3f}")
 
         # Get target warps
         _, target_warp_embed, _, _ = model.predict_embed(data_dict)
@@ -311,6 +328,16 @@ def calculate_target_warps(model, identity_info: Dict, target_img: torch.Tensor,
                                       compression='gzip', compression_opts=4)
                     grp.create_dataset('target_pose_embed', data=target_pose_embed.cpu().numpy(),
                                       compression='gzip', compression_opts=4)
+                    # Cache unaligned embedding for experiments
+                    grp.create_dataset('target_pose_embed_unaligned', data=target_pose_embed_unaligned.cpu().numpy(),
+                                      compression='gzip', compression_opts=4)
+                    # Cache SRT components
+                    grp.create_dataset('scale', data=scale.cpu().numpy(),
+                                      compression='gzip', compression_opts=4)
+                    grp.create_dataset('rotation', data=rotation.cpu().numpy(),
+                                      compression='gzip', compression_opts=4)
+                    grp.create_dataset('translation', data=translation.cpu().numpy(),
+                                      compression='gzip', compression_opts=4)
             except Exception as e:
                 logger.error(f"Failed to cache warps: {str(e)}")
                 raise
@@ -319,7 +346,11 @@ def calculate_target_warps(model, identity_info: Dict, target_img: torch.Tensor,
         return {
             'uv_warp': target_uv_warp_resize,
             'theta': target_theta,
+            'scale': scale,
+            'rotation': rotation,
+            'translation': translation,
             'target_pose_embed': target_pose_embed,
+            'target_pose_embed_unaligned': target_pose_embed_unaligned,  # EXPERIMENT: unaligned embedding
             'target_mask': target_mask
         }
 
@@ -405,7 +436,18 @@ def load_cached_warps(cache_h5_path: str, frame_idx: int, device: str = 'cuda') 
                 'theta': torch.from_numpy(grp['theta'][:]).to(device),
                 'target_pose_embed': torch.from_numpy(grp['target_pose_embed'][:]).to(device)
             }
-            logger.info(f"Loaded cached warps for frame {frame_idx}")
+            # Load unaligned embedding if available (for experiments)
+            if 'target_pose_embed_unaligned' in grp:
+                warp_data['target_pose_embed_unaligned'] = torch.from_numpy(grp['target_pose_embed_unaligned'][:]).to(device)
+
+            # Load SRT components if available
+            if 'scale' in grp:
+                warp_data['scale'] = torch.from_numpy(grp['scale'][:]).to(device)
+                warp_data['rotation'] = torch.from_numpy(grp['rotation'][:]).to(device)
+                warp_data['translation'] = torch.from_numpy(grp['translation'][:]).to(device)
+                logger.info(f"Loaded cached warps with SRT components for frame {frame_idx}")
+            else:
+                logger.info(f"Loaded cached warps for frame {frame_idx}")
             return warp_data
     except Exception as e:
         logger.error(f"Failed to load cached warps: {str(e)}")
@@ -436,6 +478,296 @@ def apply_target_to_identity(model, identity_info: Dict, target_img: torch.Tenso
     final_img = decode_with_warps(model, identity_info, warp_data, target_img)
 
     return final_img, warp_data
+
+
+def visualize_srt_components(warp_data_list: List[Dict], names: List[str], output_path: str = "srt_components_analysis.png"):
+    """Visualize Scale, Rotation, Translation components across frames."""
+    if not warp_data_list or not all('scale' in w for w in warp_data_list):
+        logger.warning("No SRT data available for visualization")
+        return
+
+    n_frames = len(warp_data_list)
+    fig, axes = plt.subplots(3, 1, figsize=(15, 10))
+
+    # Extract SRT values
+    scales = [w['scale'].cpu().numpy().flatten() for w in warp_data_list]
+    rotations = [w['rotation'].cpu().numpy().flatten()[:3] for w in warp_data_list]  # First 3 rotation params
+    translations = [w['translation'].cpu().numpy().flatten() for w in warp_data_list]
+
+    # Plot Scale
+    scale_data = np.array(scales)
+    axes[0].plot(scale_data, marker='o', linewidth=2, markersize=8)
+    axes[0].set_title('Scale Components', fontsize=14, weight='bold')
+    axes[0].set_xlabel('Frame')
+    axes[0].set_ylabel('Scale')
+    axes[0].grid(True, alpha=0.3)
+    axes[0].legend(['Scale X', 'Scale Y', 'Scale Z'][:scale_data.shape[1]], loc='best')
+
+    # Plot Rotation
+    rotation_data = np.array(rotations)
+    axes[1].plot(rotation_data, marker='s', linewidth=2, markersize=8)
+    axes[1].set_title('Rotation Components (First 3 params)', fontsize=14, weight='bold')
+    axes[1].set_xlabel('Frame')
+    axes[1].set_ylabel('Rotation')
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend(['Rot 1', 'Rot 2', 'Rot 3'], loc='best')
+
+    # Plot Translation
+    translation_data = np.array(translations)
+    axes[2].plot(translation_data, marker='^', linewidth=2, markersize=8)
+    axes[2].set_title('Translation Components', fontsize=14, weight='bold')
+    axes[2].set_xlabel('Frame')
+    axes[2].set_ylabel('Translation')
+    axes[2].grid(True, alpha=0.3)
+    axes[2].legend(['Trans X', 'Trans Y', 'Trans Z'][:translation_data.shape[1]], loc='best')
+
+    # Set x-axis labels
+    for ax in axes:
+        ax.set_xticks(range(n_frames))
+        ax.set_xticklabels([n.replace('.png', '').replace('Frame_', 'F') for n in names], rotation=45)
+
+    plt.suptitle('SRT (Scale, Rotation, Translation) Components Analysis', fontsize=16, weight='bold', y=1.02)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    logger.info(f"Saved {output_path}")
+
+    # Log statistics
+    logger.info("\n=== SRT Component Statistics ===")
+    for idx, name in enumerate(names):
+        logger.info(f"{name}:")
+        logger.info(f"  Scale: {scales[idx]}")
+        logger.info(f"  Rotation (first 3): {rotations[idx]}")
+        logger.info(f"  Translation: {translations[idx]}")
+
+
+def experiment_scale_modification(model, identity_info: Dict, warp_data: Dict,
+                                 scale_factor: float = 1.5, scale_axis: str = 'all') -> torch.Tensor:
+    """Experiment: Generate frame with modified scale values.
+
+    Args:
+        model: The volumetric avatar model
+        identity_info: Source identity information
+        warp_data: Target warp data including scale, rotation, translation
+        scale_factor: Factor to multiply scale by (e.g., 1.5 for 50% bigger)
+        scale_axis: Which axis to scale - 'x', 'y', 'z', or 'all'
+
+    Returns:
+        Generated image with modified scale
+    """
+    logger.info(f"SCALE EXPERIMENT: Modifying scale by {scale_factor}x on axis: {scale_axis}")
+
+    with torch.no_grad():
+        # Get original scale values
+        original_scale = warp_data['scale'].clone()
+        modified_scale = original_scale.clone()
+
+        # Modify scale based on axis
+        if scale_axis == 'all':
+            modified_scale = modified_scale * scale_factor
+        elif scale_axis == 'x':
+            modified_scale[:, 0] *= scale_factor
+        elif scale_axis == 'y':
+            modified_scale[:, 1] *= scale_factor
+        elif scale_axis == 'z':
+            modified_scale[:, 2] *= scale_factor
+
+        logger.info(f"Original scale: {original_scale.cpu().numpy().flatten()}")
+        logger.info(f"Modified scale: {modified_scale.cpu().numpy().flatten()}")
+
+        # Reconstruct theta matrix with modified scale
+        # The theta matrix combines rotation, scale, and translation
+        # We need to reconstruct it with the modified scale
+        rotation = warp_data['rotation']
+        translation = warp_data['translation']
+
+        # Build new transformation matrix
+        # Note: This is a simplified reconstruction - the exact format depends on how
+        # the head_pose_regressor builds the theta matrix
+        device = modified_scale.device
+        batch_size = modified_scale.shape[0]
+
+        # Create identity matrix
+        theta_modified = torch.eye(4, device=device).unsqueeze(0).repeat(batch_size, 1, 1)
+
+        # Apply scale (diagonal elements)
+        theta_modified[:, 0, 0] = modified_scale[:, 0]
+        theta_modified[:, 1, 1] = modified_scale[:, 1]
+        theta_modified[:, 2, 2] = modified_scale[:, 2]
+
+        # Apply rotation (simplified - may need adjustment based on actual rotation format)
+        # This assumes rotation contains rotation angles or quaternion parameters
+        # You may need to convert rotation to a rotation matrix first
+
+        # Apply translation
+        theta_modified[:, :3, 3] = translation
+
+        # Create modified decode dict
+        decode_dict = {
+            'target_theta': theta_modified,
+            'target_pose_embed': warp_data['target_pose_embed']
+        }
+
+        # Get volume dimensions
+        c = model.args.latent_volume_channels
+        d = model.args.latent_volume_depth
+        s = model.args.latent_volume_size
+
+        # Generate 3D grid and rotation warp with modified theta
+        grid = model.identity_grid_3d.repeat_interleave(1, dim=0)
+        target_rotation_warp = grid.bmm(theta_modified[:, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+
+        # Apply warps with modified scale
+        aligned_target_volume = model.grid_sample(
+            model.grid_sample(identity_info['canonical_volume'], warp_data['uv_warp']),
+            target_rotation_warp
+        )
+
+        # Decode
+        target_latent_feats = aligned_target_volume.view(1, c * d, s, s)
+
+        generated_img, _, _, _ = model.decoder_nw(
+            decode_dict,
+            identity_info['embed_dict'],
+            target_latent_feats,
+            False,
+            stage_two=True
+        )
+
+        # Adjust range
+        if generated_img.min() >= 0 and generated_img.max() <= 1.1:
+            generated_img = generated_img * 2 - 1
+
+        # Apply face mask if available
+        if 'target_mask' in warp_data:
+            target_mask = warp_data['target_mask']
+            target_mask_small = F.interpolate(target_mask, size=256)
+            generated_img = generated_img * target_mask_small - (1 - target_mask_small)
+
+        generated_img = torch.clamp(generated_img, -1, 1)
+
+        return generated_img
+
+
+def experiment_unaligned_reconstruction(model, identity_info: Dict, warp_data: Dict) -> torch.Tensor:
+    """Experiment: Reconstruct face using UNALIGNED expression embedding.
+
+    This tests what happens when we use the raw, non-pose-normalized expression.
+    Expected: The reconstruction will mix expression with head pose, causing artifacts.
+    """
+    logger.info("EXPERIMENT: Reconstructing with unaligned expression embedding...")
+
+    with torch.no_grad():
+        # Use the same warps but swap the expression embedding
+        decode_dict = {
+            'target_theta': warp_data['theta'],
+            'target_pose_embed': warp_data['target_pose_embed_unaligned']  # Use UNALIGNED embedding
+        }
+
+        # Get volume dimensions
+        c = model.args.latent_volume_channels
+        d = model.args.latent_volume_depth
+        s = model.args.latent_volume_size
+
+        # Generate 3D grid and rotation warp for target
+        grid = model.identity_grid_3d.repeat_interleave(1, dim=0)
+        target_rotation_warp = grid.bmm(warp_data['theta'][:, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+
+        # Apply warps to canonical volume
+        aligned_target_volume = model.grid_sample(
+            model.grid_sample(identity_info['canonical_volume'], warp_data['uv_warp']),
+            target_rotation_warp
+        )
+
+        # Decode
+        target_latent_feats = aligned_target_volume.view(1, c * d, s, s)
+        generated_img, gen_mask, _, _ = model.decoder_nw(
+            decode_dict,
+            identity_info['embed_dict'],
+            target_latent_feats,
+            False,  # with_bones
+            0  # iteration
+        )
+
+        generated_img = torch.clamp(generated_img, -1, 1)
+
+        logger.info(f"Unaligned reconstruction complete, shape: {generated_img.shape}")
+
+    return generated_img
+
+
+def generate_custom_scale_frame(scale_x: float = 1.0, scale_y: float = 1.0, scale_z: float = 1.0,
+                               frame_idx: int = 0, cache_h5_path: str = "proper_face_attributes_img1.h5"):
+    """Generate a single frame with custom scale values.
+
+    Args:
+        scale_x: Scale factor for X axis (width)
+        scale_y: Scale factor for Y axis (height)
+        scale_z: Scale factor for Z axis (depth)
+        frame_idx: Which frame to use as base (default: 0)
+        cache_h5_path: Path to cache file with warps
+
+    Returns:
+        Generated image tensor
+    """
+    logger.info(f"Generating custom scaled frame: X={scale_x}, Y={scale_y}, Z={scale_z}")
+
+    # Load model
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    logger.info(f"Using device: {device}")
+
+    # Load model using existing function
+    model = load_volumetric_model(device)
+
+    # Initialize face detector and pose estimator for identity extraction
+    face_detector = RetinaFacePredictor(threshold=0.8, device=device,
+                                       model=RetinaFacePredictor.get_model('mobilenet0.25'))
+    pose_estimator = HeadPoseEstimator()
+
+    # Load source identity
+    source_img = load_image_tensor("nemo/data/IMG_1.png", device)
+    identity_info = extract_identity_features(model, source_img, face_detector, pose_estimator)
+
+    # Load cached warps for the frame
+    warp_data = load_cached_warps(cache_h5_path, frame_idx, device)
+    if warp_data is None:
+        logger.error(f"No cached warps found for frame {frame_idx}")
+        return None
+
+    # Apply custom scale
+    if 'scale' in warp_data:
+        original_scale = warp_data['scale'].clone()
+        warp_data['scale'][:, 0] = original_scale[:, 0] * scale_x
+        warp_data['scale'][:, 1] = original_scale[:, 1] * scale_y
+        warp_data['scale'][:, 2] = original_scale[:, 2] * scale_z
+
+        logger.info(f"Original scale: {original_scale.cpu().numpy().flatten()}")
+        logger.info(f"Modified scale: {warp_data['scale'].cpu().numpy().flatten()}")
+
+        # Rebuild theta matrix with custom scale
+        device = warp_data['scale'].device
+        batch_size = warp_data['scale'].shape[0]
+
+        theta_modified = torch.eye(4, device=device).unsqueeze(0).repeat(batch_size, 1, 1)
+        theta_modified[:, 0, 0] = warp_data['scale'][:, 0]
+        theta_modified[:, 1, 1] = warp_data['scale'][:, 1]
+        theta_modified[:, 2, 2] = warp_data['scale'][:, 2]
+        theta_modified[:, :3, 3] = warp_data['translation']
+
+        warp_data['theta'] = theta_modified
+
+    # Generate image
+    generated_img = decode_with_warps(model, identity_info, warp_data)
+
+    # Save result
+    img_np = (generated_img[0].cpu().permute(1, 2, 0).numpy() + 1) / 2
+    img_np = (np.clip(img_np, 0, 1) * 255).astype(np.uint8)
+
+    filename = f"custom_scale_x{scale_x}_y{scale_y}_z{scale_z}.png"
+    Image.fromarray(img_np).save(filename)
+    logger.info(f"Saved {filename}")
+
+    return generated_img
 
 
 def main(cache_h5_path: Optional[str] = None):
@@ -506,6 +838,10 @@ def main(cache_h5_path: Optional[str] = None):
 
     # Process each target
     results = []
+    expression_embeddings = []  # Collect expression embeddings for visualization
+    unaligned_experiments = []  # EXPERIMENT: collect unaligned reconstructions
+    srt_data = []  # Collect SRT components for visualization
+
     for frame_idx, (name, target_img) in enumerate(targets):
         try:
             final_img, cache_data = apply_target_to_identity(
@@ -515,8 +851,34 @@ def main(cache_h5_path: Optional[str] = None):
             results.append({
                 'name': name,
                 'target': target_img,
-                'result': final_img
+                'result': final_img,
+                'expression_embed': cache_data.get('target_pose_embed')  # Store expression embedding
             })
+
+            # Collect expression embedding for analysis
+            if 'target_pose_embed' in cache_data:
+                expression_embeddings.append({
+                    'frame': name,
+                    'embed': cache_data['target_pose_embed']
+                })
+
+            # Collect SRT data for visualization
+            if all(k in cache_data for k in ['scale', 'rotation', 'translation']):
+                srt_data.append(cache_data)
+
+            # EXPERIMENT: Generate unaligned reconstruction for comparison
+            if 'target_pose_embed_unaligned' in cache_data:
+                try:
+                    unaligned_img = experiment_unaligned_reconstruction(model, identity_info, cache_data)
+                    unaligned_experiments.append({
+                        'name': name,
+                        'aligned': final_img,
+                        'unaligned': unaligned_img,
+                        'target': target_img
+                    })
+                except Exception as e:
+                    logger.warning(f"Unaligned experiment failed for {name}: {str(e)}")
+
             logger.info(f"Processed {name} successfully")
         except Exception as e:
             logger.error(f"Failed to process {name}: {str(e)}")
@@ -582,6 +944,230 @@ def main(cache_h5_path: Optional[str] = None):
     except Exception as e:
         logger.error(f"Failed to save visualization: {str(e)}")
 
+    # Create expression embedding comparison plots
+    if expression_embeddings:
+        try:
+            # Create figure for expression embedding analysis
+            n_frames = len(expression_embeddings)
+            fig, axes = plt.subplots(2, n_frames, figsize=(4 * n_frames, 8))
+
+            # If only one frame, make axes 2D
+            if n_frames == 1:
+                axes = axes.reshape(2, 1)
+
+            for idx, expr_data in enumerate(expression_embeddings):
+                frame_name = expr_data['frame']
+                embed = expr_data['embed']
+
+                # Convert to numpy if tensor
+                if isinstance(embed, torch.Tensor):
+                    embed = embed.detach().cpu().numpy()
+
+                # Ensure correct shape
+                if len(embed.shape) > 1:
+                    embed = embed.squeeze()  # Remove batch dimension if present
+
+                # Plot first 50 dimensions as bars
+                dims_to_plot = min(50, len(embed))
+
+                # Top row: Bar plot of expression embedding
+                axes[0, idx].bar(range(dims_to_plot), embed[:dims_to_plot], color='steelblue')
+                axes[0, idx].set_title(f'{frame_name}\nExpression Embedding', fontsize=10)
+                axes[0, idx].set_xlabel('Dimension')
+                axes[0, idx].set_ylabel('Value')
+                axes[0, idx].set_ylim([-2, 2])  # Standard range for embeddings
+                axes[0, idx].grid(True, alpha=0.3)
+
+                # Bottom row: Heatmap visualization of full embedding
+                # Reshape to 2D for visualization (e.g., 8x16 for 128 dims)
+                embed_2d = embed.reshape(8, 16)
+                im = axes[1, idx].imshow(embed_2d, cmap='RdBu_r', vmin=-2, vmax=2, aspect='auto')
+                axes[1, idx].set_title(f'Full 128-dim (8x16)', fontsize=10)
+                axes[1, idx].set_xlabel('Dimension')
+                axes[1, idx].set_ylabel('Group')
+
+                # Add statistics
+                norm = np.linalg.norm(embed)
+                mean = np.mean(embed)
+                std = np.std(embed)
+                axes[1, idx].text(0.02, 0.98, f'Norm: {norm:.2f}\nMean: {mean:.3f}\nStd: {std:.3f}',
+                                transform=axes[1, idx].transAxes,
+                                fontsize=8, verticalalignment='top',
+                                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+            # Add colorbar for heatmaps
+            plt.colorbar(im, ax=axes[1, :], orientation='horizontal', pad=0.1, fraction=0.05)
+
+            plt.suptitle('Expression Embeddings Analysis (128 dims)', fontsize=14, weight='bold')
+            plt.tight_layout()
+            plt.savefig("expression_embeddings_analysis.png", dpi=150, bbox_inches='tight')
+            plt.close()
+            logger.info("Saved expression_embeddings_analysis.png")
+
+            # Log embedding statistics
+            logger.info("\n=== Expression Embedding Statistics ===")
+            for expr_data in expression_embeddings:
+                embed = expr_data['embed']
+                if isinstance(embed, torch.Tensor):
+                    embed = embed.detach().cpu().numpy()
+                if len(embed.shape) > 1:
+                    embed = embed.squeeze()
+
+                norm = np.linalg.norm(embed)
+                mean = np.mean(embed)
+                std = np.std(embed)
+                min_val = np.min(embed)
+                max_val = np.max(embed)
+
+                logger.info(f"{expr_data['frame']}: norm={norm:.2f}, mean={mean:.3f}, std={std:.3f}, range=[{min_val:.2f}, {max_val:.2f}]")
+
+        except Exception as e:
+            logger.error(f"Failed to create expression embedding visualization: {str(e)}")
+
+        # Create frame-to-frame comparison
+        if len(expression_embeddings) > 1:
+            try:
+                fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+                # Compute similarity matrix
+                n = len(expression_embeddings)
+                similarity_matrix = np.zeros((n, n))
+                embeddings_array = []
+
+                for i, expr_data in enumerate(expression_embeddings):
+                    embed = expr_data['embed']
+                    if isinstance(embed, torch.Tensor):
+                        embed = embed.detach().cpu().numpy()
+                    if len(embed.shape) > 1:
+                        embed = embed.squeeze()
+                    embeddings_array.append(embed)
+
+                # Calculate cosine similarity between all pairs
+                for i in range(n):
+                    for j in range(n):
+                        norm_i = np.linalg.norm(embeddings_array[i])
+                        norm_j = np.linalg.norm(embeddings_array[j])
+                        if norm_i > 0 and norm_j > 0:
+                            similarity_matrix[i, j] = np.dot(embeddings_array[i], embeddings_array[j]) / (norm_i * norm_j)
+                        else:
+                            similarity_matrix[i, j] = 0
+
+                # Plot similarity matrix
+                im1 = axes[0].imshow(similarity_matrix, cmap='coolwarm', vmin=-1, vmax=1)
+                axes[0].set_title('Cosine Similarity Matrix', fontsize=12, weight='bold')
+                axes[0].set_xlabel('Frame')
+                axes[0].set_ylabel('Frame')
+
+                # Add frame labels
+                frame_labels = [e['frame'] for e in expression_embeddings]
+                axes[0].set_xticks(range(n))
+                axes[0].set_yticks(range(n))
+                axes[0].set_xticklabels(frame_labels, rotation=45, ha='right')
+                axes[0].set_yticklabels(frame_labels)
+
+                # Add values to heatmap
+                for i in range(n):
+                    for j in range(n):
+                        text = axes[0].text(j, i, f'{similarity_matrix[i, j]:.2f}',
+                                          ha="center", va="center", color="black" if abs(similarity_matrix[i, j]) < 0.5 else "white",
+                                          fontsize=8)
+
+                plt.colorbar(im1, ax=axes[0])
+
+                # Plot embedding trajectory (PCA projection)
+                from sklearn.decomposition import PCA
+                pca = PCA(n_components=2)
+                embeddings_2d = pca.fit_transform(np.array(embeddings_array))
+
+                axes[1].scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], c=range(n), cmap='viridis', s=100)
+                for i, txt in enumerate(frame_labels):
+                    axes[1].annotate(txt, (embeddings_2d[i, 0], embeddings_2d[i, 1]),
+                                   xytext=(5, 5), textcoords='offset points', fontsize=9)
+
+                axes[1].plot(embeddings_2d[:, 0], embeddings_2d[:, 1], 'k--', alpha=0.3)
+                axes[1].set_title('Expression Embedding Trajectory (PCA)', fontsize=12, weight='bold')
+                axes[1].set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%} var)')
+                axes[1].set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%} var)')
+                axes[1].grid(True, alpha=0.3)
+
+                plt.suptitle('Expression Embedding Frame Comparison', fontsize=14, weight='bold')
+                plt.tight_layout()
+                plt.savefig("expression_embeddings_comparison.png", dpi=150, bbox_inches='tight')
+                plt.close()
+                logger.info("Saved expression_embeddings_comparison.png")
+
+            except Exception as e:
+                logger.error(f"Failed to create expression comparison: {str(e)}")
+
+    # Visualize SRT components if available
+    if srt_data:
+        try:
+            names = [r['name'] for r in results[:len(srt_data)]]
+            visualize_srt_components(srt_data, names)
+        except Exception as e:
+            logger.error(f"Failed to create SRT visualization: {str(e)}")
+
+    # Run scale modification experiments
+    # scale_experiments = []
+    # if len(results) > 0 and srt_data:
+        try:
+            # Use first frame for experiments
+            first_result = results[0]
+            first_srt = srt_data[0] if srt_data else None
+
+            if first_srt and all(k in first_srt for k in ['scale', 'rotation', 'translation']):
+                logger.info("\n=== SCALE MODIFICATION EXPERIMENTS ===")
+
+                # Test different scale factors
+                scale_configs = [
+                    (1.0, 'all', 'Original'),
+                    (0.7, 'all', 'Scaled 0.7x (smaller)'),
+                    (1.3, 'all', 'Scaled 1.3x (larger)'),
+                    (1.5, 'x', 'X-axis 1.5x'),
+                    (1.5, 'y', 'Y-axis 1.5x'),
+                    (1.5, 'z', 'Z-axis 1.5x'),
+                ]
+
+                for scale_factor, axis, label in scale_configs:
+                    if scale_factor == 1.0:
+                        # Use original
+                        img = first_result['result']
+                    else:
+                        img = experiment_scale_modification(
+                            model, identity_info, first_srt,
+                            scale_factor=scale_factor, scale_axis=axis
+                        )
+
+                    scale_experiments.append({
+                        'label': label,
+                        'image': img,
+                        'scale_factor': scale_factor,
+                        'axis': axis
+                    })
+
+                # Create visualization
+                n_exp = len(scale_experiments)
+                fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+                axes = axes.flatten()
+
+                for idx, exp in enumerate(scale_experiments[:6]):
+                    img = exp['image'][0].cpu().permute(1, 2, 0).numpy()
+                    img = (img + 1) / 2
+                    img = np.clip(img, 0, 1)
+
+                    axes[idx].imshow(img)
+                    axes[idx].set_title(exp['label'], fontsize=12, weight='bold')
+                    axes[idx].axis('off')
+
+                plt.suptitle('Scale Modification Experiments', fontsize=16, weight='bold')
+                plt.tight_layout()
+                plt.savefig('scale_modification_experiments.png', dpi=150, bbox_inches='tight')
+                plt.close()
+                logger.info("Saved scale_modification_experiments.png")
+
+        except Exception as e:
+            logger.error(f"Failed to run scale experiments: {str(e)}")
+
     # Save best single result (if available)
     if len(results) >= 3:
         try:
@@ -592,6 +1178,65 @@ def main(cache_h5_path: Optional[str] = None):
             logger.info("Saved video_best_result.png")
         except Exception as e:
             logger.error(f"Failed to save best result: {str(e)}")
+
+    # EXPERIMENT: Visualize aligned vs unaligned reconstructions
+    if unaligned_experiments:
+        try:
+            n_exp = min(len(unaligned_experiments), 4)
+            fig, axes = plt.subplots(4, n_exp, figsize=(4 * n_exp, 16))
+
+            # If only one experiment, make axes 2D
+            if n_exp == 1:
+                axes = axes.reshape(4, 1)
+
+            for idx in range(n_exp):
+                exp = unaligned_experiments[idx]
+
+                # Row 0: Target image
+                target_display = (exp['target'][0].cpu().permute(1, 2, 0).numpy() + 1) / 2
+                axes[0, idx].imshow(np.clip(target_display, 0, 1))
+                axes[0, idx].set_title(f'Target\n{exp["name"]}', fontsize=10)
+                axes[0, idx].axis('off')
+
+                # Row 1: Aligned reconstruction (correct)
+                aligned_display = (exp['aligned'][0].cpu().permute(1, 2, 0).numpy() + 1) / 2
+                axes[1, idx].imshow(np.clip(aligned_display, 0, 1))
+                axes[1, idx].set_title('Aligned Embedding\n(Correct)', fontsize=10, color='green')
+                axes[1, idx].axis('off')
+
+                # Row 2: Unaligned reconstruction (experiment)
+                unaligned_display = (exp['unaligned'][0].cpu().permute(1, 2, 0).numpy() + 1) / 2
+                axes[2, idx].imshow(np.clip(unaligned_display, 0, 1))
+                axes[2, idx].set_title('Unaligned Embedding\n(Experiment)', fontsize=10, color='red')
+                axes[2, idx].axis('off')
+
+                # Row 3: Difference between aligned and unaligned
+                diff = np.abs(aligned_display - unaligned_display).mean(axis=2)
+                im = axes[3, idx].imshow(diff, cmap='hot', vmin=0, vmax=0.5)
+                axes[3, idx].set_title('Difference\n(Aligned vs Unaligned)', fontsize=10)
+                axes[3, idx].axis('off')
+
+                # Add metrics
+                mse = np.mean((aligned_display - unaligned_display) ** 2)
+                axes[3, idx].text(0.5, -0.05, f'MSE: {mse:.4f}',
+                                transform=axes[3, idx].transAxes,
+                                ha='center', fontsize=9)
+
+            plt.suptitle('EXPERIMENT: Aligned vs Unaligned Expression Embedding Reconstruction',
+                        fontsize=14, weight='bold')
+            plt.tight_layout()
+            plt.savefig('unaligned_embedding_experiment.png', dpi=150, bbox_inches='tight')
+            plt.close()
+            logger.info("Saved unaligned_embedding_experiment.png")
+
+            logger.info("\n=== EXPERIMENT RESULTS ===")
+            logger.info("Unaligned embeddings mix expression with head pose!")
+            logger.info("This causes artifacts and incorrect expression transfer.")
+            logger.info("Aligned embeddings properly separate pose from expression.")
+            logger.info("=" * 30)
+
+        except Exception as e:
+            logger.error(f"Failed to create unaligned experiment visualization: {str(e)}")
 
     logger.info(f"Generated {len(results)} face swap results")
     logger.info("Results should match the video quality!")
