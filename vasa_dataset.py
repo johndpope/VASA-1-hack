@@ -1135,10 +1135,10 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
 
     def _extract_emo_features(self, frames: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """Extract EMO features with proper batch and sequence dimensions, including warps"""
+        """Calculate target warps and features for frames - cherry-picked from calculate_target_warps."""
         with torch.no_grad():
             try:
-                logger.debug("\n=== EMO Feature Extraction Start ===")
+                logger.debug("\n=== Calculate Target Warps Start ===")
                 logger.debug(f"Input frames shape: {frames.shape}")
                 logger.debug(f"Input frames device: {frames.device}")
                 logger.debug(f"EMO model device: {next(self.emo_model.parameters()).device}")
@@ -1147,7 +1147,6 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 assert frames.shape[1] == 3, f"Expected 3 channels, got {frames.shape[1]}"
 
                 T = frames.shape[0]
-                # Accept variable window sizes, not just 50
                 logger.debug(f"Processing sequence of length {T}")
 
                 # Add batch dimension and move to device
@@ -1156,16 +1155,13 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 logger.debug(f"After adding batch dim - frames shape: {frames.shape}")
 
                 outputs = {
-                    'theta': [],            # Target pose (matches create_video_face_swap)
-                    'scale': [],
-                    'rotation': [],
-                    'translation': [],
-                    'expression_embed': [],
-                    'uv_warps': [],         # Target non-rigid warps (matches create_video_face_swap)
-                    'target_pose_embed': [], # Target expression embeddings (matches create_video_face_swap)
-                    # For compatibility with MotionTransformer
-                    'xy_warps': [],         # Source non-rigid warps (will compute from identity)
-                    'rigid_warps': []       # Rigid rotation warps (will compute from theta)
+                    'theta': [],            # Target pose
+                    'scale': [],            # SRT scale component
+                    'rotation': [],         # SRT rotation component
+                    'translation': [],      # SRT translation component
+                    'expression_embed': [], # Renamed from target_pose_embed as requested
+                    'uv_warps': [],        # Target UV warps (main warping field)
+                    'target_masks': [],    # Target face masks
                 }
 
                 # Use first frame as identity for warp generation
@@ -1240,7 +1236,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     }
 
 
-                # Process each frame (matching calculate_target_warps in create_video_face_swap.py)
+                # Process each frame (cherry-picked from calculate_target_warps)
                 for t in range(T):
                     frame = frames[:, t]  # [1,C,H,W]
 
@@ -1250,7 +1246,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         target_mask = (target_mask > 0.6).float()
                         target_mask = F.avg_pool2d(target_mask, 3, stride=1, padding=1)
 
-                        # Get target pose using model's head_pose_regressor
+                        # Get target pose with SRT components
                         target_theta, scale, rotation, translation = self.emo_model.head_pose_regressor.forward(
                             frame, return_srt=True
                         )
@@ -1267,19 +1263,13 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                             'idt_embed': identity_info['idt_embed']  # Use source identity
                         }
 
-                        # Get target expression
+                        # Get aligned expression embedding
                         data_dict = self.emo_model.expression_embedder_nw(data_dict, True, False, False)
-                        target_pose_embed = data_dict['source_pose_embed']
+                        expression_embed = data_dict['source_pose_embed']  # This is the aligned expression
 
-                        # Get expression embed for legacy compatibility
-                        expression_embed = self.emo_model.expression_embedder_nw.net_face(frame)[0]
-
-                        # Generate target UV warps
-                        target_warp_embed, _, _, _ = self.emo_model.predict_embed(data_dict)
+                        # Generate target warps
+                        _, target_warp_embed, _, _ = self.emo_model.predict_embed(data_dict)
                         target_uv_warp, _ = self.emo_model.uv_generator_nw(target_warp_embed)
-
-                        # Match create_video_face_swap.py logic - no resizing, just use the UV warp as-is
-                        target_uv_warp_resize = target_uv_warp
 
                     # Verify feature shapes
                     assert target_theta.shape == (1, 3, 4), f"Wrong theta shape: {target_theta.shape}"
@@ -1287,33 +1277,20 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     assert rotation.shape == (1, 3), f"Wrong rotation shape: {rotation.shape}"
                     assert translation.shape == (1, 3), f"Wrong translation shape: {translation.shape}"
                     assert expression_embed.shape == (1, 128), f"Wrong expression shape: {expression_embed.shape}"
-                    assert target_pose_embed.shape == (1, 128), f"Wrong target_pose_embed shape: {target_pose_embed.shape}"
-                    assert target_uv_warp_resize.shape == (1, 16, 64, 64, 3), f"Wrong uv_warp shape: {target_uv_warp_resize.shape}"
+                    assert target_uv_warp.shape == (1, 16, 64, 64, 3), f"Wrong uv_warp shape: {target_uv_warp.shape}"
 
-                    # Compute rigid warps from theta for MotionTransformer compatibility
-                    grid = self.emo_model.identity_grid_3d.repeat_interleave(1, dim=0)
-                    target_rotation_warp = grid.bmm(target_theta[:, :3].transpose(1, 2)).view(-1, 16, 64, 64, 3)
-
-                    # Use source XY warp for all frames (identity warps)
-                    # This is the warp that transforms source to canonical space
-                    # Match create_video_face_swap.py logic - no resizing
-                    source_xy_warp_resize = source_xy_warp
-
-                    # Store outputs (aligned with create_video_face_swap.py)
+                    # Store outputs matching H5 cache structure
                     outputs['theta'].append(target_theta.cpu())
                     outputs['scale'].append(scale.cpu())
                     outputs['rotation'].append(rotation.cpu())
                     outputs['translation'].append(translation.cpu())
-                    outputs['expression_embed'].append(expression_embed.cpu())
-                    outputs['uv_warps'].append(target_uv_warp_resize.cpu())
-                    outputs['target_pose_embed'].append(target_pose_embed.cpu())
-                    # For MotionTransformer
-                    outputs['xy_warps'].append(source_xy_warp_resize.cpu())
-                    outputs['rigid_warps'].append(target_rotation_warp.cpu())
+                    outputs['expression_embed'].append(expression_embed.cpu())  # Using aligned expression
+                    outputs['uv_warps'].append(target_uv_warp.cpu())
+                    outputs['target_masks'].append(target_mask.cpu())
 
                 # Stack along time dimension for per-frame features
                 per_frame_keys = ['theta', 'scale', 'rotation', 'translation', 'expression_embed',
-                                 'uv_warps', 'target_pose_embed', 'xy_warps', 'rigid_warps']
+                                 'uv_warps', 'target_masks']
                 for k in per_frame_keys:
                     if k in outputs and isinstance(outputs[k], list) and len(outputs[k]) > 0:
                         outputs[k] = torch.stack(outputs[k], dim=1)
@@ -1325,7 +1302,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 diff_norm = torch.norm(frame_diff, dim=-1)  # [T-1]
                 is_constant = torch.allclose(expr_flat[0], expr_flat, atol=1e-5)
 
-                logger.debug(f"Shape: {expr_tensor.shape}")
+                logger.debug(f"Expression embed shape: {expr_tensor.shape}")
                 logger.debug(f"Constant across frames? {is_constant}")
                 logger.debug(f"Frame-to-frame diff - Mean: {diff_norm.mean():.6f}, Max: {diff_norm.max():.6f}")
                 logger.debug(f"First frame values (first 5): {expr_flat[0, :5].tolist()}")
@@ -1334,31 +1311,29 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 # Add identity info to outputs
                 outputs['identity_info'] = identity_info
 
-                # Verify final output shapes
-                logger.debug("\nFinal output shapes:")
+                # Verify final output shapes matching H5 cache
+                logger.debug("\nFinal output shapes (matching H5):")
                 d = 16  # depth
                 s = 64  # spatial size
                 expected_shapes = {
-                    'theta': (1, T, 3, 4), # [B, T, 3, 4] - target pose
-                    'scale': (1, T, 3),
-                    'rotation': (1, T, 3),
-                    'translation': (1, T, 3),
-                    'expression_embed': (1, T, 128),
-                    'uv_warps': (1, T, d, s, s, 3),  # Per-frame non-rigid target warps (matches create_video_face_swap)
-                    'target_pose_embed': (1, T, 512),  # Per-frame target expression embeddings (matches create_video_face_swap)
-                    'xy_warps': (1, T, d, s, s, 3),  # Source warps for MotionTransformer
-                    'rigid_warps': (1, T, d, s, s, 3)  # Rigid warps for MotionTransformer
+                    'theta': (1, T, 3, 4),  # Target pose (H5: 1, 4, 4 but model uses 3, 4)
+                    'scale': (1, T, 3),  # SRT scale - matches H5
+                    'rotation': (1, T, 3),  # SRT rotation - matches H5
+                    'translation': (1, T, 3),  # SRT translation - matches H5
+                    'expression_embed': (1, T, 128),  # Aligned expression - matches H5 target_pose_embed
+                    'uv_warps': (1, T, d, s, s, 3),  # Target UV warps - matches H5
+                    'target_masks': (1, T, 1, 512, 512),  # Face masks
                 }
 
                 for k, expected_shape in expected_shapes.items():
                     if k in outputs:
                         actual_shape = outputs[k].shape
-                
+
                         # Check per-frame features
                         assert actual_shape == expected_shapes[k], f"Wrong {k} shape: expected {expected_shapes[k]}, got {actual_shape}"
                         logger.debug(f"  {k}: {actual_shape} on {outputs[k].device if hasattr(outputs[k], 'device') else 'CPU'}")
 
-                logger.debug("=== EMO Feature Extraction Complete (with warps) ===\n")
+                logger.debug("=== Calculate Target Warps Complete ===\n")
 
                 return outputs
                 
@@ -2704,12 +2679,13 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
                         'blink_state': torch.tensor(np.stack(blink_states), dtype=torch.float32),
 
-                        # Add per-frame warps (now extracted for each frame)
+                        # Add UV warps from calculate_target_warps (matching H5 cache)
                         # Note: warps have shape [1, T, ...] so we squeeze the batch dimension
-                        'xy_warps': emo_features.get('xy_warps', torch.zeros(1, self.sequence_length, 16, 64, 64, 3)).squeeze(0),
-                        'rigid_warps': emo_features.get('rigid_warps', torch.zeros(1, self.sequence_length, 16, 64, 64, 3)).squeeze(0),
                         'uv_warps': emo_features.get('uv_warps', torch.zeros(1, self.sequence_length, 16, 64, 64, 3)).squeeze(0),
-                        'source_theta_warp': emo_features.get('source_theta', torch.zeros(1, self.sequence_length, 3, 4)).squeeze(0),
+                        'target_masks': emo_features.get('target_masks', torch.zeros(1, self.sequence_length, 1, 512, 512)).squeeze(0),
+
+                        # Add identity info for reconstruction
+                        'identity_info': emo_features.get('identity_info', {}),
 
                         # Add lip metrics for audio-lip correlation loss
                         'lip_metrics': {

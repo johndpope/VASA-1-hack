@@ -2,4 +2,29 @@
 
 
 junk/15a.mp4:
-  2025-09-17 06:21:06 - processing_error: {'error': 'Face attribute error: Wrong source_theta shape: expected (1, 50, 3, 4), got torch.Size([1, 50, 4, 4])'}
+  2025-09-21 09:30:33 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:30:36 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:30:40 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:30:43 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:30:47 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:30:51 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:30:54 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:30:58 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:31:02 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:31:05 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:31:09 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:31:13 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:31:16 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:31:20 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+
+junk/15.mp4:
+  2025-09-21 09:31:29 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:31:33 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:31:37 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:31:40 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:31:44 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:31:47 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:31:51 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:31:55 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:31:59 - processing_error: {'error': "Face attribute error: 'expression_embed'"}
+  2025-09-21 09:32:03 - processing_error: {'error': "Face attribute error: 'expression_embed'"}

@@ -123,201 +123,109 @@ class VASAVolumetricAvatarBridge:
         background_image: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
-        Generate frames using VASA motion and volumetric avatar.
-        
-        This properly bridges VASA's motion generation with volumetric avatar's expectations:
-        1. Source expression comes from identity image (computed once)
-        2. Target expression comes from VASA generation
-        3. Volumetric avatar handles the warping between them
-        
+        Generate frames exactly like create_video_face_swap.py using VASA-predicted warps.
+
         Args:
-            motion_outputs: VASA-generated motion (expression_embed, theta, etc.)
+            motion_outputs: VASA-generated motion with UV warps, expression_embed, theta
             source_img: Identity image [B, C, H, W]
             use_black_background: Whether to use black background
             background_image: Optional background image
-            
+
         Returns:
             Generated frames [B, T, C, H, W]
         """
         B, T = motion_outputs['theta'].shape[:2]
         device = motion_outputs['theta'].device
-        
+
         # Get source embeddings (cached after first call)
         source_data = self.get_source_embeddings(source_img)
-        
-        # Process canonical volume
+
+        # Process canonical volume once for all frames
         source_volume = source_data['source_volume']
         canonical_volume = self.va.volume_process_nw(source_volume)
-        
+
         c = self.va.args.latent_volume_channels
         d = self.va.args.latent_volume_depth
         s = self.va.args.latent_volume_size
-        
+
+        # Create identity info's embed_dict once (as in create_video_face_swap.py)
+        identity_embed_dict = {
+            'idt_embed': source_data['idt_embed'],
+            'source_pose_embed': source_data['source_pose_embed']
+        }
+
         generated_frames = []
-        
+
         for b in range(B):
             batch_frames = []
             canonical_volume_b = canonical_volume[b:b+1]
-            
-            for t in range(T):
-                # Get VASA-generated motion for this frame
-                target_expression = motion_outputs['expression_embed'][b:b+1, t]
-                target_theta = motion_outputs['theta'][b:b+1, t]
 
-                # Convert theta format if needed
+            for t in range(T):
+                # Get VASA predictions for this frame (matching H5 cache structure)
+                target_uv_warp = motion_outputs['uv_warps'][b:b+1, t]  # [1, 16, 64, 64, 3]
+                target_theta = motion_outputs['theta'][b:b+1, t]  # [1, 3, 4] or [1, 4, 4]
+                target_pose_embed = motion_outputs['expression_embed'][b:b+1, t]  # [1, 128]
+
+                # Convert theta to 3x4 if needed
                 if target_theta.shape[-2] == 4:
                     target_theta = target_theta[:, :3, :]
 
-                # Check if we have VASA-predicted warping fields
-                use_predicted_warps = (
-                    'xy_warps' in motion_outputs and
-                    'rigid_warps' in motion_outputs and
-                    'uv_warps' in motion_outputs
+                # Generate 3D grid and rotation warp (exactly as in create_video_face_swap.py)
+                grid = self.va.identity_grid_3d.repeat_interleave(1, dim=0)
+                target_rotation_warp = grid.bmm(target_theta[:, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+
+                # Apply warps exactly like create_video_face_swap.py - nested grid_sample calls
+                aligned_target_volume = self.va.grid_sample(
+                    self.va.grid_sample(canonical_volume_b, target_uv_warp),
+                    target_rotation_warp
                 )
 
-                if use_predicted_warps:
-                    # USE VASA-PREDICTED WARPING FIELDS (as in nemo/pipeline_face_attr.py)
-                    logger.debug(f"Using VASA-predicted warps for frame {t}")
+                # Prepare for decoder
+                target_latent_feats = aligned_target_volume.view(1, c * d, s, s)
 
-                    # Extract warps for this frame and batch
-                    source_xy_warp = motion_outputs['xy_warps'][b:b+1, t]  # [1, D, H, W, 3]
-                    target_rotation_warp = motion_outputs['rigid_warps'][b:b+1, t]  # [1, D, H, W, 3]
-                    target_uv_warp = motion_outputs['uv_warps'][b:b+1, t]  # [1, D, H, W, 3]
+                # Create decode_dict exactly as in create_video_face_swap.py
+                decode_dict = {
+                    'target_theta': target_theta,
+                    'target_pose_embed': target_pose_embed
+                }
 
-                    # Handle resizing if needed for xy warps
-                    if self.va.resize_warp and source_xy_warp.shape[2] != s:
-                        stride = self.va.warp_resize_stride
-                        source_xy_warp = F.avg_pool3d(
-                            source_xy_warp.permute(0, 4, 1, 2, 3),
-                            kernel_size=stride,
-                            stride=stride
-                        ).permute(0, 2, 3, 4, 1)
-
-                    # Handle resizing for uv warps
-                    if self.va.resize_warp and target_uv_warp.shape[2] != s:
-                        stride = self.va.warp_resize_stride
-                        target_uv_warp = F.avg_pool3d(
-                            target_uv_warp.permute(0, 4, 1, 2, 3),
-                            kernel_size=stride,
-                            stride=stride
-                        ).permute(0, 2, 3, 4, 1)
-
-                    # Create data dict for decoder (still needed for some parameters)
-                    data_dict = {
-                        'source_img': source_img[b:b+1],
-                        'target_img': source_img[b:b+1],
-                        'source_mask': source_data['source_mask'][b:b+1],
-                        'target_mask': source_data['source_mask'][b:b+1],
-                        'source_theta': source_data['source_theta'][b:b+1] if source_data['source_theta'] is not None else target_theta,
-                        'target_theta': target_theta,
-                        'idt_embed': source_data['idt_embed'][b:b+1],
-                        'source_pose_embed': source_data['source_pose_embed'][b:b+1],
-                        'target_pose_embed': target_expression
-                    }
-
-                    # Get embed_dict for decoder (minimal computation)
-                    _, _, _, embed_dict = self.va.predict_embed(data_dict)
-
-                else:
-                    # FALLBACK: Generate warps using volumetric avatar (original behavior)
-                    logger.debug(f"Generating warps using volumetric avatar for frame {t}")
-
-                    # Create data dict with proper source/target separation
-                    data_dict = {
-                        'source_img': source_img[b:b+1],
-                        'target_img': source_img[b:b+1],
-                        'source_mask': source_data['source_mask'][b:b+1],
-                        'target_mask': source_data['source_mask'][b:b+1],
-                        'source_theta': source_data['source_theta'][b:b+1] if source_data['source_theta'] is not None else target_theta,
-                        'target_theta': target_theta,
-                        'idt_embed': source_data['idt_embed'][b:b+1],
-                        'source_pose_embed': source_data['source_pose_embed'][b:b+1],
-                        'target_pose_embed': target_expression
-                    }
-
-                    # Generate embeddings for warping
-                    source_warp_embed_dict, target_warp_embed_dict, _, embed_dict = self.va.predict_embed(data_dict)
-
-                    # Generate XY warp from source
-                    source_xy_warp, _ = self.va.xy_generator_nw(source_warp_embed_dict)
-
-                    # Generate UV warp from target expression
-                    target_uv_warp, _ = self.va.uv_generator_nw(target_warp_embed_dict)
-
-                    # Handle resizing if needed
-                    if self.va.resize_warp:
-                        stride = self.va.warp_resize_stride
-                        source_xy_warp = F.avg_pool3d(
-                            source_xy_warp.permute(0, 4, 1, 2, 3),
-                            kernel_size=stride,
-                            stride=stride
-                        ).permute(0, 2, 3, 4, 1)
-                        target_uv_warp = F.avg_pool3d(
-                            target_uv_warp.permute(0, 4, 1, 2, 3),
-                            kernel_size=stride,
-                            stride=stride
-                        ).permute(0, 2, 3, 4, 1)
-
-                    # Create rotation warp from target pose
-                    grid = self.va.identity_grid_3d.repeat_interleave(1, dim=0)
-                    target_rotation_warp = grid.bmm(target_theta.transpose(1, 2)).view(-1, d, s, s, 3)
-                
-                # Apply warps to canonical volume (following nemo/pipeline_face_attr.py order)
-                # 1. Apply source XY warp (non-rigid deformation in source space) if using predicted warps
-                # 2. Apply rotation warp (rigid transformation)
-                # 3. Apply target UV warp (expression-specific deformation)
-                if use_predicted_warps:
-                    # When using VASA-predicted warps, apply source_xy_warp first
-                    aligned_volume = self.va.grid_sample(
-                        self.va.grid_sample(
-                            self.va.grid_sample(canonical_volume_b, source_xy_warp),
-                            target_rotation_warp
-                        ),
-                        target_uv_warp
-                    )
-                else:
-                    # Original order when generating warps (no source_xy_warp applied here)
-                    aligned_volume = self.va.grid_sample(
-                        self.va.grid_sample(canonical_volume_b, target_uv_warp),
-                        target_rotation_warp
-                    )
-                
-                target_latent_feats = aligned_volume.view(1, c * d, s, s)
-                
-                # Generate frame through decoder
-                frame, _, _, _ = self.va.decoder_nw(
-                    data_dict,
-                    embed_dict,
+                # Decode exactly as in create_video_face_swap.py
+                generated_img, _, _, _ = self.va.decoder_nw(
+                    decode_dict,
+                    identity_embed_dict,  # Source identity
                     target_latent_feats,
                     False,
                     stage_two=True
                 )
-                
-                # Apply background compositing
-                with torch.no_grad():
-                    face_mask = self.va.face_idt.forward(frame)[0]
-                    face_mask = (face_mask > 0.6).float()
-                    
-                    if face_mask.dim() == 3:
-                        face_mask = face_mask.unsqueeze(0)
-                    
-                    if use_black_background:
-                        black_bg = torch.zeros_like(frame)
-                        frame = frame * face_mask + black_bg * (1 - face_mask)
-                    elif background_image is not None:
-                        bg = background_image[b:b+1] if background_image.shape[0] > 1 else background_image
-                        frame = frame * face_mask + bg * (1 - face_mask)
-                    else:
-                        bg = source_img[b:b+1]
-                        frame = frame * face_mask + bg * (1 - face_mask)
-                
+
+                # Adjust range if needed (as in create_video_face_swap.py)
+                if generated_img.min() >= 0 and generated_img.max() <= 1.1:
+                    generated_img = generated_img * 2 - 1
+
+                # Get refined mask for compositing (as in create_video_face_swap.py)
+                gen_mask, _, _, _ = self.va.face_idt.forward(generated_img)
+                gen_mask = (gen_mask > 0.65).float()
+                for _ in range(3):  # Smooth mask edges
+                    gen_mask = F.avg_pool2d(gen_mask, 3, stride=1, padding=1)
+
+                # Composite with background
+                if use_black_background:
+                    background = torch.zeros_like(generated_img)
+                elif background_image is not None:
+                    background = background_image[b:b+1] if background_image.shape[0] > 1 else background_image
+                else:
+                    background = source_img[b:b+1]
+
+                frame = generated_img * gen_mask + background * (1 - gen_mask)
+                frame = torch.clamp(frame, -1, 1)
+
                 batch_frames.append(frame)
-            
+
             # Stack frames for this batch item
             batch_frames = torch.cat(batch_frames, dim=0)
             generated_frames.append(batch_frames)
-        
+
         # Stack all batch items [B, T, C, H, W]
         generated_frames = torch.stack(generated_frames, dim=0)
-        
+
         return generated_frames

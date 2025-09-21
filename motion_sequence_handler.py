@@ -133,27 +133,21 @@ class MotionSequenceHandler:
             return []
             
     def prepare_motion_data(self, window: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Prepare motion data from window, ensuring batch dimension is preserved."""
-        # HARD VALIDATION: Ensure all required warping fields are present
-        required_warps = ['xy_warps', 'rigid_warps', 'uv_warps', 'source_theta_warp']
-        missing_warps = [k for k in required_warps if k not in window]
-        if missing_warps:
+        """Prepare motion data from window matching H5 cache structure."""
+        # Validate that UV warps are present (main warping field from H5 cache)
+        if 'uv_warps' not in window:
             raise KeyError(
-                f"CRITICAL: Missing required warping fields: {missing_warps}. "
-                f"Dataset must provide these fields. Available keys: {list(window.keys())}"
+                f"CRITICAL: Missing required UV warps field. "
+                f"Dataset must provide this field. Available keys: {list(window.keys())}"
             )
 
         motion_data = {
-            'theta': window['theta'],            # Should be [B, T, 3, 4]
-            'scale': window['scale'],            # Should be [B, T, 3]
-            'rotation': window['rotation'],      # Should be [B, T, 3]
-            'translation': window['translation'], # Should be [B, T, 3]
-            'expression_embed': window['expression_embed'],  # Should be [B, T, 128]
-            # REQUIRED warping fields for MotionTransformer
-            'xy_warps': window['xy_warps'],      # Should be [B, T, 16, 64, 64, 3]
-            'rigid_warps': window['rigid_warps'], # Should be [B, T, 16, 64, 64, 3]
-            'uv_warps': window['uv_warps'],      # Should be [B, T, 16, 64, 64, 3]
-            'source_theta_warp': window['source_theta_warp']  # Should be [B, T, 3, 4]
+            'theta': window['theta'],            # [B, T, 3, 4] - pose matrix
+            'scale': window['scale'],            # [B, T, 3] - SRT scale
+            'rotation': window['rotation'],      # [B, T, 3] - SRT rotation
+            'translation': window['translation'], # [B, T, 3] - SRT translation
+            'expression_embed': window['expression_embed'],  # [B, T, 128] - aligned expression
+            'uv_warps': window['uv_warps'],      # [B, T, 16, 64, 64, 3] - UV warps from H5
         }
 
         # Include audio features for sync loss and other audio-related losses

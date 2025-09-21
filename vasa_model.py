@@ -301,14 +301,31 @@ class EfficientConditionEmbedding(nn.Module):
             raise
 
 class MotionTransformer(nn.Module):
-    """Decoder-based Transformer for motion generation with diffusion."""
+    """Decoder-based Transformer for motion generation matching H5 cache structure.
+
+    H5 Cache Structure (per frame):
+    - uv_warp: (1, 16, 64, 64, 3) - Target UV warps
+    - theta: (1, 4, 4) - Target pose matrix
+    - scale: (1, 3) - SRT scale component
+    - rotation: (1, 3) - SRT rotation component
+    - translation: (1, 3) - SRT translation component
+    - target_pose_embed: (1, 128) - Aligned expression embedding
+
+    For 50 frames, we predict:
+    - uv_warps: (B, 50, 16, 64, 64, 3)
+    - theta: (B, 50, 3, 4) - Note: 3x4 not 4x4 in model
+    - scale: (B, 50, 3)
+    - rotation: (B, 50, 3)
+    - translation: (B, 50, 3)
+    - expression_embed: (B, 50, 128)
+    """
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.d_model = config.model.hidden_dim
-        self.expression_dim = config.model.expression_dim
+        self.expression_dim = config.model.expression_dim  # Should be 128
         self.context_size = config.motion.context_size
-        self.window_size = config.motion.window_size
+        self.window_size = config.motion.window_size  # Should be 50
 
         # Transformer configuration
         nhead = config.model.n_heads
@@ -316,44 +333,30 @@ class MotionTransformer(nn.Module):
         dim_feedforward = config.model.dim_feedforward
         dropout = config.model.dropout
 
-        # Motion embeddings
-        self.theta_emb = nn.Linear(3 * 4, self.d_model // 2)
-        self.expr_emb = nn.Linear(self.expression_dim, self.d_model // 2)
+        # Motion embeddings matching H5 data
+        self.theta_emb = nn.Linear(3 * 4, self.d_model // 2)  # theta is 3x4
+        self.expr_emb = nn.Linear(128, self.d_model // 2)  # expression is 128-dim
 
-        # Additional motion parameter embeddings
+        # SRT component embeddings
         self.scale_emb = nn.Linear(3, self.d_model // 4)
         self.rotation_emb = nn.Linear(3, self.d_model // 4)
         self.translation_emb = nn.Linear(3, self.d_model // 4)
 
-        # Warping field embeddings - use 3D CNN to reduce spatial dims
-        self.xy_warp_encoder = nn.Sequential( 
+        # UV Warp encoder - simplified since we're only using UV warps from H5
+        # Input UV warps: [B, T, 16, 64, 64, 3]
+        self.uv_warp_encoder = nn.Sequential(
             nn.Conv3d(3, 16, kernel_size=(4, 8, 8), stride=(4, 8, 8)),  # [B*T, 3, 16, 64, 64] -> [B*T, 16, 4, 8, 8]
             nn.ReLU(),
             nn.Conv3d(16, 32, kernel_size=(2, 4, 4), stride=(2, 4, 4)),  # -> [B*T, 32, 2, 2, 2]
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(32 * 2 * 2 * 2, self.d_model // 8)
+            nn.Linear(32 * 2 * 2 * 2, self.d_model // 4)  # Larger embedding for UV warps
         )
-        self.rigid_warp_encoder = nn.Sequential(
-            nn.Conv3d(3, 16, kernel_size=(4, 8, 8), stride=(4, 8, 8)),
-            nn.ReLU(),
-            nn.Conv3d(16, 32, kernel_size=(2, 4, 4), stride=(2, 4, 4)),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(32 * 2 * 2 * 2, self.d_model // 8)
-        )
-        self.uv_warp_encoder = nn.Sequential(
-            nn.Conv3d(3, 16, kernel_size=(4, 8, 8), stride=(4, 8, 8)),
-            nn.ReLU(),
-            nn.Conv3d(16, 32, kernel_size=(2, 4, 4), stride=(2, 4, 4)),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(32 * 2 * 2 * 2, self.d_model // 8)
-        )
-        self.source_theta_warp_emb = nn.Linear(3 * 4, self.d_model // 8)
 
-        # Combine all motion embeddings (including warps)
-        self.motion_proj = nn.Linear(self.d_model + self.d_model // 4 * 3 + self.d_model // 8 * 4, self.d_model)
+        # Combine all motion embeddings
+        # theta_emb (d_model/2) + expr_emb (d_model/2) + scale (d_model/4) + rotation (d_model/4) + translation (d_model/4) + uv_warp (d_model/4)
+        # = d_model + d_model/4 * 4 = 2 * d_model
+        self.motion_proj = nn.Linear(2 * self.d_model, self.d_model)
 
         # Timestep embedding
         self.time_emb = nn.Sequential(
@@ -415,39 +418,16 @@ class MotionTransformer(nn.Module):
             nn.Linear(self.d_model // 4, 3)
         )
 
-        # Warp prediction heads - predict 3D warping fields
-        # Output size: 16 * 64 * 64 * 3 = 196608 values per frame
+        # UV Warp prediction head - only predict UV warps to match H5 cache
+        # Output size: 16 * 64 * 64 * 3 = 196,608 values per frame
         warp_hidden_dim = self.d_model * 2  # Larger hidden dim for complex warp fields
-
-        self.xy_warp_head = nn.Sequential(
-            nn.Linear(self.d_model, warp_hidden_dim),
-            nn.SiLU(),
-            nn.Linear(warp_hidden_dim, warp_hidden_dim),
-            nn.SiLU(),
-            nn.Linear(warp_hidden_dim, 16 * 64 * 64 * 3)  # Full warp field
-        )
-
-        self.rigid_warp_head = nn.Sequential(
-            nn.Linear(self.d_model, warp_hidden_dim),
-            nn.SiLU(),
-            nn.Linear(warp_hidden_dim, warp_hidden_dim),
-            nn.SiLU(),
-            nn.Linear(warp_hidden_dim, 16 * 64 * 64 * 3)
-        )
 
         self.uv_warp_head = nn.Sequential(
             nn.Linear(self.d_model, warp_hidden_dim),
             nn.SiLU(),
             nn.Linear(warp_hidden_dim, warp_hidden_dim),
             nn.SiLU(),
-            nn.Linear(warp_hidden_dim, 16 * 64 * 64 * 3)
-        )
-
-        # Source theta warp is smaller: 3 * 4 = 12 values per frame
-        self.source_theta_warp_head = nn.Sequential(
-            nn.Linear(self.d_model, self.d_model // 2),
-            nn.SiLU(),
-            nn.Linear(self.d_model // 2, 3 * 4)
+            nn.Linear(warp_hidden_dim, 16 * 64 * 64 * 3)  # Full UV warp field
         )
 
     def _get_sinusoidal_embedding(self, ts, dim):
@@ -478,34 +458,35 @@ class MotionTransformer(nn.Module):
         theta_emb = self.theta_emb(theta_flat)
         expr_emb = self.expr_emb(expr)
 
-        # Handle additional motion parameters
+        # Handle additional motion parameters (SRT components)
         scale_emb = self.scale_emb(motion_data.get('scale', torch.zeros(B, T, 3, device=device)))
         rotation_emb = self.rotation_emb(motion_data.get('rotation', torch.zeros(B, T, 3, device=device)))
         translation_emb = self.translation_emb(motion_data.get('translation', torch.zeros(B, T, 3, device=device)))
 
-        # Process warping fields
-        xy_warps = motion_data['xy_warps']  # [B, T, 16, 64, 64, 3]
-        rigid_warps = motion_data['rigid_warps']  # [B, T, 16, 64, 64, 3]
+        # Process UV warps only (matching H5 cache)
         uv_warps = motion_data['uv_warps']  # [B, T, 16, 64, 64, 3]
-        source_theta_warp = motion_data['source_theta_warp']  # [B, T, 3, 4]
 
-        # Reshape warps for 3D conv processing: [B*T, C, D, H, W]
+        # Add assertions to verify shapes match H5 cache expectations
+        assert uv_warps.shape[2:] == (16, 64, 64, 3), f"UV warp shape mismatch: expected (B, T, 16, 64, 64, 3), got {uv_warps.shape}"
+        assert motion_data['theta'].shape[2:] == (3, 4), f"Theta shape mismatch: expected (B, T, 3, 4), got {motion_data['theta'].shape}"
+        assert motion_data['scale'].shape[2:] == (3,), f"Scale shape mismatch: expected (B, T, 3), got {motion_data['scale'].shape}"
+        assert motion_data['rotation'].shape[2:] == (3,), f"Rotation shape mismatch: expected (B, T, 3), got {motion_data['rotation'].shape}"
+        assert motion_data['translation'].shape[2:] == (3,), f"Translation shape mismatch: expected (B, T, 3), got {motion_data['translation'].shape}"
+        assert expr.shape[2:] == (128,), f"Expression shape mismatch: expected (B, T, 128), got {expr.shape}"
+
+        # Reshape UV warps for 3D conv processing: [B*T, C, D, H, W]
         BT = B * T
-        xy_warps_reshaped = xy_warps.reshape(BT, 16, 64, 64, 3).permute(0, 4, 1, 2, 3)  # [B*T, 3, 16, 64, 64]
-        rigid_warps_reshaped = rigid_warps.reshape(BT, 16, 64, 64, 3).permute(0, 4, 1, 2, 3)
-        uv_warps_reshaped = uv_warps.reshape(BT, 16, 64, 64, 3).permute(0, 4, 1, 2, 3)
+        uv_warps_reshaped = uv_warps.reshape(BT, 16, 64, 64, 3).permute(0, 4, 1, 2, 3)  # [B*T, 3, 16, 64, 64]
 
-        # Encode warps
-        xy_warp_emb = self.xy_warp_encoder(xy_warps_reshaped).view(B, T, -1)  # [B, T, d_model//8]
-        rigid_warp_emb = self.rigid_warp_encoder(rigid_warps_reshaped).view(B, T, -1)
-        uv_warp_emb = self.uv_warp_encoder(uv_warps_reshaped).view(B, T, -1)
-        source_theta_warp_emb = self.source_theta_warp_emb(source_theta_warp.view(B, T, -1))  # [B, T, d_model//8]
+        # Encode UV warps
+        uv_warp_emb = self.uv_warp_encoder(uv_warps_reshaped).view(B, T, -1)  # [B, T, d_model//4]
 
-        # Combine all embeddings (including warps)
+        # Combine all embeddings
         current_emb = torch.cat([
-            theta_emb, expr_emb, scale_emb, rotation_emb, translation_emb,
-            xy_warp_emb, rigid_warp_emb, uv_warp_emb, source_theta_warp_emb
-        ], dim=-1)
+            theta_emb, expr_emb,  # d_model/2 + d_model/2 = d_model
+            scale_emb, rotation_emb, translation_emb,  # d_model/4 * 3
+            uv_warp_emb  # d_model/4
+        ], dim=-1)  # Total: 2 * d_model
         current_emb = self.motion_proj(current_emb)  # [B, T, d_model]
 
         # Handle previous context if provided
@@ -522,17 +503,14 @@ class MotionTransformer(nn.Module):
             prev_rotation_emb = self.rotation_emb(prev_context.get('rotation', torch.zeros(B, C, 3, device=device)))
             prev_translation_emb = self.translation_emb(prev_context.get('translation', torch.zeros(B, C, 3, device=device)))
 
-            # For prev_context, use zeros for warping fields (they're frame-specific, not transferable)
-            # Create zero embeddings with correct dimensions
-            prev_xy_warp_emb = torch.zeros(B, C, self.d_model // 8, device=device)
-            prev_rigid_warp_emb = torch.zeros(B, C, self.d_model // 8, device=device)
-            prev_uv_warp_emb = torch.zeros(B, C, self.d_model // 8, device=device)
-            prev_source_theta_warp_emb = torch.zeros(B, C, self.d_model // 8, device=device)
+            # For prev_context, use zeros for UV warps (they're frame-specific, not transferable)
+            prev_uv_warp_emb = torch.zeros(B, C, self.d_model // 4, device=device)
 
             prev_emb = torch.cat([
-                prev_theta_emb, prev_expr_emb, prev_scale_emb, prev_rotation_emb, prev_translation_emb,
-                prev_xy_warp_emb, prev_rigid_warp_emb, prev_uv_warp_emb, prev_source_theta_warp_emb
-            ], dim=-1)
+                prev_theta_emb, prev_expr_emb,  # d_model
+                prev_scale_emb, prev_rotation_emb, prev_translation_emb,  # d_model/4 * 3
+                prev_uv_warp_emb  # d_model/4
+            ], dim=-1)  # Total: 2 * d_model
             prev_emb = self.motion_proj(prev_emb)  # [B, C, d_model]
 
             # Concatenate context and current
@@ -601,30 +579,31 @@ class MotionTransformer(nn.Module):
         # Log output statistics
         logger.debug(f" Transformer output variance: {out.var().item():.6f}")
 
-        # Predict outputs (noise predictions for diffusion)
-        theta_pred = self.theta_head(out).view(B, T, 3, 4)
-        expr_pred = self.expr_head(out)
-        scale_pred = self.scale_head(out)
-        rotation_pred = self.rotation_head(out)
-        translation_pred = self.translation_head(out)
+        # Predict outputs matching H5 cache structure
+        theta_pred = self.theta_head(out).view(B, T, 3, 4)  # H5: (1, 4, 4) but model uses 3x4
+        expr_pred = self.expr_head(out)  # [B, T, 128] - matches target_pose_embed in H5
+        scale_pred = self.scale_head(out)  # [B, T, 3] - matches H5
+        rotation_pred = self.rotation_head(out)  # [B, T, 3] - matches H5
+        translation_pred = self.translation_head(out)  # [B, T, 3] - matches H5
 
-        # Predict warping fields
-        xy_warps_pred = self.xy_warp_head(out).view(B, T, 16, 64, 64, 3)
-        rigid_warps_pred = self.rigid_warp_head(out).view(B, T, 16, 64, 64, 3)
-        uv_warps_pred = self.uv_warp_head(out).view(B, T, 16, 64, 64, 3)
-        source_theta_warp_pred = self.source_theta_warp_head(out).view(B, T, 3, 4)
+        # Predict UV warps matching H5 structure
+        uv_warps_pred = self.uv_warp_head(out).view(B, T, 16, 64, 64, 3)  # matches H5: (1, 16, 64, 64, 3)
+
+        # Add assertions to verify output shapes match H5 expectations
+        assert theta_pred.shape == (B, T, 3, 4), f"Theta pred shape mismatch: {theta_pred.shape}"
+        assert expr_pred.shape == (B, T, 128), f"Expression pred shape mismatch: {expr_pred.shape}"
+        assert scale_pred.shape == (B, T, 3), f"Scale pred shape mismatch: {scale_pred.shape}"
+        assert rotation_pred.shape == (B, T, 3), f"Rotation pred shape mismatch: {rotation_pred.shape}"
+        assert translation_pred.shape == (B, T, 3), f"Translation pred shape mismatch: {translation_pred.shape}"
+        assert uv_warps_pred.shape == (B, T, 16, 64, 64, 3), f"UV warp pred shape mismatch: {uv_warps_pred.shape}"
 
         return {
-            'theta': theta_pred,
-            'expression_embed': expr_pred,
-            'scale': scale_pred,
-            'rotation': rotation_pred,
-            'translation': translation_pred,
-            # Warping field predictions
-            'xy_warps': xy_warps_pred,
-            'rigid_warps': rigid_warps_pred,
-            'uv_warps': uv_warps_pred,
-            'source_theta_warp': source_theta_warp_pred
+            'theta': theta_pred,  # Pose matrix
+            'expression_embed': expr_pred,  # Aligned expression embedding (target_pose_embed in H5)
+            'scale': scale_pred,  # SRT scale
+            'rotation': rotation_pred,  # SRT rotation
+            'translation': translation_pred,  # SRT translation
+            'uv_warps': uv_warps_pred  # UV warps only - matches H5 cache
         }
 
 class VASAModel(nn.Module):

@@ -1,0 +1,104 @@
+[15:03:03] INFO     Loading config from overfit_config.yaml  train_overfit.py:30
+wandb: Currently logged in as: snoozie to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: Tracking run with wandb version 0.21.0
+wandb: Run data is saved locally in /media/2TB/VASA-1-hack/wandb/run-20250921_150303-90mtnrka
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run overfit-test
+wandb: ⭐️ View project at https://wandb.ai/snoozie/vasa-overfitting
+wandb: 🚀 View run at https://wandb.ai/snoozie/vasa-overfitting/runs/90mtnrka
+[15:03:07] INFO     Using ChunkedWindowCache for flexible     vasa_dataset.py:43
+                    window sizes                                                
+           INFO     SingleBucketCache available for           vasa_dataset.py:52
+                    single-file caching                                         
+           INFO     Loading volumetric avatar...             train_overfit.py:52
+Hybrid stages [True, True, True]
+bbbbbbbbbbb
+Hybrid stages [True, True, True]
+SN applied to local_encoder_nw
+SN applied to idt_embedder_nw
+SN applied to expression_embedder_nw
+SN applied to xy_generator_nw
+SN applied to uv_generator_nw
+SN applied to warp_embed_head_orig_nw
+SN applied to volume_process_nw
+SN applied to volume_source_nw
+SN applied to decoder_nw
+WS applied to local_encoder_nw
+WS applied to idt_embedder_nw
+WS applied to expression_embedder_nw
+WS applied to xy_generator_nw
+WS applied to uv_generator_nw
+WS applied to warp_embed_head_orig_nw
+WS applied to volume_process_nw
+WS applied to volume_source_nw
+WS applied to decoder_nw
+[15:03:14] INFO     Volumetric avatar loaded successfully    train_overfit.py:65
+           INFO     Initializing VASA model...               train_overfit.py:71
+           INFO     Initializing EfficientConditionEmbedding:   vasa_model.py:88
+                    model_dim=512, max_seq_len=60                               
+[15:03:15] INFO     Using JoyVASA-aligned audio projection:    vasa_model.py:102
+                    single Linear(768 -> 512) without                           
+                    normalization                                               
+[15:03:16] INFO     Creating data loader...                  train_overfit.py:95
+           INFO     Initialized SingleBucketCache at   single_bucket_cache.py:53
+                    cache_single_bucket/all_windows_ca                          
+                    che.h5                                                      
+           INFO     Using SingleBucketCache at               vasa_dataset.py:555
+                    cache_single_bucket/all_windows_cache.h5                    
+           INFO     Initialized ProblematicVideosTracker     video_tracker.py:72
+                    with output dir: bad_videos                                 
+           INFO     Using audio cache directory:             vasa_dataset.py:581
+                    junk/audio_cache                                            
+           INFO     Found 134 total videos                   vasa_dataset.py:585
+           INFO     Randomly sampled 100 videos              vasa_dataset.py:591
+           INFO     Loaded cached status with 100 entries    vasa_dataset.py:603
+           INFO     Kept 100 valid cached entries            vasa_dataset.py:613
+           INFO     Found 92 videos with valid audio         vasa_dataset.py:680
+           INFO     Pre-extracting audio for 92 videos...    vasa_dataset.py:684
+Extracting audio:   0%|          | 0/92 [00:00<?, ?it/s]           INFO     Processed 1/92 videos                   vasa_dataset.py:1814
+           INFO     Processed 11/92 videos                  vasa_dataset.py:1814
+           INFO     Processed 21/92 videos                  vasa_dataset.py:1814
+           INFO     Processed 31/92 videos                  vasa_dataset.py:1814
+           INFO     Processed 41/92 videos                  vasa_dataset.py:1814
+           INFO     Processed 51/92 videos                  vasa_dataset.py:1814
+           INFO     Processed 61/92 videos                  vasa_dataset.py:1814
+           INFO     Processed 71/92 videos                  vasa_dataset.py:1814
+           INFO     Processed 81/92 videos                  vasa_dataset.py:1814
+           INFO     Processed 91/92 videos                  vasa_dataset.py:1814
+Extracting audio: 100%|██████████| 92/92 [00:00<00:00, 10157.04it/s]
+           INFO                                             vasa_dataset.py:1042
+                    === Creating Window Indices ===                             
+           INFO     Window size: 50                         vasa_dataset.py:1043
+           INFO     Stride: 25                              vasa_dataset.py:1044
+           INFO     Context size: 10                        vasa_dataset.py:1045
+           INFO     Total videos to process: 92             vasa_dataset.py:1046
+           INFO     Created 3 windows for video             vasa_dataset.py:1103
+                    junk/videovideoeI2V8Bd5X9s-scene6_scene                     
+                    1.mp4                                                       
+                      First window: 0 -> 50                                     
+                      Last window: 50 -> 100                                    
+           INFO     Created 3 windows for video             vasa_dataset.py:1103
+                    junk/videovideoAl5MFMZvpY4-scene2_scene                     
+                    1.mp4                                                       
+                      First window: 0 -> 50                                     
+                      Last window: 50 -> 100                                    
+           INFO     Created 3 windows for video             vasa_dataset.py:1103
+                    junk/videovideo-hOQAsNg8aw-scene3_scene                     
+                    3.mp4                                                       
+                      First window: 0 -> 50                                     
+                      Last window: 50 -> 100                                    
+           INFO     Created 3 windows for video             vasa_dataset.py:1103
+                    junk/videovideo_dvrizT3014o-scene1_scen                     
+                    e20.mp4                                                     
+                      First window: 0 -> 50                                     
+                      Last window: 50 -> 100                                    
+           INFO     Created 3 windows for video             vasa_dataset.py:1103
+                    junk/videovideokUUhJtbrIwU-scene241_sce                     
+                    ne6.mp4                                                     
+                      First window: 0 -> 50                                     
+                      Last window: 50 -> 100                                    
+           INFO     Created 3 windows for video             vasa_dataset.py:1103
+                    junk/videovideozqKyByqbSs8-scene18_scen                     
+                    e2.mp4                                                      
+                      First window: 0 -> 50                                     
+                      Last window: 50 -> 100                                    

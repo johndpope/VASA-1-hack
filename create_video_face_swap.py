@@ -1108,8 +1108,8 @@ def main(cache_h5_path: Optional[str] = None):
             logger.error(f"Failed to create SRT visualization: {str(e)}")
 
     # Run scale modification experiments
-    # scale_experiments = []
-    # if len(results) > 0 and srt_data:
+    scale_experiments = []
+    if len(results) > 0 and srt_data:
         try:
             # Use first frame for experiments
             first_result = results[0]
