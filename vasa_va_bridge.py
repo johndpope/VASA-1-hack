@@ -111,7 +111,13 @@ class VASAVolumetricAvatarBridge:
             # Apply INVERSE source rotation and XY warp to get canonical volume (matching create_video_face_swap.py)
             # This is CRITICAL for proper identity extraction!
             grid = self.va.identity_grid_3d.repeat_interleave(1, dim=0)
-            inv_source_theta = source_theta.float().inverse().type(source_theta.type())
+
+            # Convert 3x4 to 4x4 matrix for inversion
+            source_theta_4x4 = torch.eye(4, device=source_theta.device, dtype=source_theta.dtype).unsqueeze(0)
+            source_theta_4x4[:, :3, :] = source_theta
+            inv_source_theta_4x4 = source_theta_4x4.float().inverse().type(source_theta.type())
+            inv_source_theta = inv_source_theta_4x4[:, :3, :]  # Back to 3x4
+
             source_rotation_warp = grid.bmm(inv_source_theta[:, :3].transpose(1, 2)).view(-1, d, s, s, 3)
 
             # Apply warps in correct order: rotation first, then XY warp
