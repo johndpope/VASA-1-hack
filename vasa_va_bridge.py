@@ -89,7 +89,11 @@ class VASAVolumetricAvatarBridge:
             # Get expression embedding from source
             data_dict = self.va.expression_embedder_nw(data_dict, True, False)
             source_pose_embed = data_dict['source_pose_embed']
-            
+
+            # Get proper embed_dict from predict_embed (matching create_video_face_swap.py)
+            # This is crucial for identity preservation!
+            source_warp_embed, _, _, embed_dict = self.va.predict_embed(data_dict)
+
             # Encode source to latent volume
             source_latents = self.va.local_encoder_nw(source_masked)
             c = self.va.args.latent_volume_channels
@@ -107,7 +111,8 @@ class VASAVolumetricAvatarBridge:
                 'source_volume': source_volume,
                 'source_mask': face_mask,
                 'idt_embed': idt_embed,
-                'source_masked': source_masked
+                'source_masked': source_masked,
+                'embed_dict': embed_dict  # The proper embed_dict from predict_embed
             }
             
             self._source_cache[cache_key] = result
@@ -148,11 +153,9 @@ class VASAVolumetricAvatarBridge:
         d = self.va.args.latent_volume_depth
         s = self.va.args.latent_volume_size
 
-        # Create identity info's embed_dict once (as in create_video_face_swap.py)
-        identity_embed_dict = {
-            'idt_embed': source_data['idt_embed'],
-            'source_pose_embed': source_data['source_pose_embed']
-        }
+        # Use the proper embed_dict from predict_embed (as in create_video_face_swap.py)
+        # This is CRUCIAL for correct identity preservation!
+        identity_embed_dict = source_data['embed_dict']
 
         generated_frames = []
 
