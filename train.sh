@@ -8,17 +8,14 @@ echo "   VASA-1 Training Runner"
 echo "================================"
 echo ""
 echo "Select configuration file:"
-echo "1) overfit_config.yaml (for overfitting/testing)"
+echo "1) overfit_config.yaml (for overfitting/testing) [DEFAULT]"
 echo "2) vasa_config.yaml (for full training)"
 echo "3) Custom config file"
 echo ""
-read -p "Enter your choice (1-3): " choice
+read -p "Enter your choice (1-3, press Enter for default): " choice
 
+# Default to overfitting when pressing enter or invalid input
 case $choice in
-    1)
-        CONFIG_FILE="overfit_config.yaml"
-        echo "Using overfit configuration..."
-        ;;
     2)
         CONFIG_FILE="vasa_config.yaml"
         echo "Using full training configuration..."
@@ -31,9 +28,9 @@ case $choice in
         fi
         echo "Using custom configuration: $CONFIG_FILE"
         ;;
-    *)
-        echo "Invalid choice! Defaulting to vasa_config.yaml"
-        CONFIG_FILE="vasa_config.yaml"
+    1|""|*)
+        CONFIG_FILE="overfit_config.yaml"
+        echo "Using overfit configuration (default)..."
         ;;
 esac
 
@@ -64,23 +61,25 @@ fi
 
 # Optional: Allow override to start fresh
 echo ""
-read -p "Override and start from scratch? (y/N): " override_choice
+read -p "Override and start from scratch? (y/N, press Enter for No): " override_choice
 if [ "$override_choice" = "y" ] || [ "$override_choice" = "Y" ]; then
     RESUME_PATH=""
     echo "🔄 Override selected - will train from scratch"
+else
+    echo "📂 Keeping existing checkpoint configuration"
 fi
 
 echo ""
 # Ask if user wants to clear old cache
-read -p "Clear old cache directories? (y/n, default: n): " clear_cache
+read -p "Clear old cache directories? (y/N, press Enter for No): " clear_cache
 if [ "$clear_cache" = "y" ] || [ "$clear_cache" = "Y" ]; then
-    echo "Cleaning old cache directories..."
+    echo "🗑️  Cleaning old cache directories..."
     rm -rf cache_single_bucket/
     rm -rf cache/
     rm -rf window_cache*/
-    echo "Old cache cleared."
+    echo "✅ Cache directories cleared."
 else
-    echo "Keeping existing cache."
+    echo "📦 Keeping existing cache directories"
 fi
 
 echo ""
