@@ -608,14 +608,15 @@ class VASATrainer:
                 logger.info(f"Loading high-quality identity image from: {identity_path}")
                 
                 # Load and preprocess the identity image
+                # IMPORTANT: Volumetric avatar expects [0, 1] range, not [-1, 1]
                 img = Image.open(identity_path).convert('RGB')
                 transform = transforms.Compose([
                     transforms.Resize((512, 512)),
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+                    transforms.ToTensor(),  # Converts to [0, 1] range
+                    # DO NOT normalize to [-1, 1] - volumetric avatar expects [0, 1]
                 ])
-                self.identity_image = transform(img).unsqueeze(0)  # [1, C, H, W]
-                logger.info(f"Identity image loaded with shape: {self.identity_image.shape}")
+                self.identity_image = transform(img).unsqueeze(0)  # [1, C, H, W] in [0, 1] range
+                logger.info(f"Identity image loaded with shape: {self.identity_image.shape}, range: [0, 1]")
             else:
                 logger.warning(f"Identity image path not found: {identity_path}")
                 logger.warning("Falling back to using video frames for identity")

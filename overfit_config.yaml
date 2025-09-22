@@ -178,7 +178,7 @@ loss:
   cross_id_normalize: true           # Normalize frames before identity extraction
 
   # Warping field loss weights
-  lambda_warp: 1.0                   # Main warp reconstruction loss weight
+  lambda_warp: 2.0                   # Main warp reconstruction loss weight
   lambda_warp_smooth: 0.01           # Spatial smoothness regularization for warps
   lambda_warp_temporal: 0.1          # Temporal consistency for warps
   lambda_source_theta: 0.5           # Source theta warp loss weight
