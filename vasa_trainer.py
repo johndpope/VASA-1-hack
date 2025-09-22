@@ -1347,20 +1347,28 @@ class VASATrainer:
                                                 single_frame_generated = None
                                     
                                     # Pass single frames to thumbnail generator
+                                    # Include identity frame for 3-panel view
+                                    identity_for_thumbnail = None
+                                    if self.identity_image is not None:
+                                        identity_for_thumbnail = self.identity_image[0]  # Remove batch dimension
+                                    elif source_img is not None and source_img.numel() > 0:
+                                        identity_for_thumbnail = source_img[0] if source_img.dim() > 3 else source_img
+
                                     thumbnail = generate_window_thumbnail(
                                         generated_frames=single_frame_generated,  # Just one frame
                                         target_frames=single_frame_target,        # Just one frame
+                                        identity_frame=identity_for_thumbnail,    # Identity/source frame
                                         motion_outputs=stored_outputs,            # For motion stats overlay (using stored)
-                                        size=(1024, 512)  # Wide format for side-by-side comparison
+                                        size=(768, 256)  # Wide format for 3-panel view (Identity | Target | Predicted)
                                     )
 
                                     # Log to wandb with more descriptive caption
                                     if thumbnail is not None:
                                         if single_frame_generated is not None:
-                                            frame_info = f"Generated vs Target (frame {frame_idx} of T={stored_outputs['theta'].shape[1] if 'theta' in stored_outputs else 'unknown'})"
+                                            frame_info = f"Identity | Target | Predicted (frame {frame_idx} of T={stored_outputs['theta'].shape[1] if 'theta' in stored_outputs else 'unknown'})"
                                         else:
-                                            frame_info = f"Target frame only (frame {frame_idx}, generation failed)"
-                                        
+                                            frame_info = f"Identity | Target | (generation failed)"
+
                                         wandb.log({
                                             "visuals/training_thumbnail": wandb.Image(
                                                 thumbnail,

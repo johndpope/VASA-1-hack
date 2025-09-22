@@ -10,6 +10,177 @@ import matplotlib.patches as patches
 from typing import Dict, Optional, Tuple
 import io
 
+def create_three_panel_thumbnail(
+    identity_frame: Optional[torch.Tensor] = None,
+    target_frame: Optional[torch.Tensor] = None,
+    predicted_frame: Optional[torch.Tensor] = None,
+    motion_params: Optional[Dict[str, torch.Tensor]] = None,
+    size: Tuple[int, int] = (768, 256),  # Wider for 3 panels
+    add_overlay: bool = True
+) -> np.ndarray:
+    """
+    Create a three-panel thumbnail showing Identity | Target | Predicted.
+
+    Args:
+        identity_frame: Identity/source frame [C, H, W] or [H, W, C]
+        target_frame: Target/ground truth frame
+        predicted_frame: Generated/predicted frame
+        motion_params: Dict with motion parameters for overlay
+        size: Output thumbnail size (width, height)
+        add_overlay: Whether to add debug visualization overlay
+
+    Returns:
+        numpy array of thumbnail image [H, W, C] in uint8 format
+    """
+
+    # Helper function to process frame
+    def process_frame(frame):
+        if frame is None:
+            return np.zeros((256, 256, 3), dtype=np.float32)
+
+        if isinstance(frame, torch.Tensor):
+            if frame.dim() == 4:  # [B, C, H, W]
+                frame = frame[0]
+            if frame.dim() == 3 and frame.shape[0] == 3:  # [C, H, W]
+                frame = frame.permute(1, 2, 0)
+            frame = frame.detach().cpu().numpy()
+
+        # Normalize to [0, 1] if needed
+        if frame.max() > 1.0:
+            frame = frame / 255.0
+        if frame.min() < 0:
+            frame = (frame + 1) / 2  # Convert from [-1, 1] to [0, 1]
+
+        return frame
+
+    # Process all frames
+    identity_np = process_frame(identity_frame)
+    target_np = process_frame(target_frame)
+    predicted_np = process_frame(predicted_frame)
+
+    # Create figure with 3 subplots
+    fig_scale = size[0] / 384  # Base scale on target width
+    fig, axes = plt.subplots(1, 3, figsize=(12 * fig_scale, 4 * fig_scale))
+
+    # Show Identity
+    axes[0].imshow(identity_np)
+    axes[0].set_title("Identity (Source)", fontsize=10 * fig_scale, weight='bold', color='blue')
+    axes[0].axis('off')
+
+    # Show Target
+    axes[1].imshow(target_np)
+    frame_idx = motion_params.get('_frame_idx', -1) if motion_params else -1
+    title = f"Target (t={frame_idx})" if frame_idx >= 0 else "Target Frame"
+    axes[1].set_title(title, fontsize=10 * fig_scale, weight='bold', color='green')
+    axes[1].axis('off')
+
+    # Show Predicted
+    axes[2].imshow(predicted_np)
+    axes[2].set_title("Predicted", fontsize=10 * fig_scale, weight='bold', color='red')
+    axes[2].axis('off')
+
+    # Add motion overlay on predicted frame
+    if add_overlay and motion_params is not None:
+        ax = axes[2]
+
+        # Calculate motion indicators
+        indicators = []
+
+        # Add frame index if available
+        if '_frame_idx' in motion_params:
+            indicators.append(f"Frame: {motion_params['_frame_idx']}")
+
+        # Add motion stats
+        if 'theta' in motion_params:
+            theta = motion_params['theta']
+            if isinstance(theta, torch.Tensor):
+                if theta.dim() > 1 and theta.shape[0] > 1:
+                    theta_diff = (theta[1:] - theta[:-1]).abs().mean().item()
+                    indicators.append(f"Motion: {theta_diff:.4f}")
+
+        # Add expression stats
+        if 'expression_embed' in motion_params:
+            expr = motion_params['expression_embed']
+            if isinstance(expr, torch.Tensor):
+                expr_std = expr.std().item()
+                indicators.append(f"Expr σ: {expr_std:.3f}")
+
+        # Add text overlay
+        font_scale = max(1.0, size[0] / 512)
+        text_y = 0.98
+        for indicator in indicators[:3]:  # Limit to 3 indicators to avoid clutter
+            ax.text(0.02, text_y, indicator, transform=ax.transAxes,
+                   fontsize=7 * font_scale, color='white',
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.5),
+                   verticalalignment='top')
+            text_y -= 0.06
+
+        # Add theta warp matrix visualization
+        if 'theta' in motion_params:
+            theta = motion_params['theta']
+            if isinstance(theta, torch.Tensor):
+                # Get the theta matrix for current frame
+                if theta.dim() == 4:  # [B, T, 3, 4]
+                    frame_idx = motion_params.get('_frame_idx', 0)
+                    if frame_idx < theta.shape[1]:
+                        theta_matrix = theta[0, frame_idx].detach().cpu().numpy()  # [3, 4]
+                    else:
+                        theta_matrix = theta[0, -1].detach().cpu().numpy()
+                elif theta.dim() == 3:  # [B, 3, 4]
+                    theta_matrix = theta[0].detach().cpu().numpy()
+                elif theta.dim() == 2:  # [3, 4]
+                    theta_matrix = theta.detach().cpu().numpy()
+                else:
+                    theta_matrix = None
+
+                if theta_matrix is not None and theta_matrix.shape == (3, 4):
+                    # Create inset axes for theta matrix in bottom-right corner
+                    inset_ax = ax.inset_axes([0.55, 0.02, 0.43, 0.25])
+
+                    # Visualize theta matrix as heatmap
+                    im = inset_ax.imshow(theta_matrix, cmap='RdBu_r', aspect='auto', vmin=-1, vmax=1)
+
+                    # Add values as text annotations
+                    for i in range(3):
+                        for j in range(4):
+                            val = theta_matrix[i, j]
+                            color = 'white' if abs(val) > 0.5 else 'black'
+                            inset_ax.text(j, i, f'{val:.2f}', ha='center', va='center',
+                                        fontsize=5 * font_scale, color=color, weight='bold')
+
+                    # Style the inset
+                    inset_ax.set_xticks([0, 1, 2, 3])
+                    inset_ax.set_yticks([0, 1, 2])
+                    inset_ax.set_xticklabels(['R1', 'R2', 'R3', 'T'], fontsize=5 * font_scale)
+                    inset_ax.set_yticklabels(['X', 'Y', 'Z'], fontsize=5 * font_scale)
+                    inset_ax.set_title('Theta Warp (3x4)', fontsize=6 * font_scale, color='white', pad=2)
+
+                    # Add subtle border
+                    for spine in inset_ax.spines.values():
+                        spine.set_edgecolor('white')
+                        spine.set_linewidth(0.5)
+
+    # Convert figure to numpy array
+    fig.tight_layout(pad=0.5)
+    fig.canvas.draw()
+
+    # Get numpy array from figure
+    buf = io.BytesIO()
+    target_dpi = max(100, int(size[0] / 6))  # Scale DPI based on target size
+    fig.savefig(buf, format='png', dpi=target_dpi, bbox_inches='tight', pad_inches=0.1)
+    buf.seek(0)
+    img = Image.open(buf)
+
+    # Resize to exact target size with high quality resampling
+    img = img.resize(size, Image.Resampling.LANCZOS)
+    thumbnail = np.array(img)
+
+    plt.close(fig)
+    buf.close()
+
+    return thumbnail
+
+
 def create_debug_thumbnail(
     generated_frame: torch.Tensor,
     source_frame: Optional[torch.Tensor] = None,
@@ -506,6 +677,7 @@ def generate_training_thumbnail(
 def generate_window_thumbnail(
     generated_frames: Optional[torch.Tensor] = None,
     target_frames: Optional[torch.Tensor] = None,
+    identity_frame: Optional[torch.Tensor] = None,
     motion_outputs: Optional[Dict] = None,
     window: Optional[Dict] = None,
     motion_data: Optional[Dict] = None,
@@ -513,19 +685,20 @@ def generate_window_thumbnail(
     size: Tuple[int, int] = (512, 512)
 ) -> np.ndarray:
     """
-    Generate thumbnail from generated and target frames.
-    
+    Generate thumbnail from generated and target frames with identity reference.
+
     Args:
         generated_frames: Generated frames from volumetric avatar [B, T, C, H, W]
         target_frames: Target/ground truth frames [B, T, C, H, W]
+        identity_frame: Identity/source frame used for generation [C, H, W] or [B, C, H, W]
         motion_outputs: Motion outputs for overlay stats
         window: (Optional, for backward compatibility) Window data dictionary
         motion_data: (Optional, for backward compatibility) Motion data from prepare_motion_data
         outputs: (Optional, for backward compatibility) Model outputs
         size: Target thumbnail size
-        
+
     Returns:
-        Thumbnail as numpy array
+        Thumbnail as numpy array showing Identity | Target | Predicted
     """
     import random
     
@@ -616,16 +789,25 @@ def generate_window_thumbnail(
     
     # Add frame index to motion params for display
     random_motion_params['_frame_idx'] = motion_frame_idx
-    
-    # Generate appropriate thumbnail
-    if selected_generated is not None:
-        # Use debug thumbnail with overlay showing generated vs target
-        return create_debug_thumbnail(
-            selected_generated,
-            source_frame=selected_target,  # Show target frame for comparison
+
+    # Process identity frame if provided
+    selected_identity = None
+    if identity_frame is not None and isinstance(identity_frame, torch.Tensor):
+        if identity_frame.dim() == 4:  # [B, C, H, W]
+            selected_identity = identity_frame[0]
+        elif identity_frame.dim() == 3:  # [C, H, W]
+            selected_identity = identity_frame
+        else:
+            selected_identity = identity_frame
+
+    # Create 3-panel thumbnail: Identity | Target | Predicted
+    if selected_generated is not None or selected_target is not None or selected_identity is not None:
+        return create_three_panel_thumbnail(
+            identity_frame=selected_identity,
+            target_frame=selected_target,
+            predicted_frame=selected_generated,
             motion_params=random_motion_params,
-            size=size,
-            add_overlay=True
+            size=size
         )
     else:
         # Fallback to simple stats thumbnail
