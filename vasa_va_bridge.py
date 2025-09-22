@@ -94,21 +94,40 @@ class VASAVolumetricAvatarBridge:
             # This is crucial for identity preservation!
             source_warp_embed, _, _, embed_dict = self.va.predict_embed(data_dict)
 
+            # Generate XY warps for source (CRITICAL - was missing!)
+            source_xy_warp, _ = self.va.xy_generator_nw(source_warp_embed)
+            logger.debug(f"Source XY warp shape: {source_xy_warp.shape}")
+
             # Encode source to latent volume
             source_latents = self.va.local_encoder_nw(source_masked)
             c = self.va.args.latent_volume_channels
             d = self.va.args.latent_volume_depth
             s = self.va.args.latent_volume_size
             source_volume = source_latents.view(-1, c, d, s, s)
-            
+
             if self.va.args.source_volume_num_blocks > 0:
                 source_volume = self.va.volume_source_nw(source_volume)
+
+            # Apply INVERSE source rotation and XY warp to get canonical volume (matching create_video_face_swap.py)
+            # This is CRITICAL for proper identity extraction!
+            grid = self.va.identity_grid_3d.repeat_interleave(1, dim=0)
+            inv_source_theta = source_theta.float().inverse().type(source_theta.type())
+            source_rotation_warp = grid.bmm(inv_source_theta[:, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+
+            # Apply warps in correct order: rotation first, then XY warp
+            rotated_source = self.va.grid_sample(source_volume, source_rotation_warp)
+            canonical_volume = self.va.grid_sample(rotated_source, source_xy_warp)
+            logger.debug(f"Canonical volume shape: {canonical_volume.shape}")
+
+            # Process canonical volume WITH embed_dict (was missing the embed_dict!)
+            processed_canonical = self.va.volume_process_nw(canonical_volume, embed_dict)
+            logger.debug(f"Processed canonical volume shape: {processed_canonical.shape}")
             
             # Cache the results
             result = {
                 'source_pose_embed': source_pose_embed,
-                'source_theta': data_dict.get('source_theta'),
-                'source_volume': source_volume,
+                'source_theta': source_theta,
+                'canonical_volume': processed_canonical,  # Store the PROCESSED canonical volume
                 'source_mask': face_mask,
                 'idt_embed': idt_embed,
                 'source_masked': source_masked,
@@ -145,9 +164,9 @@ class VASAVolumetricAvatarBridge:
         # Get source embeddings (cached after first call)
         source_data = self.get_source_embeddings(source_img)
 
-        # Process canonical volume once for all frames
-        source_volume = source_data['source_volume']
-        canonical_volume = self.va.volume_process_nw(source_volume)
+        # Use the pre-computed canonical volume from source_data
+        # This is already processed with all the correct warps and embed_dict
+        canonical_volume = source_data['canonical_volume']
 
         c = self.va.args.latent_volume_channels
         d = self.va.args.latent_volume_depth
