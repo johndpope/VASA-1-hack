@@ -354,7 +354,7 @@ class VASAInference:
                 logger.info(f"Number of audio windows: {len(audio_windows)}")
 
                 # Extract source parameters
-                source_params = self.extract_emo_parameters(source_tensor)
+                source_params = self.extract_source_params(source_tensor)
                 
                 # Generate frames with exact length match
                 frames = self.generate_frames_from_audio(
@@ -604,6 +604,9 @@ class VASAInference:
                     curr_rotation = motion_sequence['rotation'][:, t].squeeze(0)  # Remove batch dim to get [3]
                     curr_translation = motion_sequence['translation'][:, t].squeeze(0)  # Remove batch dim to get [3]
 
+                    # CRITICAL: Get UV warps from VASA model predictions
+                    curr_uv_warps = motion_sequence['uv_warps'][:, t]  # [B, 16, 64, 64, 3]
+
                     # Calculate and log differences if previous values exist
                     if prev_motion['expression'] is not None:
                         expr_diff = (curr_expression - prev_motion['expression']).abs().mean().item()
@@ -627,15 +630,16 @@ class VASAInference:
                     else:
                         logger.info(f"First frame of window {window_idx}")
 
-                    # Generate the frame
+                    # Generate the frame with UV warps from VASA model
                     frame = self._generate_frame(
-                        source_params, 
-                        curr_expression, 
+                        source_params,
+                        curr_expression,
                         curr_theta,
                         curr_rotation,
                         curr_scale,
                         curr_translation,
-                        device
+                        device,
+                        uv_warps=curr_uv_warps  # Pass VASA-predicted UV warps
                     )
                     
                     # Debug: Check frame differences
@@ -800,45 +804,6 @@ class VASAInference:
             raise ValueError(f"Unexpected shape for theta: {theta.shape}")
 
 
-    def extract_emo_parameters(self, source_img):
-        """Extract EMO model parameters from source image."""
-        with torch.no_grad():
-            # Get face mask and process image
-            source_mask = self.volumetric_avatar.face_idt.forward(source_img)[0]
-            source_mask = (source_mask > 0.6).float()
-            source_masked = source_img * source_mask
-            
-            # Get embeddings
-            idt_embed = self.volumetric_avatar.idt_embedder_nw(source_masked)
-            theta, scale, rotation, translation = self.volumetric_avatar.head_pose_regressor.forward(
-                source_img, return_srt=True)
-            expression_embed = self.volumetric_avatar.expression_embedder_nw.net_face(source_img)[0]
-            
-            # Get canonical volume
-            source_latents = self.volumetric_avatar.local_encoder_nw(source_masked)
-            c = self.volumetric_avatar.args.latent_volume_channels
-            d = self.volumetric_avatar.args.latent_volume_depth
-            s = self.volumetric_avatar.args.latent_volume_size
-            
-            source_volume = source_latents.view(1, c, d, s, s)
-            if hasattr(self.volumetric_avatar, 'volume_source_nw'):
-                source_volume = self.volumetric_avatar.volume_source_nw(source_volume)
-            
-            canonical_volume = self.volumetric_avatar.volume_process_nw(source_volume)
-            
-            theta = self.convert_theta_format(theta)
-            return {
-                'idt_embed': idt_embed,
-                'theta': theta,
-                'scale': scale,
-                'rotation': rotation,
-                'translation': translation,
-                'expression_embed': expression_embed,
-                'source_mask': source_mask,
-                'source_volume': source_volume,
-                'canonical_volume': canonical_volume
-            }
-        
 
     def process_audio(self, waveform, sr=16000, fps=25.0):
         """Process audio into windows of features."""
@@ -927,82 +892,77 @@ class VASAInference:
             logger.error(f"Error in process_audio: {str(e)}")
             logger.error(traceback.format_exc())
             raise
-    def _generate_frame(self, source_params, curr_expression, curr_theta, curr_rotation, curr_scale, curr_translation, device):
-        """Generate a single frame using EMO decoder with given expression and motion parameters."""
+    def _generate_frame(self, source_params, curr_expression, curr_theta, curr_rotation, curr_scale, curr_translation, device, uv_warps):
+        """Generate a single frame using EMO decoder matching H5 cache warping pipeline.
+
+        This follows the exact warping pipeline from create_video_face_swap.py:
+        1. Use VASA model predictions for UV warps (REQUIRED)
+        2. Apply UV warp to canonical volume
+        3. Apply rotation warp
+        4. Generate frame through decoder
+
+        Args:
+            uv_warps: REQUIRED - UV warps from VASA model predictions [B, 16, 64, 64, 3]
+        """
         try:
             # Get dimensions from EMO model
             c = self.volumetric_avatar.args.latent_volume_channels
             d = self.volumetric_avatar.args.latent_volume_depth
             s = self.volumetric_avatar.args.latent_volume_size
 
-            # Create rotation matrix from current motion parameters
-            # Convert rotation angles to rotation matrix
-            pitch, yaw, roll = curr_rotation
-            Rx = torch.tensor([[1, 0, 0], [0, torch.cos(pitch), -torch.sin(pitch)], [0, torch.sin(pitch), torch.cos(pitch)]], device=device)
-            Ry = torch.tensor([[torch.cos(yaw), 0, torch.sin(yaw)], [0, 1, 0], [-torch.sin(yaw), 0, torch.cos(yaw)]], device=device)
-            Rz = torch.tensor([[torch.cos(roll), -torch.sin(roll), 0], [torch.sin(roll), torch.cos(roll), 0], [0, 0, 1]], device=device)
-            current_rotation_matrix = Rz @ Ry @ Rx
-            
-            # Create transformation matrix from current motion parameters
-            current_theta = torch.eye(4, device=device)
-            current_theta[:3, :3] = current_rotation_matrix
-            current_theta[:3, 3] = curr_translation
-            
-            # Apply scaling
-            scale_matrix = torch.eye(4, device=device)
-            scale_matrix[0, 0] = curr_scale[0]
-            scale_matrix[1, 1] = curr_scale[1] 
-            scale_matrix[2, 2] = curr_scale[2]
-            current_theta = current_theta @ scale_matrix
+            # UV warps are REQUIRED from VASA model
+            if uv_warps is None:
+                raise ValueError("UV warps are required from VASA model predictions")
 
-            # Create identity grid first
+            target_uv_warp = uv_warps
+            logger.debug(f"Using VASA-predicted UV warps with shape: {target_uv_warp.shape}")
+
+            # Use theta from VASA predictions - it should always be a proper matrix
+            if isinstance(curr_theta, torch.Tensor) and len(curr_theta.shape) >= 2:
+                target_theta = curr_theta
+            else:
+                raise ValueError(f"Expected theta matrix from VASA but got: {type(curr_theta)}")
+
+            # Ensure proper shape for theta
+            if target_theta.ndim == 2:
+                target_theta = target_theta.unsqueeze(0)  # Add batch dimension
+            if target_theta.shape[-2:] == (4, 4):
+                target_theta = target_theta[:, :3, :]  # Remove last row to get 3x4
+
+            # Generate rotation warp from theta (matching create_video_face_swap.py)
             grid = self.volumetric_avatar.identity_grid_3d.repeat_interleave(1, dim=0)
-            # Add batch dimension to current_theta and extract rotation part
-            current_theta_batch = current_theta.unsqueeze(0)[:, :3]  # Shape: [1, 3, 4]
-            target_rotation_warp = grid.bmm(current_theta_batch.transpose(1, 2)).view(-1, d, s, s, 3)
+            target_rotation_warp = grid.bmm(target_theta.transpose(1, 2)).view(-1, d, s, s, 3)
 
-            # Create source tensor with correct shape for RGB image (B, C, H, W)
-            dummy_rgb = torch.zeros(1, 3, 512, 512).to(device)  # Create dummy RGB image 
-
-            # Create complete data dict with all required fields
-            data_dict = {
-                'source_img': dummy_rgb,
-                'target_img': dummy_rgb,
-                'source_mask': source_params['source_mask'],
-                'target_mask': source_params['source_mask'],
-                'source_theta': source_params['theta'],
-                'target_theta': current_theta.unsqueeze(0),  # Use current motion parameters
-                'idt_embed': source_params['idt_embed'],
-                'source_pose_embed': source_params['expression_embed'],
-                'target_pose_embed': curr_expression,
-                'target_delta_uv': torch.zeros(1, 3, d, s, s).to(device)
-            }
-
-            # Process through EMO pipeline
-            source_warp_embed_dict, target_warp_embed_dict, _, embed_dict = \
-                self.volumetric_avatar.predict_embed(data_dict)
-
-            # Generate UV warp
-            target_uv_warp, _ = self.volumetric_avatar.uv_generator_nw(target_warp_embed_dict)
-            
-            # Handle resizing using avg_pool3d
-            if self.volumetric_avatar.resize_warp:
-                stride = self.volumetric_avatar.warp_resize_stride
-                target_uv_warp = F.avg_pool3d(target_uv_warp.permute(0, 4, 1, 2, 3), 
-                                            kernel_size=stride,
-                                            stride=stride).permute(0, 2, 3, 4, 1)
-
-            # Create target volume with grid sampling
+            # Apply warps exactly like create_video_face_swap.py - nested grid_sample calls
+            # First apply UV warp, then rotation warp
             aligned_target_volume = self.volumetric_avatar.grid_sample(
                 self.volumetric_avatar.grid_sample(source_params['canonical_volume'], target_uv_warp),
                 target_rotation_warp
             )
 
+            # Prepare for decoder
             target_latent_feats = aligned_target_volume.view(1, c * d, s, s)
+
+            # Create data dict for decoder
+            decoder_dict = {
+                'source_img': torch.zeros(1, 3, 512, 512).to(device),
+                'target_img': torch.zeros(1, 3, 512, 512).to(device),
+                'source_mask': source_params['source_mask'],
+                'target_mask': source_params['source_mask'],
+                'source_theta': source_params['theta'],
+                'target_theta': target_theta,
+                'idt_embed': source_params['idt_embed'],
+                'source_pose_embed': source_params.get('expression_embed', source_params.get('source_expression')),
+                'target_pose_embed': curr_expression,
+            }
+
+            # Get embed_dict if not created yet
+            if 'embed_dict' not in locals():
+                _, _, _, embed_dict = self.volumetric_avatar.predict_embed(decoder_dict)
 
             # Generate frame through decoder
             frame, _, _, _ = self.volumetric_avatar.decoder_nw(
-                data_dict,
+                decoder_dict,
                 embed_dict,
                 target_latent_feats,
                 False,
@@ -1015,10 +975,8 @@ class VASAInference:
             logger.error(f"Error generating frame: {str(e)}")
             logger.error(traceback.format_exc())
             logger.error(f"Available source_params keys: {list(source_params.keys())}")
-            if 'data_dict' in locals():
-                logger.error(f"Data dict keys: {list(data_dict.keys())}")
             raise
-    
+
     def extract_video_assets(self,video_path: str, output_dir: Path) -> Tuple[str, str]:
         """
         Extract first frame and audio from video file.
@@ -1082,42 +1040,77 @@ class VASAInference:
             source_mask = self.volumetric_avatar.face_idt.forward(source_img)[0]
             source_mask = (source_mask > 0.6).float()
             source_masked = source_img * source_mask
-            
+
             # Get identity embedding
             idt_embed = self.volumetric_avatar.idt_embedder_nw(source_masked)
-            
+
             # Get pose parameters
             theta, scale, rotation, translation = self.volumetric_avatar.head_pose_regressor.forward(
                 source_img, return_srt=True)
-            
-            # Get expression embedding
-            expression_embed = self.volumetric_avatar.expression_embedder_nw.net_face(source_img)[0]
 
-            # Extract source volume (following InferenceWrapper's process)
+            # Prepare data dict for expression embedder (matching create_video_face_swap.py)
+            data_dict = {
+                'source_img': source_img,
+                'source_mask': source_mask,
+                'source_theta': theta,
+                'target_img': source_img,  # Same as source for canonical
+                'target_mask': source_mask,
+                'target_theta': theta,
+                'idt_embed': idt_embed
+            }
+
+            # Get expression embedding with face alignment (matching create_video_face_swap.py)
+            data_dict = self.volumetric_avatar.expression_embedder_nw(data_dict, True, False, False)
+            expression_embed = data_dict['source_pose_embed']  # Aligned expression embedding
+
+            # Get warp embeddings for source
+            source_warp_embed, _, _, embed_dict = self.volumetric_avatar.predict_embed(data_dict)
+
+            # Generate XY warps for source
+            source_xy_warp, _ = self.volumetric_avatar.xy_generator_nw(source_warp_embed)
+
+            # Extract source volume
             source_latents = self.volumetric_avatar.local_encoder_nw(source_masked)
-            
+
             # Get volume dimensions
             c = self.volumetric_avatar.args.latent_volume_channels
             d = self.volumetric_avatar.args.latent_volume_depth
             s = self.volumetric_avatar.args.latent_volume_size
-            
+
             # Process source volume
             source_volume = source_latents.view(1, c, d, s, s)
-            source_volume = self.volumetric_avatar.volume_source_nw(source_volume)
-                
-            # Get canonical volume through the process_nw
-            canonical_volume = self.volumetric_avatar.volume_process_nw(source_volume)
-            
+
+            # Process source volume if needed
+            if hasattr(self.volumetric_avatar.args, 'source_volume_num_blocks') and self.volumetric_avatar.args.source_volume_num_blocks > 0:
+                source_volume = self.volumetric_avatar.volume_source_nw(source_volume)
+
+            # CRITICAL: Apply INVERSE warps to get canonical volume (matching create_video_face_swap.py)
+            grid = self.volumetric_avatar.identity_grid_3d.repeat_interleave(1, dim=0)
+            inv_source_theta = theta.float().inverse().type(theta.type())
+            source_rotation_warp = grid.bmm(inv_source_theta[:, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+
+            # Apply warps in correct order: rotation first, then XY warp
+            rotated_source = self.volumetric_avatar.grid_sample(source_volume, source_rotation_warp)
+            canonical_volume = self.volumetric_avatar.grid_sample(rotated_source, source_xy_warp)
+
+            # Process canonical volume
+            processed_canonical = self.volumetric_avatar.volume_process_nw(canonical_volume, embed_dict)
+
+            # Convert theta format for compatibility
+            theta = self.convert_theta_format(theta)
+
             return {
                 'idt_embed': idt_embed,
+                'embed_dict': embed_dict,
                 'theta': theta,
                 'scale': scale,
                 'rotation': rotation,
                 'translation': translation,
                 'expression_embed': expression_embed,
+                'source_pose_embed': expression_embed,  # Keep both names for compatibility
                 'source_mask': source_mask,
                 'source_volume': source_volume,
-                'canonical_volume': canonical_volume
+                'canonical_volume': processed_canonical  # This is now the properly unwarped canonical volume
             }
 
 

@@ -478,6 +478,34 @@ class VASALossModule:
                 if isinstance(v, torch.Tensor):
                     logger.debug(f"  {k}: {v.item():.6f}")
 
+            # 1.5 Motion Diversity Loss - Encourage variance to prevent collapse
+            logger.debug("\nComputing motion diversity loss:")
+            if 'expression_embed' in outputs:
+                expr = outputs['expression_embed']  # [B, T, D]
+                B, T, D = expr.shape
+
+                # Compute entropy of expression embeddings to encourage diversity
+                # Higher entropy = more diverse expressions
+                expr_flat = expr.view(-1, D)  # Flatten to [B*T, D]
+
+                # Normalize to probabilities using softmax
+                expr_norm = F.softmax(expr_flat.abs(), dim=-1)  # Use abs to handle negative values
+
+                # Compute entropy: -sum(p * log(p))
+                entropy = -(expr_norm * torch.log(expr_norm + 1e-8)).sum(-1).mean()
+
+                # We want HIGH entropy (diverse), so we minimize negative entropy
+                diversity_loss = -entropy * 0.1  # Small weight to encourage diversity
+                losses['motion_diversity'] = diversity_loss
+
+                logger.debug(f"  Expression entropy: {entropy.item():.6f}")
+                logger.debug(f"  Motion diversity loss: {diversity_loss.item():.6f}")
+
+                # Also compute standard deviation as a metric
+                expr_std = expr.std(dim=-1).mean()
+                losses['expression_std'] = expr_std  # Just for monitoring
+                logger.debug(f"  Expression std: {expr_std.item():.6f}")
+
             # 2. Warp Regularization Loss
             logger.debug("\nComputing warp regularization losses:")
             # Check for any warp fields (UV warps is our main one now)
@@ -1418,25 +1446,39 @@ class VASALossModule:
                     comparison_target['translation']
                 )
 
-            # 5. Expression loss 
+            # 5. Expression loss with variance preservation
             if 'expression_embed' in pred:
-                # Apply dimension weights
+                # Main MSE loss
                 losses['expression_loss'] = F.mse_loss(
                     pred['expression_embed'],
                     comparison_target['expression_embed']
                 )
-                
+
+                # Add variance preservation loss to prevent collapse
+                pred_std = pred['expression_embed'].std(dim=-1).mean()  # Std across features, mean across batch/time
+                target_std = comparison_target['expression_embed'].std(dim=-1).mean()
+                variance_loss = F.mse_loss(pred_std, target_std)
+                losses['expression_variance_loss'] = variance_loss * 0.1  # Weight it lower than main loss
+
+                # Add temporal variation loss to encourage dynamics
+                if pred['expression_embed'].shape[1] > 1:  # If we have temporal dimension
+                    pred_temporal_diff = (pred['expression_embed'][:, 1:] - pred['expression_embed'][:, :-1]).abs().mean()
+                    target_temporal_diff = (comparison_target['expression_embed'][:, 1:] - comparison_target['expression_embed'][:, :-1]).abs().mean()
+                    temporal_loss = F.mse_loss(pred_temporal_diff, target_temporal_diff)
+                    losses['expression_temporal_loss'] = temporal_loss * 0.05  # Small weight
+
                 # Log statistics to detect collapse
                 if step is not None and step % 100 == 0:
-                    pred_std = pred['expression_embed'].std().item()
-                    target_std = comparison_target['expression_embed'].std().item()
+                    pred_std_scalar = pred['expression_embed'].std().item()
+                    target_std_scalar = comparison_target['expression_embed'].std().item()
                     pred_mean = pred['expression_embed'].mean().item()
                     target_mean = comparison_target['expression_embed'].mean().item()
-                    logger.info(f"Expression stats - Pred: mean={pred_mean:.3f}, std={pred_std:.3f} | Target: mean={target_mean:.3f}, std={target_std:.3f}")
-                    
+                    logger.info(f"Expression stats - Pred: mean={pred_mean:.3f}, std={pred_std_scalar:.3f} | Target: mean={target_mean:.3f}, std={target_std_scalar:.3f}")
+                    logger.info(f"  Variance loss: {variance_loss.item():.6f}, Temporal loss: {temporal_loss.item() if 'temporal_loss' in locals() else 0:.6f}")
+
                     # Warn if prediction variance is collapsing
-                    if pred_std < target_std * 0.1:
-                        logger.warning(f"⚠️ Prediction variance collapse detected! pred_std={pred_std:.3f} << target_std={target_std:.3f}")
+                    if pred_std_scalar < target_std_scalar * 0.1:
+                        logger.warning(f"⚠️ Prediction variance collapse detected! pred_std={pred_std_scalar:.3f} << target_std={target_std_scalar:.3f}")
          
                 should_visualize = step is not None and step > 0 and step % self.vis_freq == 0
                 if should_visualize:

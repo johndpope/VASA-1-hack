@@ -2750,7 +2750,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                             'video_path': str(video_path),
                             'start_frame': window['start_frame'],
                             'fps': window['fps'],
-                            'has_context': window['has_context']
+                            'has_context': window['has_context'],
+                            'window_idx': window['window_idx']
                         }
                     }
                     

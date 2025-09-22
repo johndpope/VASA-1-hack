@@ -463,23 +463,30 @@ class MotionTransformer(nn.Module):
         rotation_emb = self.rotation_emb(motion_data.get('rotation', torch.zeros(B, T, 3, device=device)))
         translation_emb = self.translation_emb(motion_data.get('translation', torch.zeros(B, T, 3, device=device)))
 
-        # Process UV warps only (matching H5 cache)
-        uv_warps = motion_data['uv_warps']  # [B, T, 16, 64, 64, 3]
-
-        # Add assertions to verify shapes match H5 cache expectations
-        assert uv_warps.shape[2:] == (16, 64, 64, 3), f"UV warp shape mismatch: expected (B, T, 16, 64, 64, 3), got {uv_warps.shape}"
-        assert motion_data['theta'].shape[2:] == (3, 4), f"Theta shape mismatch: expected (B, T, 3, 4), got {motion_data['theta'].shape}"
-        assert motion_data['scale'].shape[2:] == (3,), f"Scale shape mismatch: expected (B, T, 3), got {motion_data['scale'].shape}"
-        assert motion_data['rotation'].shape[2:] == (3,), f"Rotation shape mismatch: expected (B, T, 3), got {motion_data['rotation'].shape}"
-        assert motion_data['translation'].shape[2:] == (3,), f"Translation shape mismatch: expected (B, T, 3), got {motion_data['translation'].shape}"
-        assert expr.shape[2:] == (128,), f"Expression shape mismatch: expected (B, T, 128), got {expr.shape}"
-
-        # Reshape UV warps for 3D conv processing: [B*T, C, D, H, W]
+        # Process UV warps - during training they're provided, during generation they're predicted
         BT = B * T
-        uv_warps_reshaped = uv_warps.reshape(BT, 16, 64, 64, 3).permute(0, 4, 1, 2, 3)  # [B*T, 3, 16, 64, 64]
 
-        # Encode UV warps
-        uv_warp_emb = self.uv_warp_encoder(uv_warps_reshaped).view(B, T, -1)  # [B, T, d_model//4]
+        if 'uv_warps' in motion_data:
+            # Training mode - UV warps are provided
+            uv_warps = motion_data['uv_warps']  # [B, T, 16, 64, 64, 3]
+
+            # Add assertions to verify shapes match H5 cache expectations
+            assert uv_warps.shape[2:] == (16, 64, 64, 3), f"UV warp shape mismatch: expected (B, T, 16, 64, 64, 3), got {uv_warps.shape}"
+            assert motion_data['theta'].shape[2:] == (3, 4), f"Theta shape mismatch: expected (B, T, 3, 4), got {motion_data['theta'].shape}"
+            assert motion_data['scale'].shape[2:] == (3,), f"Scale shape mismatch: expected (B, T, 3), got {motion_data['scale'].shape}"
+            assert motion_data['rotation'].shape[2:] == (3,), f"Rotation shape mismatch: expected (B, T, 3), got {motion_data['rotation'].shape}"
+            assert motion_data['translation'].shape[2:] == (3,), f"Translation shape mismatch: expected (B, T, 3), got {motion_data['translation'].shape}"
+            assert expr.shape[2:] == (128,), f"Expression shape mismatch: expected (B, T, 128), got {expr.shape}"
+
+            # Reshape UV warps for 3D conv processing: [B*T, C, D, H, W]
+            uv_warps_reshaped = uv_warps.reshape(BT, 16, 64, 64, 3).permute(0, 4, 1, 2, 3)  # [B*T, 3, 16, 64, 64]
+
+            # Encode UV warps
+            uv_warp_emb = self.uv_warp_encoder(uv_warps_reshaped).view(B, T, -1)  # [B, T, d_model//4]
+        else:
+            # Generation mode - UV warps will be predicted, create placeholder embedding
+            # This will be learned to predict the appropriate UV warps
+            uv_warp_emb = torch.zeros(B, T, self.d_model // 4, device=device)
 
         # Combine all embeddings
         current_emb = torch.cat([
@@ -585,6 +592,14 @@ class MotionTransformer(nn.Module):
         scale_pred = self.scale_head(out)  # [B, T, 3] - matches H5
         rotation_pred = self.rotation_head(out)  # [B, T, 3] - matches H5
         translation_pred = self.translation_head(out)  # [B, T, 3] - matches H5
+
+        # Debug expression predictions
+        if torch.rand(1).item() < 0.01:  # Log 1% of the time
+            logger.info(f"[DEBUG] Expression prediction stats:")
+            logger.info(f"  Mean: {expr_pred.mean().item():.6f}, Std: {expr_pred.std().item():.6f}")
+            logger.info(f"  Min: {expr_pred.min().item():.6f}, Max: {expr_pred.max().item():.6f}")
+            logger.info(f"  Has NaN: {torch.isnan(expr_pred).any().item()}")
+            logger.info(f"  Has Inf: {torch.isinf(expr_pred).any().item()}")
 
         # Predict UV warps matching H5 structure
         uv_warps_pred = self.uv_warp_head(out).view(B, T, 16, 64, 64, 3)  # matches H5: (1, 16, 64, 64, 3)
@@ -801,7 +816,7 @@ class VASAModel(nn.Module):
         initial_dynamics: torch.Tensor,  # [B, expression_dim]
         conditions: Dict[str, torch.Tensor],
         num_steps: int = 50,
-        eta: float = 0.5,
+        eta: float = 0.8,  # Increased from 0.5 to add more stochasticity
         cfg_scales: Optional[Dict[str, float]] = None
     ) -> Dict[str, torch.Tensor]:
         """Generate motion sequence using DDIM sampling."""
@@ -809,7 +824,7 @@ class VASAModel(nn.Module):
             # BOOST AUDIO CFG: Use much stronger audio CFG to overcome training issues
             if cfg_scales is None:
                 cfg_scales = {
-                    'audio': 10.0,  # Further increased from 7.5 to strongly amplify audio
+                    'audio': 20.0,  # Significantly increased to 20.0 to amplify audio guidance
                     'gaze': 0.5,    # Reduced to minimize control dominance
                     'head_distance': 0.3,  # Reduced to minimize control dominance
                     'emotion': 0.2   # Reduced to minimize control dominance
@@ -830,7 +845,8 @@ class VASAModel(nn.Module):
                 'scale': torch.zeros(B, total_T, 3, device=device),
                 'rotation': torch.zeros(B, total_T, 3, device=device),
                 'translation': torch.zeros(B, total_T, 3, device=device),
-                'expression_embed': torch.zeros(B, total_T, self.config.model.expression_dim, device=device)
+                'expression_embed': torch.zeros(B, total_T, self.config.model.expression_dim, device=device),
+                'uv_warps': torch.zeros(B, total_T, 16, 64, 64, 3, device=device)  # Add UV warps to output
             }
 
             # Set initial frame values if provided
@@ -874,13 +890,14 @@ class VASAModel(nn.Module):
                     audio_window_mean = window_conditions['audio_features'].mean().item()
                     logger.info(f"[GENERATE DEBUG] Window {start_idx//stride}: Audio features - Mean: {audio_window_mean:.6f}, Variance: {audio_window_var:.6f}")
 
-                # Initialize motion with noise for ALL parameters
+                # Initialize motion with noise for ALL parameters including UV warps
                 window_motion = {
                     'theta': torch.randn(B, current_T, 3, 4, device=device),
                     'scale': torch.randn(B, current_T, 3, device=device),
                     'rotation': torch.randn(B, current_T, 3, device=device),
                     'translation': torch.randn(B, current_T, 3, device=device),
-                    'expression_embed': torch.randn(B, current_T, self.config.model.expression_dim, device=device)
+                    'expression_embed': torch.randn(B, current_T, self.config.model.expression_dim, device=device),
+                    'uv_warps': torch.randn(B, current_T, 16, 64, 64, 3, device=device)  # UV warps must be predicted
                 }
 
                 # DDIM sampling loop
