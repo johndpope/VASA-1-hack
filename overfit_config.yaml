@@ -166,9 +166,13 @@ loss:
   lambda_consist: 0.5         # Pairwise transfer loss for disentanglement (re-enabled for consistency)
   lambda_cross_id: 0.1        # Cross-identity similarity loss (re-enabled for identity preservation)
   lambda_velocity: 1e-5       # REDUCED from 0.5 to 1e-5 to allow more variance
-  lambda_smoothness: 0        # DISABLED (set to 0) to prevent over-smoothing
+  lambda_smoothness: 0.01     # Acceleration smoothness regularization (increased for temporal consistency)
   lambda_audio_lip: 5.0       # Audio-lip correlation loss - INCREASED for stronger audio-motion coupling
-  
+
+  # L1 regularization for UV warps (prevents expression collapse)
+  lambda_warp_l1: 0.1         # L1 loss on UV warps for sparsity/robustness
+  lambda_warp_tv: 0.05        # Total Variation (TV-L1) for spatial smoothness
+
   # Disentanglement loss configuration
   disentangle_num_pairs: 3           # Number of frame pairs to sample for l_consist
   disentangle_sampling: 'random'     # Sampling strategy: 'random', 'uniform', or 'extremes'

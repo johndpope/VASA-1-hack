@@ -211,7 +211,11 @@ class VASALossModule:
 
         # Audio-lip correlation loss weight
         self.lambda_audio_lip = getattr(config.loss, 'lambda_audio_lip', 2.0)
-        
+
+        # L1 regularization for UV warps to prevent collapse
+        self.lambda_warp_l1 = getattr(config.loss, 'lambda_warp_l1', 0.1)
+        self.lambda_warp_tv = getattr(config.loss, 'lambda_warp_tv', 0.05)  # Total variation regularization
+
         # Initialize identity feature extractor for cross-id loss
         try:
             from facenet_pytorch import InceptionResnetV1
@@ -652,10 +656,11 @@ class VASALossModule:
             compute_disentangle = False
             disentangle_freq = getattr(self.config.loss, 'disentangle_compute_freq', 1)
             
-            if step is not None and step % disentangle_freq == 0:
-                compute_disentangle = True
-            elif step is None:  # Always compute during validation
-                compute_disentangle = True
+            # JP - 🤷 unplug this because is it making the motion predictions blur to sameness - https://wandb.ai/snoozie/vasa-overfitting/runs/9d0di1su?nw=nwusersnoozie
+            # if step is not None and step % disentangle_freq == 0:
+            #     compute_disentangle = True
+            # elif step is None:  # Always compute during validation
+            #     compute_disentangle = True
                 
             if compute_disentangle and has_pose and has_dynamics:
                 # Get source identity from target frames (first frame)
@@ -1329,12 +1334,26 @@ class VASALossModule:
             losses['rigid_warp_smooth'] = rigid_warp_smooth * lambda_warp_smooth * 2  # Extra smoothness for rigid
 
         if 'uv_warps' in pred and 'uv_warps' in target:
-            # L2 loss for uv warps
+            # L2 loss for uv warps (reconstruction)
             losses['uv_warp_loss'] = F.mse_loss(pred['uv_warps'], target['uv_warps']) * lambda_warp
+
+            # L1 loss for uv warps (sparsity and robustness to prevent collapse)
+            losses['uv_warp_l1'] = F.l1_loss(pred['uv_warps'], target['uv_warps']) * self.lambda_warp_l1
+
+            # L1 on velocity (frame-to-frame differences) for temporal consistency
+            if pred['uv_warps'].shape[1] > 1:
+                pred_vel = pred['uv_warps'][:, 1:] - pred['uv_warps'][:, :-1]
+                target_vel = target['uv_warps'][:, 1:] - target['uv_warps'][:, :-1]
+                losses['uv_warp_velocity_l1'] = F.l1_loss(pred_vel, target_vel) * (self.lambda_warp_l1 * 0.5)
 
             # Smoothness regularization
             uv_warp_smooth = self._compute_warp_smoothness(pred['uv_warps'])
             losses['uv_warp_smooth'] = uv_warp_smooth * lambda_warp_smooth
+
+            # Total variation (TV-L1) regularization for spatial smoothness
+            if self.lambda_warp_tv > 0:
+                tv_loss = self._compute_tv_loss(pred['uv_warps'])
+                losses['uv_warp_tv'] = tv_loss * self.lambda_warp_tv
 
         if 'source_theta_warp' in pred and 'source_theta_warp' in target:
             # L2 loss for source theta warp
@@ -1372,6 +1391,36 @@ class VASALossModule:
             smoothness = torch.tensor(0.0, device=warp.device)
 
         return smoothness
+
+    def _compute_tv_loss(self, warp: torch.Tensor) -> torch.Tensor:
+        """Compute Total Variation (TV-L1) loss for spatial smoothness.
+
+        TV loss encourages piecewise smooth warps by penalizing the L1 norm of gradients.
+        This is particularly useful for preventing over-deformation and maintaining
+        sparse, localized deformations.
+        """
+        if len(warp.shape) == 6:  # [B, T, D, H, W, C]
+            # Compute spatial gradients (subsample for efficiency)
+            warp_sub = warp[:, :, ::2, ::2, ::2, :]  # Reduce spatial dimensions by half
+
+            # TV along height
+            diff_h = torch.abs(warp_sub[:, :, :, 1:, :, :] - warp_sub[:, :, :, :-1, :, :])
+            # TV along width
+            diff_w = torch.abs(warp_sub[:, :, :, :, 1:, :] - warp_sub[:, :, :, :, :-1, :])
+            # TV along depth
+            diff_d = torch.abs(warp_sub[:, :, 1:, :, :, :] - warp_sub[:, :, :-1, :, :, :])
+
+            # L1 norm of gradients (sum then mean)
+            tv_loss = diff_h.mean() + diff_w.mean() + diff_d.mean()
+        elif len(warp.shape) == 5:  # [B, T, H, W, C]
+            # 2D case
+            diff_h = torch.abs(warp[:, :, 1:, :, :] - warp[:, :, :-1, :, :])
+            diff_w = torch.abs(warp[:, :, :, 1:, :] - warp[:, :, :, :-1, :])
+            tv_loss = diff_h.mean() + diff_w.mean()
+        else:
+            tv_loss = torch.tensor(0.0, device=warp.device)
+
+        return tv_loss
 
     def _compute_reconstruction_losses(
         self,
