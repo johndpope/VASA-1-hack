@@ -69,7 +69,12 @@ train:
     transformer_late: 1e-4  # Further reduced for stability
     output_projections: 1e-4   # Further reduced for stability
 
-  batch_size: 4               # Batch size for training
+
+  # To increase GPU utilization:
+  # - Increase batch_size (e.g., from 28 to 56)
+  # - This processes more windows per step but maintains temporal continuity
+  batch_size: 16               # Batch size for training
+
   windows_per_batch: 4          # Reduced from 14 to 4 for better sequence diversity
   gradient_accumulation_steps: 4  # Increase effective batch size to break plateau
   num_epochs: 1000            # Reduced for quick testing
@@ -133,23 +138,23 @@ loss:
   
   # Progressive losses (unlock based on thresholds)
   # Stage 2: Blinking (unlocks at epoch 5 if reconstruction < 0.1)
-  lambda_blink: 0.0           # Will ramp to 2.0
+  lambda_blink: 0.1           # Will ramp to 2.0
   
   # Stage 3: Eye Gaze (unlocks at epoch 15 if blink < 0.15)  
-  lambda_gaze_direction: 0.0  # Will ramp to 1.5
+  lambda_gaze_direction: 0.2  # Will ramp to 1.5
   
   # Stage 4: Head Pose (unlocks at epoch 25 if gaze < 0.2)
   lambda_head_distance: 0.0   # Will ramp to 1.0
   
   # Stage 5: Emotion (unlocks at epoch 35 if head pose < 0.25)
-  lambda_emotion: 0.0         # Will ramp to 0.8
+  lambda_emotion: 0.1         # Will ramp to 0.8
   
   # Stage 6: Lip Sync (unlocks at epoch 45 if emotion < 0.3)
-  lambda_lips: 0.0            # Will ramp to 2.0
+  lambda_lips: 0.1            # Will ramp to 2.0
   lambda_sync: 0.0            # SyncNet for evaluation only, audio conditioning handles training
   
   # Other losses
-  lambda_nonlip: 0.0          # Weight for non-lip facial landmarks
+  lambda_nonlip: 0.1          # Weight for non-lip facial landmarks
   lambda_speed: 0.1
   lambda_control: 0.0         # Overall control weight
   lambda_lip: 0.0
@@ -172,6 +177,7 @@ loss:
   # L1 regularization for UV warps (prevents expression collapse)
   lambda_warp_l1: 0.1         # L1 loss on UV warps for sparsity/robustness
   lambda_warp_tv: 0.05        # Total Variation (TV-L1) for spatial smoothness
+  lambda_expression_l1: 0.7   # L1 weight for expression embeddings (0.7 L1, 0.3 L2)
 
   # Disentanglement loss configuration
   disentangle_num_pairs: 3           # Number of frame pairs to sample for l_consist

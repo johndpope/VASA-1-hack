@@ -176,7 +176,7 @@ class VASALossModule:
            # Extract loss weights from config
         self.lambda_pose = config.loss.lambda_pose
         self.lambda_dynamics = config.loss.lambda_dynamics
-        self.lambda_gaze = config.loss.lambda_gaze_direction
+        self.lambda_gaze_direction = config.loss.lambda_gaze_direction
         self.lambda_distance = config.loss.lambda_head_distance
         self.lambda_emotion = config.loss.lambda_emotion
         self.lambda_speed = config.loss.lambda_speed
@@ -207,6 +207,7 @@ class VASALossModule:
         self.lambda_consist = getattr(config.loss, 'lambda_consist', 1.0)
         self.lambda_cross_id = getattr(config.loss, 'lambda_cross_id', 0.1)
         self.lambda_velocity = getattr(config.loss, 'lambda_velocity', 1e-4)
+        self.lambda_expression_l1 = getattr(config.loss, 'lambda_expression_l1', 0.5)  # Balance between L1 and L2
         self.lambda_smoothness = getattr(config.loss, 'lambda_smoothness', 1e-4)
 
         # Audio-lip correlation loss weight
@@ -1497,11 +1498,17 @@ class VASALossModule:
 
             # 5. Expression loss with variance preservation
             if 'expression_embed' in pred:
-                # Main MSE loss
-                losses['expression_loss'] = F.mse_loss(
+                # L1 loss for expression embeddings (prevents collapse, encourages sparsity)
+                losses['expression_loss'] = F.l1_loss(
                     pred['expression_embed'],
                     comparison_target['expression_embed']
-                )
+                ) * self.lambda_expression_l1
+
+                # Also add MSE for smoothness
+                losses['expression_mse'] = F.mse_loss(
+                    pred['expression_embed'],
+                    comparison_target['expression_embed']
+                ) * (1.0 - self.lambda_expression_l1)  # Balance between L1 and L2
 
                 # Add variance preservation loss to prevent collapse
                 pred_std = pred['expression_embed'].std(dim=-1).mean()  # Std across features, mean across batch/time
@@ -2195,7 +2202,7 @@ class VASALossModule:
                         logger.warning("NaN/Inf in final gaze loss, using zero")
                         gaze_loss = torch.tensor(0.0, device=device)
                     
-                    losses['control_gaze'] = gaze_loss * self.lambda_gaze
+                    losses['control_gaze'] = gaze_loss * self.lambda_gaze_direction
                     total_loss = total_loss + losses['control_gaze']
                     logger.debug(f"  Gaze loss: {losses['control_gaze'].item():.6f}")
                 else:

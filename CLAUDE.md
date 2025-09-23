@@ -76,7 +76,6 @@ python vasa_trainer.py --config vasa_config.yaml
 ### Important Configuration
 
 #### overfit_config.yaml:
-- batch_size: 28 (config value, actual is 4 windows due to sampler)
 - learning_rate: 5e-3
 - gradient_accumulation_steps: 2
 - num_epochs: 1000
