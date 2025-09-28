@@ -940,8 +940,8 @@ class VASATrainer:
             # Training phase
             train_stats = self.train_epoch()
             
-            # Validation phase
-            val_stats = self.validate() if self.val_loader else None
+            # Validation phase - DISABLED for faster training
+            val_stats = None  # self.validate() if self.val_loader else None
             
             # Check if this is the best model based on training or validation loss
             if val_stats and isinstance(val_stats, dict):
@@ -3137,7 +3137,7 @@ if __name__ == "__main__":
             logger.info("Single-bucket cache not found. Consider running preprocess_single_bucket.py first.")
         else:
             cache_info = full_dataset.cache.get_cache_info()
-            logger.info(f"Using single-bucket cache: {cache_info['num_windows']} windows, {cache_info['file_size_mb']:.1f} MB")
+            logger.info(f"Using single-bucket cache: {cache_info} windows, {cache_info['file_size_mb']:.1f} MB")
 
     # Print dataset stats
     logger.info(f"Dataset created:")
