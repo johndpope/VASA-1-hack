@@ -300,6 +300,39 @@ class EfficientConditionEmbedding(nn.Module):
             logger.error(traceback.format_exc())
             raise
 
+
+class AudioCrossDecoderLayer(nn.TransformerDecoderLayer):
+    def __init__(self, d_model, nhead, **kwargs):
+        super().__init__(d_model, nhead, **kwargs)
+        self.audio_cross_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True)
+        self.audio_norm = nn.LayerNorm(d_model)
+        self.dropout2 = nn.Dropout(kwargs.get('dropout', 0.1))  # Add dropout layer
+    
+    def forward(self, tgt, memory, tgt_mask=None, memory_mask=None, 
+                tgt_key_padding_mask=None, memory_key_padding_mask=None,
+                audio_memory=None):
+        # Call parent's forward with all expected arguments
+        tgt = super().forward(
+            tgt, memory, 
+            tgt_mask=tgt_mask,
+            memory_mask=memory_mask,
+            tgt_key_padding_mask=tgt_key_padding_mask,
+            memory_key_padding_mask=memory_key_padding_mask
+        )
+        
+        # Additional audio cross-attention
+        if audio_memory is not None:
+            tgt2, _ = self.audio_cross_attn(
+                tgt, audio_memory, audio_memory,
+                key_padding_mask=None  # You could add audio padding mask if needed
+            )
+            tgt = tgt + self.dropout2(tgt2)
+            tgt = self.audio_norm(tgt)
+        
+        return tgt
+    
+
+
 class MotionTransformer(nn.Module):
     """Decoder-based Transformer for motion generation matching H5 cache structure.
 
@@ -380,16 +413,25 @@ class MotionTransformer(nn.Module):
         )
 
         # Transformer decoder
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=self.d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            activation=F.gelu,
-            batch_first=True,
-            norm_first=True  # Pre-LN for better stability
-        )
-        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+
+        # Create custom decoder that handles audio
+        self.decoder_layers = nn.ModuleList([
+            AudioCrossDecoderLayer(
+                d_model=self.d_model,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                activation=F.gelu,
+                batch_first=True,
+                norm_first=True
+            )
+            for _ in range(num_layers)
+        ])
+        
+        # Final layer norm
+        self.decoder_norm = nn.LayerNorm(self.d_model)
+
+
 
         # Output heads for all motion parameters
         self.theta_head = nn.Sequential(
@@ -577,11 +619,30 @@ class MotionTransformer(nn.Module):
         # Apply transformer decoder
         # tgt: query (motion embeddings)
         # memory: key/value (condition embeddings)
-        out = self.decoder(tgt=tgt, memory=cond_emb)  # [B, C+T or T, d_model]
+        # out = self.decoder(tgt=tgt, memory=cond_emb)  # [B, C+T or T, d_model]
+        out = tgt
+        for layer in self.decoder_layers:
+                    # Extract audio memory from conditions if available
+                    audio_memory = None
+                    audio_memory = self.cond_emb(
+                        {'audio_features': conditions['audio_features']}
+                    )
+                    if C > 0:
+                        audio_memory = audio_memory[:, C:]  # Remove context frames
+                    
+                    out = layer(
+                        out, 
+                        cond_emb,
+                        audio_memory=audio_memory
+                    )
+                
+                    out = self.decoder_norm(out)
 
         # Extract only current T frames if we had context
         if C > 0:
             out = out[:, C:]  # [B, T, d_model]
+
+       
 
         # Log output statistics
         logger.debug(f" Transformer output variance: {out.var().item():.6f}")

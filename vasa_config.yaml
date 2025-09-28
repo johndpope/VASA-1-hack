@@ -73,7 +73,7 @@ train:
   # To increase GPU utilization:
   # - Increase batch_size (e.g., from 28 to 56)
   # - This processes more windows per step but maintains temporal continuity
-  batch_size: 4               # Batch size for training
+  batch_size: 16               # Batch size for training
 
   windows_per_batch: 4          # Reduced from 14 to 4 for better sequence diversity
   gradient_accumulation_steps: 4  # Increase effective batch size to break plateau

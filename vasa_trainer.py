@@ -29,6 +29,126 @@ import importlib
 import sys
 if 'nemo' not in sys.path:
     sys.path.insert(0, 'nemo')
+
+def debug_warps(
+    predicted_motion: dict,
+    target_motion: dict = None,
+    num_frames: int = 50,
+    log_to_wandb: bool = False,
+    step: int = None
+):
+    """
+    Debug warps over a sequence of frames by analyzing norms of rigid (theta rotation/translation)
+    and non-rigid (UV displacements) warps. Compares to target if provided to check variation matching.
+
+    Args:
+        predicted_motion: Dict with keys like 'theta' [B, T, 3, 4], 'uv_warps' [B, T, D, S, S, 3]
+        target_motion: Optional target/ground truth motion dict for comparison
+        num_frames: Number of frames to analyze (up to T)
+        log_to_wandb: If True, log metrics to wandb
+        step: Training step for wandb logging
+    """
+    # Extract dimensions
+    T = min(num_frames, next(iter(predicted_motion.values())).shape[1] if predicted_motion else 0)
+    if T == 0:
+        logger.warning("No frames in predicted_motion")
+        return
+
+    metrics = {
+        'rot_norm': [],
+        'trans_norm': [],
+        'uv_disp_norm': []
+    }
+    if target_motion:
+        target_metrics = {k: [] for k in metrics}
+        diff_metrics = {k: [] for k in metrics}
+
+    for t in range(T):
+        frame_metrics = {}
+
+        # Rigid: theta [B, T, 3, 4] -> rotation [3,3], translation [3]
+        if 'theta' in predicted_motion:
+            theta = predicted_motion['theta'][0, t]  # [3,4]
+            R = theta[:3, :3]  # Rotation matrix
+            trans = theta[:3, 3]   # Translation vector
+
+            # Rotation deviation norm: ||R - I||_F
+            I = torch.eye(3, device=theta.device)
+            rot_norm = torch.norm(R - I, p='fro').item()
+            trans_norm = torch.norm(trans, p=2).item()
+
+            frame_metrics['rot_norm'] = rot_norm
+            frame_metrics['trans_norm'] = trans_norm
+        else:
+            frame_metrics['rot_norm'] = 0.0
+            frame_metrics['trans_norm'] = 0.0
+
+        # Non-rigid: uv_warps [B, T, D, S, S, 3] displacements
+        if 'uv_warps' in predicted_motion:
+            uv = predicted_motion['uv_warps'][0, t]  # [D, S, S, 3]
+            # Mean L2 norm per voxel
+            uv_disp_norm = torch.mean(torch.norm(uv.view(-1, 3), p=2, dim=1)).item()
+            frame_metrics['uv_disp_norm'] = uv_disp_norm
+        else:
+            frame_metrics['uv_disp_norm'] = 0.0
+
+        # Append to lists
+        for k, v in frame_metrics.items():
+            metrics[k].append(v)
+
+        # Handle target if provided
+        if target_motion:
+            target_frame = {}
+            if 'theta' in target_motion:
+                theta_tgt = target_motion['theta'][0, t]
+                R_tgt = theta_tgt[:3, :3]
+                trans_tgt = theta_tgt[:3, 3]
+                rot_norm_tgt = torch.norm(R_tgt - I, p='fro').item()
+                trans_norm_tgt = torch.norm(trans_tgt, p=2).item()
+                target_frame['rot_norm'] = rot_norm_tgt
+                target_frame['trans_norm'] = trans_norm_tgt
+
+                # Differences
+                diff_metrics['rot_norm'].append(abs(rot_norm - rot_norm_tgt))
+                diff_metrics['trans_norm'].append(abs(trans_norm - trans_norm_tgt))
+
+            if 'uv_warps' in target_motion:
+                uv_tgt = target_motion['uv_warps'][0, t]
+                uv_disp_norm_tgt = torch.mean(torch.norm(uv_tgt.view(-1, 3), p=2, dim=1)).item()
+                target_frame['uv_disp_norm'] = uv_disp_norm_tgt
+                diff_metrics['uv_disp_norm'].append(abs(uv_disp_norm - uv_disp_norm_tgt))
+
+            for k, v in target_frame.items():
+                target_metrics[k].append(v)
+
+    # Compute averages
+    avg_metrics = {k: np.mean(v) if v else 0.0 for k, v in metrics.items()}
+    if target_motion:
+        avg_target = {k: np.mean(v) if v else 0.0 for k, v in target_metrics.items()}
+        avg_diff = {k: np.mean(v) if v else 0.0 for k, v in diff_metrics.items()}
+
+    if log_to_wandb and wandb.run is not None:
+        log_dict = {f"debug/warp_{k}_avg": v for k, v in avg_metrics.items()}
+        if target_motion:
+            log_dict.update({f"debug/warp_target_{k}_avg": v for k, v in avg_target.items()})
+            log_dict.update({f"debug/warp_diff_{k}_avg": v for k, v in avg_diff.items()})
+
+        # Also log variance to detect collapse
+        log_dict[f"debug/warp_uv_variance"] = np.var(metrics['uv_disp_norm']) if metrics['uv_disp_norm'] else 0.0
+
+        if step is not None:
+            wandb.log(log_dict, step=step)
+        else:
+            wandb.log(log_dict)
+    else:
+        logger.info("\n=== Warp Debug Averages ===")
+        for k, v in avg_metrics.items():
+            logger.info(f"  Predicted {k}: {v:.4f}")
+        if target_motion:
+            for k, v in avg_target.items():
+                logger.info(f"  Target {k}: {v:.4f}")
+            for k, v in avg_diff.items():
+                logger.info(f"  Diff {k}: {v:.4f}")
 from logger import logger,TorchDebugger
 import traceback
 from vasa_dataset import WorkerState, VASAIntegratedDataset
@@ -1161,6 +1281,19 @@ class VASATrainer:
                             if metrics:
                                 for k, v in metrics.items():
                                     batch_metrics[f"metric_{k}"].append(v)
+
+                            # Debug warps periodically to detect collapse
+                            if self.global_step % 100 == 0 and window_idx == 0:  # Log every 100 steps for first window
+                                try:
+                                    debug_warps(
+                                        predicted_motion=outputs,
+                                        target_motion=targets_with_lip,
+                                        num_frames=min(10, outputs['theta'].shape[1]),  # Analyze first 10 frames
+                                        log_to_wandb=True,
+                                        step=self.global_step
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"Failed to debug warps: {e}")
 
                             # Check for NaN/Inf in loss before backward pass
                             if not torch.isfinite(losses['total']):
