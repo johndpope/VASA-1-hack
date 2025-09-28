@@ -8,7 +8,7 @@ model:
   n_heads: 8
   n_layers: 8                 # Reduced to 1 for ultra-fast training (change to 2 or more for better quality)
   dim_feedforward: 2048
-  dropout: 0.1
+  dropout: 0.05
   expression_dim: 128  # Expression embedding dimension from volumetric avatar
   # Add these:
   condition_embedding_dim: 512  # Dimension for condition embeddings
@@ -21,7 +21,7 @@ diffusion:
   num_steps: 1000                # Increased to 1000 for better sampling (was previously 50 in generation)
   beta_start: 1e-4
   beta_end: 0.02
-  cfg_start_epoch: 0  # When to start using CFG
+  cfg_start_epoch: 100  # When to start using CFG
   schedule_mode: 'linear'  # Changed from 'cosine' to fix DDIMScheduler error
   schedule_s: 0.008  # Schedule parameters (for cosine schedule)
 
@@ -32,7 +32,6 @@ motion:
   stride: 25                   # Reduced from 25 to 10 for better overlap
   context_size: 10
   # Add these:
-
 
   warmup_steps: 500          # Extended warmup for VASA-1 alignment
   scheduler:
@@ -57,7 +56,7 @@ train:
   # when to add conditional signals
   control_start_epoch: 0      # Start control immediately for overfitting
 
-  lr: 1e-4 # Further reduced for stability  
+  lr: 1e-3 # Further reduced for stability  
   motion_proj_lr: 0.1 # Reduced motion projection LR multiplier
   expression_lr: 0.1   # Reduced expression LR multiplier 
 
@@ -118,7 +117,7 @@ train:
 # Loss weights - TDD PROGRESSIVE SYSTEM
 loss:
   # Use TDD progressive loss system
-  use_tdd_progressive: true
+  use_tdd_progressive: false
   
   expression_weighting:
     enabled: true
@@ -141,13 +140,13 @@ loss:
   lambda_blink: 0.1           # Will ramp to 2.0
   
   # Stage 3: Eye Gaze (unlocks at epoch 15 if blink < 0.15)  
-  lambda_gaze_direction: 0.2  # Will ramp to 1.5
+  lambda_gaze_direction: 0.1  # Will ramp to 1.5
   
   # Stage 4: Head Pose (unlocks at epoch 25 if gaze < 0.2)
-  lambda_head_distance: 0.0   # Will ramp to 1.0
+  lambda_head_distance: 0.1   # Will ramp to 1.0
   
   # Stage 5: Emotion (unlocks at epoch 35 if head pose < 0.25)
-  lambda_emotion: 0.1         # Will ramp to 0.8
+  lambda_emotion: 0.0        # Will ramp to 0.8 - https://github.com/johndpope/VASA-1-hack/issues/57
   
   # Stage 6: Lip Sync (unlocks at epoch 45 if emotion < 0.3)
   lambda_lips: 0.1            # Will ramp to 2.0
@@ -163,13 +162,13 @@ loss:
   lambda_temporal: 0.01       # GREATLY REDUCED from 0.8 to allow more variance
   use_consistency: true       # Enable VASA consistency loss
   use_identity: true          # Enable face identity preservation
-  lambda_consistency: 0.5     # Weight for consistency loss
+  lambda_consistency: 0.0     # Weight for consistency loss
   lambda_identity: 0.3        # Weight for identity loss loss
 
   # NEW VASA-1 inspired losses
   use_score_matching: true    # Use VASA-1 style clean signal prediction (not noise)
   lambda_consist: 0.5         # Pairwise transfer loss for disentanglement (re-enabled for consistency)
-  lambda_cross_id: 0.1        # Cross-identity similarity loss (re-enabled for identity preservation)
+  lambda_cross_id: 0.0        # Cross-identity similarity loss (re-enabled for identity preservation)
   lambda_velocity: 1e-5       # REDUCED from 0.5 to 1e-5 to allow more variance
   lambda_smoothness: 0.01     # Acceleration smoothness regularization (increased for temporal consistency)
   lambda_audio_lip: 5.0       # Audio-lip correlation loss - INCREASED for stronger audio-motion coupling
@@ -233,7 +232,7 @@ dataset:
   preextract_audio: true
   cache_audio: true
   hop_length: 10
-  max_videos: 150             # Use all available videos in junk folder (134 total)
+  max_videos: 1000             # Use all available videos in junk folder (134 total)
   min_sequence_length: 50    # Minimum sequence length (match window_size)
   max_sequence_samples: 1000 # Maximum samples per epoch
   use_identity_image: true    # Use high-quality identity image instead of video frame

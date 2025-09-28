@@ -279,7 +279,6 @@ class LinearWarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
         self.num_warmup_steps = num_warmup_steps
         self.num_training_steps = num_training_steps
         self.min_lr = min_lr
-        self.expression_warmup_steps = 100  # Shorter warmup for expressions
 
         super().__init__(optimizer, last_epoch)
 
@@ -3176,22 +3175,17 @@ if __name__ == "__main__":
         train_dataset,
         batch_sampler=train_sampler,
         collate_fn=collate_fn,
-        num_workers=2,  # Use 2 workers for parallel data loading
-        pin_memory=True,  # Enable pin memory for faster GPU transfer
-        persistent_workers=True,  # Keep workers alive between epochs
-        prefetch_factor=2  # Prefetch 2 batches per worker
+        num_workers=0,  # Set to 0 to avoid CUDA multiprocessing issues (like in train_overfit.py)
+        pin_memory=False  # Disabled because tensors are already on GPU
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=1,  # Use batch size 1 for testing
         shuffle=False,
-        num_workers=1,  # Single worker for validation
-        pin_memory=True,  # Pin memory for faster GPU transfer
-        collate_fn=collate_vasa_batch,
-        multiprocessing_context='spawn',
-        persistent_workers=True,
-        worker_init_fn=worker_init_fn  # Ensure worker consistency
+        num_workers=0,  # Set to 0 to avoid CUDA multiprocessing issues
+        pin_memory=False,  # Disabled because tensors are already on GPU
+        collate_fn=collate_vasa_batch
     )
 
 

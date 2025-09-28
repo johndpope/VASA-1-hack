@@ -51,11 +51,16 @@ class VASAVolumetricAvatarBridge:
             Dictionary with source embeddings
         """
         # Create a cache key based on tensor id
-        cache_key = id(source_img)
+        cache_key = hash(source_img.cpu().numpy().tobytes())
         
         if cache_key in self._source_cache:
             logger.debug("Using cached source embeddings")
-            return self._source_cache[cache_key]
+            # Move cached tensors to current device if needed
+            cached = self._source_cache[cache_key]
+            if cached['canonical_volume'].device != source_img.device:
+                cached = {k: v.to(source_img.device) if torch.is_tensor(v) else v 
+                        for k, v in cached.items()}
+            return cached
         
         logger.info("Computing source embeddings from identity image")
         
