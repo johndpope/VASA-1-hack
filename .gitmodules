@@ -8,3 +8,6 @@
 [submodule "face-detection"]
 	path = face-detection
 	url = https://github.com/ibug-group/face_detection.git
+[submodule "Synchformer"]
+	path = Synchformer
+	url = https://github.com/v-iashin/Synchformer.git

@@ -128,6 +128,7 @@ loss:
   adaptive_update_freq: 100   # Update weights every N steps  # Minimum weight for least important dimensions
     
   use_sync_loss: false  # SyncNet is for evaluation only (per VASA-1 paper)
+  use_synchformer: false  # Use Synchformer instead of SyncNet for sync loss
   use_verification: false     # Disabled for faster training
   lambda_verification: 0
   

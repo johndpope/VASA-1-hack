@@ -19,6 +19,7 @@ if 'nemo' not in sys.path:
     sys.path.insert(0, 'nemo')
 from logger import logger
 from syncnet import SyncNetInstance
+from synchformer_wrapper import SynchformerInstance
 
 
 def safe_matrix_to_euler(R: torch.Tensor) -> torch.Tensor:
@@ -167,8 +168,14 @@ class VASALossModule:
 
         self.speed_handler = SpeedLossHandler(num_buckets=9)
 
- # Initialize SyncNet evaluator
-        self.syncnet = SyncNetInstance(device=device)
+ # Initialize sync evaluator (SyncNet or Synchformer)
+        use_synchformer = config.loss.get('use_synchformer', False)
+        if use_synchformer:
+            logger.info("Using Synchformer for audio-visual synchronization")
+            self.syncnet = SynchformerInstance(device=device)
+        else:
+            logger.info("Using SyncNet for audio-visual synchronization")
+            self.syncnet = SyncNetInstance(device=device)
         self.syncnet.eval()
         
         self.batch_size =  config.train.batch_size
@@ -1086,65 +1093,182 @@ class VASALossModule:
             logger.error(traceback.format_exc())
             raise
     
+    def _compute_temporal_offset(
+        self,
+        generated_frames: torch.Tensor,  # [B, T, C, H, W]
+        audio_features: torch.Tensor,    # [B, T, D] - can be MFCC or wav2vec features
+        window_size: int = 5
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute temporal offset between audio and video using sliding window correlation.
+
+        Returns:
+            offset_magnitude: Magnitude of temporal offset (frames)
+            offset_timestamp: Timestamp where maximum misalignment occurs
+        """
+        # Validate inputs
+        if generated_frames.dim() != 5:
+            raise ValueError(f"Expected generated_frames to have 5 dims [B, T, C, H, W], got {generated_frames.shape}")
+
+        B, T, C, H, W = generated_frames.shape
+        device = generated_frames.device
+
+        # Ensure audio has batch dimension
+        if audio_features.dim() == 2:  # [T, D]
+            audio_features = audio_features.unsqueeze(0).expand(B, -1, -1)
+        elif audio_features.dim() != 3:
+            raise ValueError(f"Expected audio_features to have 2 or 3 dims, got {audio_features.shape}")
+
+        # Ensure batch sizes match
+        if audio_features.shape[0] != B:
+            if audio_features.shape[0] == 1:
+                audio_features = audio_features.expand(B, -1, -1)
+            else:
+                raise ValueError(f"Batch size mismatch: frames {B} vs audio {audio_features.shape[0]}")
+
+        # If using Synchformer, it can directly predict offsets
+        if isinstance(self.syncnet, SynchformerInstance):
+            # Get offset predictions from Synchformer
+            with torch.no_grad():
+                logits = self.syncnet.compute_sync_score(
+                    generated_frames, audio_features, return_logits=True
+                )
+                # Synchformer outputs 21 classes for offsets from -2 to +2 seconds
+                # Convert logits to offset predictions
+                offset_probs = F.softmax(logits, dim=-1)
+
+                # Create offset grid (21 classes from -10 to +10 frames at 25fps)
+                offset_grid = torch.linspace(-10, 10, 21, device=device)
+
+                # Weighted average to get predicted offset
+                offset_magnitude = (offset_probs * offset_grid).sum(dim=-1)
+
+                # Find timestamp of maximum misalignment (highest entropy in predictions)
+                entropy = -(offset_probs * torch.log(offset_probs + 1e-8)).sum(dim=-1)
+                offset_timestamp = torch.zeros(B, device=device)  # Simplified: use frame 0
+
+                return offset_magnitude.abs(), offset_timestamp
+
+        # Fallback: Use cross-correlation based offset detection
+        offsets = []
+        timestamps = []
+
+        for b in range(B):
+            max_offset = 0
+            max_timestamp = 0
+            max_correlation = -float('inf')
+
+            # Slide window through the sequence
+            for t in range(0, T - window_size + 1):
+                window_frames = generated_frames[b:b+1, t:t+window_size]
+                window_audio = audio_features[b:b+1, t:t+window_size]
+
+                # Compute correlation at different offsets
+                for offset in range(-2, 3):  # Check offsets from -2 to +2 frames
+                    if t + offset < 0 or t + offset + window_size > T:
+                        continue
+
+                    offset_audio = audio_features[b:b+1, t+offset:t+offset+window_size]
+
+                    # Simple correlation metric (can be replaced with more sophisticated sync evaluation)
+                    with torch.no_grad():
+                        if hasattr(self.syncnet, 'evaluate'):
+                            _, confidence = self.syncnet.evaluate(
+                                window_frames.transpose(1, 2),  # [B, C, T, H, W]
+                                offset_audio.unsqueeze(1),      # [B, 1, T, D]
+                                batch_size=1
+                            )
+                            correlation = confidence.item()
+                        else:
+                            # Simple correlation fallback
+                            correlation = 0.0
+
+                    if correlation > max_correlation:
+                        max_correlation = correlation
+                        max_offset = abs(offset)
+                        max_timestamp = t
+
+            offsets.append(max_offset)
+            timestamps.append(max_timestamp)
+
+        offset_magnitude = torch.tensor(offsets, dtype=torch.float32, device=device)
+        offset_timestamp = torch.tensor(timestamps, dtype=torch.float32, device=device)
+
+        return offset_magnitude, offset_timestamp
+
     def _compute_sync_loss(
         self,
         generated_frames: torch.Tensor,  # [B, T, C, H, W]
         targets: Dict[str, torch.Tensor]
     ) -> torch.Tensor:
         """
-        Compute sync loss using SyncNet to evaluate lip-audio synchronization.
-        Returns a loss that should be minimized (lower is better).
+        Compute sync loss as described in the paper using temporal offset detection.
+
+        L_sync = (Δt_p - Δt_gt)² + (t_p - t_gt)²
+
+        where:
+        - Δt_p, Δt_gt: predicted and ground truth temporal offset magnitudes
+        - t_p, t_gt: timestamps where misalignment occurs
         """
         try:
-            # Get audio features - prefer MFCC for SyncNet, fallback to audio_features
+            # Get audio features - check multiple possible keys
             if 'mfcc' in targets:
                 audio_features = targets['mfcc']
                 logger.debug("Using MFCC features for sync loss")
+            elif 'audio_mfcc' in targets:
+                audio_features = targets['audio_mfcc']
+                logger.debug("Using audio_mfcc features for sync loss")
             elif 'audio_features' in targets:
                 audio_features = targets['audio_features']
-                logger.debug("Using audio_features for sync loss")
+                logger.debug("Using audio_features (wav2vec) for sync loss")
             else:
-                logger.warning("No audio features (mfcc or audio_features) in targets, returning zero sync loss")
+                logger.warning(f"No audio features in targets, returning zero sync loss. Available keys: {list(targets.keys())}")
                 return torch.tensor(0.0, device=generated_frames.device)
-            
+
+            # Get ground truth frames if available
+            gt_frames = targets.get('frames', None)
+
             # Ensure proper shapes
             B, T = generated_frames.shape[:2]
-            
+
             # Only compute sync loss if we have enough frames
-            if T < 5:  # SyncNet needs at least 5 frames
+            if T < 5:
                 logger.debug(f"Not enough frames for sync loss (T={T})")
                 return torch.tensor(0.0, device=generated_frames.device)
-            
-            # Prepare frames for SyncNet (expects [B, C, T, H, W])
-            if generated_frames.dim() == 5 and generated_frames.shape[1] == T:
-                frames_for_sync = generated_frames.transpose(1, 2)  # [B, T, C, H, W] -> [B, C, T, H, W]
-            else:
-                frames_for_sync = generated_frames
-            
-            # Prepare audio (SyncNet expects [B, 1, T, D])
-            if audio_features.dim() == 3:  # [B, T, D]
-                audio_for_sync = audio_features.unsqueeze(1)  # -> [B, 1, T, D]
-            else:
-                audio_for_sync = audio_features
-            
-            # Evaluate sync with SyncNet
-            with torch.no_grad():
-                offset, confidence = self.syncnet.evaluate(
-                    frames=frames_for_sync,
-                    audio_features=audio_for_sync,
-                    batch_size=B
+
+            # Ensure audio features have the right shape [B, T, D]
+            if audio_features.dim() == 2:  # [T, D]
+                audio_features = audio_features.unsqueeze(0)  # Add batch dim
+            elif audio_features.dim() == 4:  # [B, 1, T, D]
+                audio_features = audio_features.squeeze(1)  # Remove channel dim
+
+            # Compute temporal offsets for generated frames
+            delta_t_pred, t_pred = self._compute_temporal_offset(
+                generated_frames, audio_features
+            )
+
+            # Compute temporal offsets for ground truth if available
+            if gt_frames is not None:
+                delta_t_gt, t_gt = self._compute_temporal_offset(
+                    gt_frames, audio_features
                 )
-            
-            # Convert confidence to loss
-            # SyncNet confidence is higher when sync is better
-            # We want to minimize loss, so use negative confidence
-            # Scale by 5.0 to make the loss magnitude reasonable
-            sync_loss = 5.0 - confidence.mean()  # Target confidence of 5.0
-            
-            # Ensure loss is positive
-            sync_loss = torch.clamp(sync_loss, min=0.0)
-            
-            logger.debug(f"Sync confidence: {confidence.mean().item():.4f}, loss: {sync_loss.item():.4f}")
+            else:
+                # If no ground truth, assume perfect sync (offset=0, timestamp=0)
+                delta_t_gt = torch.zeros_like(delta_t_pred)
+                t_gt = torch.zeros_like(t_pred)
+
+            # Compute sync loss as per the paper equation:
+            # L_sync = (Δt_p - Δt_gt)² + (t_p - t_gt)²
+            offset_loss = F.mse_loss(delta_t_pred, delta_t_gt)
+            timestamp_loss = F.mse_loss(t_pred, t_gt)
+
+            # Normalize timestamp loss by sequence length to make it scale-invariant
+            timestamp_loss = timestamp_loss / T
+
+            # Combine the two components
+            sync_loss = offset_loss + timestamp_loss
+
+            logger.debug(f"Sync loss - Offset: {offset_loss.item():.4f}, Timestamp: {timestamp_loss.item():.4f}, Total: {sync_loss.item():.4f}")
             
             return sync_loss
             

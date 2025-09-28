@@ -1,0 +1,26 @@
+{
+    "comment": "Example Synchformer configuration file. Copy to synchformer_config.json and modify as needed.",
+    "path": "./Synchformer",
+    "checkpoint": "./Synchformer/pretrained/synchformer.pt",
+    "config": "./Synchformer/configs/sync.yaml",
+    "device": "cuda",
+
+    "preprocessing": {
+        "audio_sample_rate": 16000,
+        "n_mels": 128,
+        "n_fft": 1024,
+        "win_length": 400,
+        "hop_length": 160,
+        "max_spec_t": 66,
+        "audio_mean": -4.2677393,
+        "audio_std": 4.5689974
+    },
+
+    "video": {
+        "segment_size_vframes": 16,
+        "n_segments": 14,
+        "input_size": 224,
+        "visual_mean": [0.5, 0.5, 0.5],
+        "visual_std": [0.5, 0.5, 0.5]
+    }
+}
