@@ -952,7 +952,9 @@ class VASATrainer:
             val_stats = None
             if self.val_loader and self.config.get('validation', {}).get('enabled', True):
                 val_frequency = self.config.get('validation', {}).get('frequency', 5)
-                if epoch % val_frequency == 0 or epoch == self.config.num_epochs - 1:
+                # Use total_epochs or num_epochs, with fallback to 100
+                total_epochs = self.config.get('total_epochs', self.config.get('num_epochs', 100))
+                if epoch % val_frequency == 0 or epoch == total_epochs - 1:
                     logger.info(f"Running validation at epoch {epoch} (frequency: every {val_frequency} epochs)")
                     val_stats = self.validate()
                 else:
@@ -1493,9 +1495,9 @@ class VASATrainer:
                                     metrics.get('rotation_loss', 0.0),
                                     metrics.get('translation_loss', 0.0),
                                     # Lip motion losses (critical for mouth movement)
-                                    metrics.get('audio_lip_loss', metrics.get('audio_lip', 0.0)),
-                                    metrics.get('lips_loss', metrics.get('lips', 0.0)),
-                                    metrics.get('expression_l1', 0.0),
+                                    metrics.get('audio_lip_correlation', metrics.get('audio_lip', 0.0)),  # Audio-lip sync
+                                    metrics.get('mouth_openness_direct', metrics.get('lips', 0.0)),  # Mouth openness
+                                    metrics.get('expression_loss', metrics.get('expression_l1', 0.0)),  # Expression L1/L2
                                     # Progressive stage losses
                                     metrics.get('blink_loss', metrics.get('blink', 0.0)),
                                     metrics.get('gaze_loss', metrics.get('gaze_direction', 0.0)),
@@ -1975,10 +1977,10 @@ class VASATrainer:
             log_dict["training/stage"] = current_stage
             log_dict["training/stage_name"] = stage_name
 
-            # Log specific lip motion metrics
-            log_dict["lip_motion/audio_lip_loss"] = epoch_averages.get('audio_lip_loss', 0.0)
-            log_dict["lip_motion/lips_loss"] = epoch_averages.get('lips_loss', 0.0)
-            log_dict["lip_motion/expression_l1"] = epoch_averages.get('expression_l1', 0.0)
+            # Log specific lip motion metrics with correct keys
+            log_dict["lip_motion/audio_lip_correlation"] = epoch_averages.get('audio_lip_correlation', 0.0)
+            log_dict["lip_motion/mouth_openness"] = epoch_averages.get('mouth_openness_direct', 0.0)
+            log_dict["lip_motion/expression_loss"] = epoch_averages.get('expression_loss', 0.0)
 
             wandb.log(log_dict, step=self.global_step)
             
