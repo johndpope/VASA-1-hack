@@ -2919,10 +2919,26 @@ class VASATrainer:
                     logger.debug(f"Found {len(unexpected_keys)} unexpected keys (likely discriminator weights)")
                 logger.info("Volumetric avatar restored successfully")
 
-            # Load optimizer and scheduler state
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            # Load optimizer and scheduler state with error handling
+            try:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                logger.info("Optimizer state loaded successfully")
+            except ValueError as e:
+                if "doesn't match the size of optimizer's group" in str(e):
+                    logger.warning("⚠️ Optimizer state mismatch - likely due to model architecture changes")
+                    logger.warning("  Starting with fresh optimizer state (learning will continue from scratch)")
+                    logger.info("  Model weights are still loaded, only optimizer momentum/history is reset")
+                    # Don't load optimizer state, start fresh
+                else:
+                    raise e
+
             if 'scheduler_state_dict' in checkpoint and self.scheduler:
-                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                try:
+                    self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                    logger.info("Scheduler state loaded successfully")
+                except Exception as e:
+                    logger.warning(f"Could not load scheduler state: {e}")
+                    logger.warning("Starting with fresh scheduler")
 
             self.current_epoch = checkpoint.get('epoch', -1) + 1
             self.global_step = checkpoint.get('global_step', 0)
