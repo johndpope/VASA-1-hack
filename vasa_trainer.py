@@ -4,6 +4,7 @@ from torch.cuda import amp
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 import wandb
+import itertools
 from vasa_sampler import WindowSequenceSampler, create_window_sequence_collate_fn
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
@@ -947,8 +948,15 @@ class VASATrainer:
             # Training phase
             train_stats = self.train_epoch()
             
-            # Validation phase
-            val_stats = self.validate() if self.val_loader else None
+            # Validation phase - check if we should validate this epoch
+            val_stats = None
+            if self.val_loader and self.config.get('validation', {}).get('enabled', True):
+                val_frequency = self.config.get('validation', {}).get('frequency', 5)
+                if epoch % val_frequency == 0 or epoch == self.config.num_epochs - 1:
+                    logger.info(f"Running validation at epoch {epoch} (frequency: every {val_frequency} epochs)")
+                    val_stats = self.validate()
+                else:
+                    logger.info(f"Skipping validation at epoch {epoch} (next validation at epoch {((epoch // val_frequency) + 1) * val_frequency})")
             
             # Check if this is the best model based on training or validation loss
             if val_stats and isinstance(val_stats, dict):
@@ -971,10 +979,47 @@ class VASATrainer:
             self.cleanup_old_epoch_checkpoints(keep_last=3)
 
 
+    def get_current_stage(self, epoch: int = None) -> tuple:
+        """Get current training stage based on epoch.
+
+        Returns:
+            (stage_number, stage_name, active_losses)
+        """
+        if epoch is None:
+            epoch = self.current_epoch
+
+        if epoch >= 45:
+            return 6, "Lip Sync Refinement", ["lips: 2.0", "audio_lip: 10.0", "temporal: 0.01"]
+        elif epoch >= 35:
+            return 5, "Emotion", ["emotion: 0.0→0.8", "perceptual: 0.5"]
+        elif epoch >= 25:
+            return 4, "Head Pose", ["head_distance: 0.1→1.0", "identity: 0.3"]
+        elif epoch >= 15:
+            return 3, "Eye Gaze", ["gaze_direction: 0.1→1.5", "nonlip: 0.1"]
+        elif epoch >= 5:
+            return 2, "Blinking", ["blink: 0.1→2.0", "expression_l1: 1.5"]
+        else:
+            return 1, "Foundation", ["reconstruction: 2.0", "dynamics: 1.0", "pose: 5.0", "audio_lip: 10.0"]
+
     def train_epoch(self) -> Dict[str, float]:
         """Training loop with proper noise level sampling."""
         self.model.train()  # Put model in training mode
         self.train_metrics.reset()
+
+        # Log stage transition if needed
+        stage_num, stage_name, active_losses = self.get_current_stage()
+        prev_stage_num, _, _ = self.get_current_stage(self.current_epoch - 1) if self.current_epoch > 0 else (0, "", [])
+
+        if stage_num != prev_stage_num and self.config.wandb.enabled and self.accelerator.is_local_main_process:
+            logger.info(f"🎯 STAGE TRANSITION: Entering Stage {stage_num} - {stage_name}")
+            logger.info(f"   Active losses: {', '.join(active_losses)}")
+
+            if wandb.run:
+                wandb.log({
+                    "training/stage_transition": stage_num,
+                    "training/stage_transition_name": stage_name,
+                    "training/stage_transition_epoch": self.current_epoch
+                }, step=self.global_step)
         num_batches = len(self.train_loader)
         
         # Clear VA bridge cache at start of epoch
@@ -1023,6 +1068,14 @@ class VASATrainer:
         
         # Initialize WandB metrics table for this epoch
         if self.config.wandb.enabled and self.accelerator.is_local_main_process:
+            # TRAINING STAGE PROGRESSION:
+            # Stage 1 (0-4):   Foundation - reconstruction, dynamics, pose, audio_lip (10.0)
+            # Stage 2 (5-14):  Blinking - blink (0.1→2.0), expression_l1 (1.5)
+            # Stage 3 (15-24): Eye Gaze - gaze_direction (0.1→1.5), nonlip (0.1)
+            # Stage 4 (25-34): Head Pose - head_distance (0.1→1.0), identity (0.3)
+            # Stage 5 (35-44): Emotion - emotion (0.0→0.8), perceptual (0.5)
+            # Stage 6 (45+):   Lip Sync - lips (2.0), audio_lip (10.0), temporal (0.01)
+
             self.epoch_table = wandb.Table(columns=[
                 "batch_idx", "window_idx", "total_loss",
                 # Core reconstruction losses
@@ -1030,10 +1083,14 @@ class VASATrainer:
                 # Motion prediction losses (matching H5 cache structure)
                 "uv_warp_loss", "theta_loss", "expression_loss",
                 "scale_loss", "rotation_loss", "translation_loss",
+                # Lip motion losses (critical for mouth movement)
+                "audio_lip_loss", "lips_loss", "expression_l1",
+                # Progressive stage losses
+                "blink_loss", "gaze_loss", "emotion_loss",
                 # Consistency losses
                 "l_consist", "l_cross_id", "velocity_smoothness",
                 # Training metrics
-                "grad_norm", "learning_rate"
+                "grad_norm", "learning_rate", "stage"
             ])
 
         for batch_idx, batch in enumerate(self.train_loader):
@@ -1407,6 +1464,19 @@ class VASATrainer:
                                 # Get current learning rate
                                 current_lr = self.optimizer.param_groups[0]['lr'] if self.optimizer.param_groups else 0.0001
 
+                                # Determine current training stage based on epoch
+                                current_stage = 1
+                                if self.current_epoch >= 45:
+                                    current_stage = 6  # Lip Sync refinement
+                                elif self.current_epoch >= 35:
+                                    current_stage = 5  # Emotion
+                                elif self.current_epoch >= 25:
+                                    current_stage = 4  # Head Pose
+                                elif self.current_epoch >= 15:
+                                    current_stage = 3  # Eye Gaze
+                                elif self.current_epoch >= 5:
+                                    current_stage = 2  # Blinking
+
                                 self.epoch_table.add_data(
                                     batch_idx,
                                     window_idx,
@@ -1422,13 +1492,22 @@ class VASATrainer:
                                     metrics.get('scale_loss', 0.0),
                                     metrics.get('rotation_loss', 0.0),
                                     metrics.get('translation_loss', 0.0),
+                                    # Lip motion losses (critical for mouth movement)
+                                    metrics.get('audio_lip_loss', metrics.get('audio_lip', 0.0)),
+                                    metrics.get('lips_loss', metrics.get('lips', 0.0)),
+                                    metrics.get('expression_l1', 0.0),
+                                    # Progressive stage losses
+                                    metrics.get('blink_loss', metrics.get('blink', 0.0)),
+                                    metrics.get('gaze_loss', metrics.get('gaze_direction', 0.0)),
+                                    metrics.get('emotion_loss', metrics.get('emotion', 0.0)),
                                     # Consistency losses
                                     metrics.get('l_consist', 0.0),
                                     metrics.get('l_cross_id', 0.0),
                                     metrics.get('velocity_smoothness', 0.0),  # Combined velocity/smoothness
                                     # Training metrics
                                     grad_norm_value,
-                                    current_lr
+                                    current_lr,
+                                    current_stage  # Add stage indicator
                                 )
                             
                             # Generate thumbnail with single frame only to save memory
@@ -1870,12 +1949,38 @@ class VASATrainer:
         # Store for TDD progressive loss
         self.last_epoch_metrics = epoch_averages
         
-        # Log epoch metrics
+        # Log epoch metrics with stage information
         if self.config.wandb.enabled and self.accelerator.is_local_main_process:
-            wandb.log(
-                {f"epoch/{k}": v for k, v in epoch_averages.items()},
-                step=self.global_step
-            )
+            # Determine current training stage
+            current_stage = 1
+            stage_name = "Foundation"
+            if self.current_epoch >= 45:
+                current_stage = 6
+                stage_name = "Lip Sync Refinement"
+            elif self.current_epoch >= 35:
+                current_stage = 5
+                stage_name = "Emotion"
+            elif self.current_epoch >= 25:
+                current_stage = 4
+                stage_name = "Head Pose"
+            elif self.current_epoch >= 15:
+                current_stage = 3
+                stage_name = "Eye Gaze"
+            elif self.current_epoch >= 5:
+                current_stage = 2
+                stage_name = "Blinking"
+
+            # Log metrics with stage info
+            log_dict = {f"epoch/{k}": v for k, v in epoch_averages.items()}
+            log_dict["training/stage"] = current_stage
+            log_dict["training/stage_name"] = stage_name
+
+            # Log specific lip motion metrics
+            log_dict["lip_motion/audio_lip_loss"] = epoch_averages.get('audio_lip_loss', 0.0)
+            log_dict["lip_motion/lips_loss"] = epoch_averages.get('lips_loss', 0.0)
+            log_dict["lip_motion/expression_l1"] = epoch_averages.get('expression_l1', 0.0)
+
+            wandb.log(log_dict, step=self.global_step)
             
             # Log the metrics table for this epoch
             wandb.log({"epoch_metrics_table": self.epoch_table}, step=self.global_step)
@@ -2305,19 +2410,41 @@ class VASATrainer:
         """Run validation with proper model mode handling."""
         if not self.val_loader:
             return {}
-            
+
+        # Check if validation is enabled
+        val_config = self.config.get('validation', {})
+        if not val_config.get('enabled', True):
+            logger.info("Validation is disabled in config")
+            return {}
+
         # Put model in eval mode
         self.model.eval()
         self.val_metrics.reset()
+
+        # Get validation settings
+        max_batches = val_config.get('max_batches', None)
+        skip_expensive = val_config.get('skip_expensive_metrics', False)
+        allowed_metrics = val_config.get('metrics', ['reconstruction_loss'])
+
+        logger.info(f"Validation settings: max_batches={max_batches}, skip_expensive={skip_expensive}, metrics={allowed_metrics}")
         
         cfg_scales = self._get_cfg_scales()  # Get current CFG scales
 
         with torch.no_grad():
-            for batch_idx, batch in enumerate(tqdm(
-                self.val_loader,
+            # Limit number of batches if configured
+            val_iterator = enumerate(self.val_loader)
+            if max_batches:
+                val_iterator = itertools.islice(val_iterator, max_batches)
+                total_batches = min(max_batches, len(self.val_loader))
+            else:
+                total_batches = len(self.val_loader)
+
+            for batch_idx, batch in tqdm(
+                val_iterator,
+                total=total_batches,
                 disable=not self.accelerator.is_local_main_process,
-                desc="Validation"
-            )):
+                desc=f"Validation (max {max_batches} batches)" if max_batches else "Validation"
+            ):
                 try:
                     if batch is None:
                         continue
@@ -2399,37 +2526,40 @@ class VASATrainer:
 
                             # Compute metrics for this window
                             metrics = {}
-                            
-                            # Reconstruction metrics
-                            metrics.update(self.loss_module._compute_reconstruction_losses(
-                                generated_sequence, window, None
-                            ))
-                            
-                            # Control metrics if applicable
-                            if self.current_epoch >= self.config.train.control_start_epoch:
-                                control_metrics = self.loss_module._compute_control_losses(
-                                    generated_sequence, window, self.current_epoch
-                                )
-                                metrics.update(control_metrics)
 
-                            # Generate frames for sync evaluation if needed
-                            if self.config.loss.use_sync_loss:
-                                try:
-                                    generated_frames = self._generate_synced_frames(
-                                        window['frames'][:, 0],  # Use first frame as identity
-                                        generated_sequence
+                            # Always compute reconstruction metrics (they're fast)
+                            if 'reconstruction_loss' in allowed_metrics or not allowed_metrics:
+                                metrics.update(self.loss_module._compute_reconstruction_losses(
+                                    generated_sequence, window, None
+                                ))
+
+                            # Control metrics if applicable and not skipping expensive
+                            if not skip_expensive and self.current_epoch >= self.config.train.control_start_epoch:
+                                if 'control_loss' in allowed_metrics or 'motion_naturalness' in allowed_metrics:
+                                    control_metrics = self.loss_module._compute_control_losses(
+                                        generated_sequence, window, self.current_epoch
                                     )
-                                    # Evaluate sync quality
-                                    sync_metrics = self.loss_module.evaluate_sync_quality(
-                                        generated_frames=generated_frames,
-                                        audio_features=window['audio_features'],
-                                        audio_mfcc=window.get('audio_mfcc')
-                                    )
-                                    metrics.update(sync_metrics)
-                                    
-                                except Exception as e:
-                                    logger.error(f"Error generating frames: {str(e)}")
-                                    logger.error(traceback.format_exc())
+                                    metrics.update(control_metrics)
+
+                            # Generate frames for sync evaluation if needed (expensive!)
+                            if not skip_expensive and self.config.loss.use_sync_loss:
+                                if 'lip_sync' in allowed_metrics or 'id_similarity' in allowed_metrics:
+                                    try:
+                                        generated_frames = self._generate_synced_frames(
+                                            window['frames'][:, 0],  # Use first frame as identity
+                                            generated_sequence
+                                        )
+                                        # Evaluate sync quality
+                                        sync_metrics = self.loss_module.evaluate_sync_quality(
+                                            generated_frames=generated_frames,
+                                            audio_features=window['audio_features'],
+                                            audio_mfcc=window.get('audio_mfcc')
+                                        )
+                                        metrics.update(sync_metrics)
+
+                                    except Exception as e:
+                                        logger.error(f"Error generating frames: {str(e)}")
+                                        logger.error(traceback.format_exc())
 
                             # Update validation metrics
                             self.val_metrics.update(metrics)
@@ -3181,7 +3311,7 @@ if __name__ == "__main__":
             logger.info("Single-bucket cache not found. Consider running preprocess_single_bucket.py first.")
         else:
             cache_info = full_dataset.cache.get_cache_info()
-            logger.info(f"Using single-bucket cache: {cache_info['num_windows']} windows, {cache_info['file_size_mb']:.1f} MB")
+            logger.info(f"Using single-bucket cache: {cache_info} windows, {cache_info['file_size_mb']:.1f} MB")
 
     # Print dataset stats
     logger.info(f"Dataset created:")

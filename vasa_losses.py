@@ -777,6 +777,21 @@ class VASALossModule:
                 losses['audio_lip_correlation'] = audio_lip_term
                 logger.debug(f"Final audio-lip correlation loss term: {audio_lip_term.item():.6f}")
                 logger.debug("=== Finished Audio-Lip Correlation Loss ===\n")
+
+                # Add direct mouth openness supervision
+                if 'openness' in targets['lip_metrics']:
+                    target_openness = targets['lip_metrics']['openness']  # [B, T]
+                    # Normalize openness to [0, 1] range
+                    openness_norm = (target_openness - target_openness.min()) / (target_openness.max() - target_openness.min() + 1e-6)
+
+                    # The audio energy should correlate with mouth openness
+                    audio_energy = torch.norm(conditions[audio_key], dim=-1)  # [B, T]
+                    audio_norm = (audio_energy - audio_energy.min()) / (audio_energy.max() - audio_energy.min() + 1e-6)
+
+                    # Direct supervision: mouth should be open when audio is strong
+                    mouth_openness_loss = F.mse_loss(openness_norm, audio_norm) * 10.0  # Strong weight
+                    losses['mouth_openness_direct'] = mouth_openness_loss
+                    logger.debug(f"Mouth openness direct loss: {mouth_openness_loss.item():.6f}")
             else:
                 missing_keys = []
                 if not audio_key:

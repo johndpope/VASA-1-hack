@@ -38,7 +38,7 @@ esac
 if [ "$CONFIG_FILE" == "overfit_config.yaml" ]; then
     CHECKPOINT_DIR="checkpoints_overfit"
 else
-    CHECKPOINT_DIR="checkpoints"
+    CHECKPOINT_DIR="checkpoints_overfit"
 fi
 
 # Auto-detect and use existing checkpoint

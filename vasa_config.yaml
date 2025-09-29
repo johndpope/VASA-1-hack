@@ -131,11 +131,37 @@ loss:
   use_verification: false     # Disabled for faster training
   lambda_verification: 0
   
+  # =============================================================================
+  # TRAINING STAGE PROGRESSION TABLE
+  # =============================================================================
+  # | Epoch | Stage | Unlocks           | Key Losses                    | Target Values |
+  # |-------|-------|-------------------|-------------------------------|---------------|
+  # | 0-4   | 1     | Foundation        | reconstruction: 2.0           | < 0.1         |
+  # |       |       |                   | dynamics: 1.0, pose: 5.0      |               |
+  # |       |       |                   | audio_lip: 10.0 (mouth motion)|               |
+  # |-------|-------|-------------------|-------------------------------|---------------|
+  # | 5-14  | 2     | Blinking          | blink: 0.1→2.0 (ramps)       | < 0.15        |
+  # |       |       |                   | expression_l1: 1.5            |               |
+  # |-------|-------|-------------------|-------------------------------|---------------|
+  # | 15-24 | 3     | Eye Gaze          | gaze_direction: 0.1→1.5      | < 0.2         |
+  # |       |       |                   | nonlip: 0.1                   |               |
+  # |-------|-------|-------------------|-------------------------------|---------------|
+  # | 25-34 | 4     | Head Pose         | head_distance: 0.1→1.0       | < 0.25        |
+  # |       |       |                   | identity: 0.3                 |               |
+  # |-------|-------|-------------------|-------------------------------|---------------|
+  # | 35-44 | 5     | Emotion           | emotion: 0.0→0.8             | < 0.3         |
+  # |       |       |                   | perceptual: 0.5               |               |
+  # |-------|-------|-------------------|-------------------------------|---------------|
+  # | 45+   | 6     | Lip Sync (Fine)   | lips: 2.0 (static, high)     | Refined       |
+  # |       |       |                   | audio_lip: 10.0 (maintained) |               |
+  # |       |       |                   | temporal: 0.01 (low variance)|               |
+  # =============================================================================
+
   # Foundation losses (always active)
   lambda_reconstruction: 2.0   # Increased for better reconstruction
   lambda_dynamics: 1.0         # Reduced from 10.0 to prevent variance collapse
   lambda_pose: 5.0  # Increased from 1.0 to enforce better head pose learning
-  
+
   # Progressive losses (unlock based on thresholds)
   # Stage 2: Blinking (unlocks at epoch 5 if reconstruction < 0.1)
   lambda_blink: 0.1           # Will ramp to 2.0
@@ -150,9 +176,9 @@ loss:
   lambda_emotion: 0.0        # Will ramp to 0.8 - https://github.com/johndpope/VASA-1-hack/issues/57
   
   # Stage 6: Lip Sync (unlocks at epoch 45 if emotion < 0.3)
-  lambda_lips: 0.1            # Will ramp to 2.0
+  lambda_lips: 2.0            # INCREASED from 0.1 to force better mouth movement
   lambda_sync: 0.0            # SyncNet for evaluation only, audio conditioning handles training
-  
+
   # Other losses
   lambda_nonlip: 0.1          # Weight for non-lip facial landmarks
   lambda_speed: 0.1
@@ -172,12 +198,12 @@ loss:
   lambda_cross_id: 0.0        # Cross-identity similarity loss (re-enabled for identity preservation)
   lambda_velocity: 1e-5       # REDUCED from 0.5 to 1e-5 to allow more variance
   lambda_smoothness: 0.01     # Acceleration smoothness regularization (increased for temporal consistency)
-  lambda_audio_lip: 5.0       # Audio-lip correlation loss - INCREASED for stronger audio-motion coupling
+  lambda_audio_lip: 10.0      # Audio-lip correlation loss - DOUBLED to enforce mouth movement with audio
 
   # L1 regularization for UV warps (prevents expression collapse)
   lambda_warp_l1: 0.1         # L1 loss on UV warps for sparsity/robustness
   lambda_warp_tv: 0.05        # Total Variation (TV-L1) for spatial smoothness
-  lambda_expression_l1: 0.7   # L1 weight for expression embeddings (0.7 L1, 0.3 L2)
+  lambda_expression_l1: 1.5   # INCREASED from 0.7 to enforce expression variation and prevent static mouth
 
   # Disentanglement loss configuration
   disentangle_num_pairs: 3           # Number of frame pairs to sample for l_consist
@@ -296,9 +322,13 @@ logging:
 
   # Validation
   validation:
-    frequency: 5             # More frequent validation
-    num_samples: 10          # Fewer samples for speed
-    metrics: ["lip_sync", "id_similarity", "motion_naturalness"]
+    enabled: true            # Set to false to disable validation completely
+    frequency: 10            # Validate every N epochs (was 5, now 10 for less overhead)
+    num_samples: 4           # Fewer samples for speed (was 10, now 4)
+    max_batches: 2           # Process at most N batches during validation (new)
+    metrics: ["reconstruction_loss"]  # Only compute essential metrics
+    # Full metric list (enable when needed): ["lip_sync", "id_similarity", "motion_naturalness", "reconstruction_loss"]
+    skip_expensive_metrics: true  # Skip compute-heavy metrics like id_similarity
 
 # Distributed training
 distributed:
