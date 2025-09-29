@@ -608,6 +608,7 @@ def collate_vasa_batch(batch: List[Dict]) -> Optional[Dict[str, torch.Tensor]]:
         all_windows = []
         for item in batch:
             if 'windows' in item:
+                # Old path: item has 'windows' key with list of windows
                 windows = item['windows']
                 # Add video path to window metadata
                 for window in windows:
@@ -615,9 +616,15 @@ def collate_vasa_batch(batch: List[Dict]) -> Optional[Dict[str, torch.Tensor]]:
                         window['metadata'] = {}
                     window['metadata']['video_path'] = item.get('video_path', '')
                 all_windows.extend(windows)
+            elif 'theta' in item:
+                # New path: item IS a window (from VASAIntegratedDataset.__getitem__)
+                # Treat the item itself as a window
+                if 'metadata' not in item:
+                    item['metadata'] = {}
+                all_windows.append(item)
 
         if not all_windows:
-            logger.error("No valid windows in batch")
+            logger.error("No valid windows in batch - neither 'windows' key nor direct window data found")
             return None
 
         # Get tensor keys from first window
@@ -2306,23 +2313,60 @@ class VASATrainer:
         cfg_scales = self._get_cfg_scales()  # Get current CFG scales
 
         with torch.no_grad():
-            for batch in tqdm(
+            for batch_idx, batch in enumerate(tqdm(
                 self.val_loader,
                 disable=not self.accelerator.is_local_main_process,
                 desc="Validation"
-            ):
+            )):
                 try:
                     if batch is None:
                         continue
 
-                    # Process batch into windows
-                    windows = self.motion_handler.process_batch(
-                        batch, 
-                        current_window_size=self.config.motion.window_size
-                    )
-                    if not windows:
-                        logger.warning("No valid windows in validation batch")
-                        continue
+                    # Debug: Log batch keys to understand structure
+                    if batch_idx == 0:  # Only log once
+                        logger.info(f"Validation batch keys: {list(batch.keys())}")
+                        for key, value in batch.items():
+                            if isinstance(value, torch.Tensor):
+                                logger.info(f"  {key}: shape {value.shape}")
+                            elif isinstance(value, list):
+                                logger.info(f"  {key}: list of length {len(value)}")
+
+                    # For validation, the batch already contains windows from collate_vasa_batch
+                    # We need to restructure it for motion_handler or bypass it
+                    if 'theta' in batch and isinstance(batch['theta'], torch.Tensor):
+                        # Batch already has motion data stacked, create window-like structure
+                        B = batch['theta'].shape[0] if 'theta' in batch else 1
+                        windows = []
+                        for b in range(B):
+                            window = {}
+                            for key, value in batch.items():
+                                if isinstance(value, torch.Tensor) and value.shape[0] >= b + 1:
+                                    # Remove the extra dimension if present from stacking
+                                    if value.ndim > 2 and value.shape[1] == 1:
+                                        window[key] = value[b, 0]  # Remove batch and squeeze singleton
+                                    else:
+                                        window[key] = value[b:b+1]  # Keep batch dimension
+                                elif key == 'metadata' and isinstance(value, list) and len(value) > b:
+                                    window['metadata'] = value[b]
+                            windows.append(window)
+
+                        if not windows:
+                            logger.warning("No valid windows extracted from validation batch")
+                            continue
+                    else:
+                        # Try to process normally if batch has expected structure
+                        if 'frames' not in batch:
+                            # Skip if no frames to process
+                            logger.warning("No 'frames' key in validation batch, skipping")
+                            continue
+
+                        windows = self.motion_handler.process_batch(
+                            batch,
+                            current_window_size=self.config.motion.window_size
+                        )
+                        if not windows:
+                            logger.warning("No valid windows in validation batch")
+                            continue
 
                     # Process each window independently
                     for window in windows:

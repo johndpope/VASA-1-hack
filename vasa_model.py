@@ -433,12 +433,20 @@ class MotionTransformer(nn.Module):
 
 
 
-        # Output heads for all motion parameters
+        # Output heads for all motion parameters with improved initialization
         self.theta_head = nn.Sequential(
             nn.Linear(self.d_model, self.d_model // 2),
             nn.SiLU(),
+            nn.Dropout(0.1),  # Add dropout to prevent overfitting
             nn.Linear(self.d_model // 2, 3 * 4)
         )
+
+        # Initialize theta_head with larger weights for better gradient flow
+        for layer in self.theta_head:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_normal_(layer.weight, gain=2.0)  # Larger initialization for rotation
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
         self.expr_head = nn.Sequential(
             nn.Linear(self.d_model, self.d_model // 2),
             nn.SiLU(),

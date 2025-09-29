@@ -2658,18 +2658,32 @@ class VASALossModule:
                 pred_t = pred_theta[..., :3, 3]
                 target_t = target_theta[..., :3, 3]
                 
-                # Compute rotation loss using geodesic distance
-                R_diff = torch.matmul(pred_R, target_R.transpose(-2, -1))
+                # Compute rotation loss using multiple metrics for better gradients
+
+                # 1. Geodesic distance (angular error)
+                R_diff = torch.matmul(pred_R.transpose(-2, -1), target_R)
                 trace = torch.diagonal(R_diff, dim1=-2, dim2=-1).sum(-1)
                 cos_theta = (trace - 1) / 2
-                cos_theta = torch.clamp(cos_theta, -1, 1)  # Numerical stability
-                rotation_loss = torch.acos(cos_theta).mean()
-                
+                cos_theta = torch.clamp(cos_theta, -0.9999, 0.9999)  # Numerical stability
+                geodesic_loss = torch.acos(cos_theta).mean()
+
+                # 2. Frobenius norm (provides better gradients when rotations are small)
+                frobenius_loss = torch.norm(pred_R - target_R, dim=(-2, -1)).mean()
+
+                # 3. 6D rotation representation loss (for better optimization)
+                # Convert to 6D representation (first two columns of rotation matrix)
+                pred_6d = pred_R[..., :, :2].reshape(B * T, 6)
+                target_6d = target_R[..., :, :2].reshape(B * T, 6)
+                rotation_6d_loss = F.mse_loss(pred_6d, target_6d)
+
+                # Combine rotation losses with adaptive weighting
+                rotation_loss = 0.5 * geodesic_loss + 0.3 * frobenius_loss + 0.2 * rotation_6d_loss
+
                 # Compute translation loss (L2)
                 translation_loss = F.mse_loss(pred_t, target_t)
-                
-                # Combine losses with weighting
-                total_loss = rotation_loss + 0.5 * translation_loss
+
+                # Add stronger weighting to rotation to ensure head movement
+                total_loss = 2.0 * rotation_loss + translation_loss
                 
             else:
                 # Direct matrix comparison using Frobenius norm

@@ -135,7 +135,7 @@ loss:
   # Foundation losses (always active)
   lambda_reconstruction: 2.0   # Increased for better reconstruction
   lambda_dynamics: 1.0         # Reduced from 10.0 to prevent variance collapse
-  lambda_pose: 1.0
+  lambda_pose: 5.0             # INCREASED from 1.0 to enforce head pose learning
   
   # Progressive losses (unlock based on thresholds)
   # Stage 2: Blinking (unlocks at epoch 5 if reconstruction < 0.1)
