@@ -232,6 +232,7 @@ loss:
   lambda_warp_smooth: 0.01           # Spatial smoothness regularization for warps
   lambda_warp_temporal: 0.1          # Temporal consistency for warps
   lambda_source_theta: 0.5           # Source theta warp loss weight
+  lambda_warp_magnitude: 5.0         # UV warp magnitude matching (prevents collapse to zero)
   
   # Frame generation for disentanglement losses
   use_sparse_frames: false    # If true, only generate first and last frame (saves 90% memory)

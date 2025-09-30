@@ -226,6 +226,7 @@ class VASALossModule:
         # L1 regularization for UV warps to prevent collapse
         self.lambda_warp_l1 = getattr(config.loss, 'lambda_warp_l1', 0.1)
         self.lambda_warp_tv = getattr(config.loss, 'lambda_warp_tv', 0.05)  # Total variation regularization
+        self.lambda_warp_magnitude = getattr(config.loss, 'lambda_warp_magnitude', 5.0)  # UV warp magnitude matching
 
         # Initialize identity feature extractor for cross-id loss
         try:
@@ -1525,7 +1526,9 @@ class VASALossModule:
             # Compare predicted magnitude to target magnitude to ensure non-trivial deformations
             pred_magnitude = pred['uv_warps'].abs().mean()
             target_magnitude = target['uv_warps'].abs().mean()
-            magnitude_loss = F.mse_loss(pred_magnitude, target_magnitude) * lambda_warp * 0.5
+
+            # Use dedicated magnitude loss weight (high priority to prevent collapse)
+            magnitude_loss = F.mse_loss(pred_magnitude, target_magnitude) * self.lambda_warp_magnitude
 
             losses['uv_warp_magnitude'] = magnitude_loss
 

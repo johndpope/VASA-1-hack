@@ -74,6 +74,7 @@ def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True):
     all_windows = existing_windows.copy()  # Start with existing windows
     failed_indices = []
     skipped_count = 0
+    quality_filtered_count = 0  # Track windows filtered for poor quality
 
     for idx in range(len(dataset)):
         # Skip if already processed
@@ -104,6 +105,40 @@ def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True):
             window_data = dataset[idx]
 
             if window_data is not None:
+                # QUALITY CHECK: Filter out bad windows before caching
+                should_cache = True
+                quality_reasons = []
+
+                # Check 1: UV warp magnitude (prevent collapsed warps)
+                if 'uv_warps' in window_data:
+                    uv_magnitude = window_data['uv_warps'].abs().mean().item()
+                    if uv_magnitude < 0.15:  # Threshold: warps too small
+                        should_cache = False
+                        quality_reasons.append(f"uv_magnitude={uv_magnitude:.4f}<0.15")
+
+                # Check 2: Expression variance (prevent static predictions)
+                if 'expression_embed' in window_data:
+                    expr_std = window_data['expression_embed'].std().item()
+                    if expr_std < 0.01:  # Near-zero variance
+                        should_cache = False
+                        quality_reasons.append(f"expr_std={expr_std:.6f}<0.01")
+
+                # Check 3: Valid face landmarks (if available)
+                if 'landmarks' in window_data:
+                    # Count non-zero landmarks (zeros indicate failed detection)
+                    valid_frames = (window_data['landmarks'].abs().sum(dim=-1).sum(dim=-1) > 0).float().mean().item()
+                    if valid_frames < 0.5:  # Less than 50% frames have valid landmarks
+                        should_cache = False
+                        quality_reasons.append(f"valid_landmarks={valid_frames:.1%}<50%")
+
+                if not should_cache:
+                    quality_filtered_count += 1
+                    if quality_filtered_count <= 10:  # Log first 10 filtered windows
+                        logger.warning(f"❌ FILTERED window {idx}: {', '.join(quality_reasons)}")
+                    elif quality_filtered_count % 50 == 0:  # Then every 50th
+                        logger.info(f"⚠️ Filtered {quality_filtered_count} low-quality windows so far...")
+                    continue  # Skip caching this window
+
                 # Convert tensors to CPU and detach to avoid memory accumulation
                 window_data_cpu = {}
                 for key, value in window_data.items():
@@ -158,6 +193,7 @@ def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True):
             'successful_windows': len(all_windows),
             'failed_windows': len(failed_indices),
             'skipped_windows': skipped_count,
+            'quality_filtered_windows': quality_filtered_count,
             'dataset_config': {
                 'window_size': dataset.window_size,
                 'stride': dataset.stride,

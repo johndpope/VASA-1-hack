@@ -1121,10 +1121,11 @@ class VASATrainer:
                     continue
                     
                 logger.info(f"Processing {len(windows)} windows for batch {batch_idx}")
-                    
+
                 # Track total loss for entire batch
                 batch_total_loss = 0
                 batch_metrics = defaultdict(list)
+                windows_processed = 0  # Track how many windows actually did backward pass
 
                 # Process each window
                 for window_idx, window in enumerate(windows):
@@ -1303,19 +1304,29 @@ class VASATrainer:
                                                     source_img=source_img,
                                                     use_black_background=True
                                                 )
-                                                # Store generation stats for metrics
+                                                # Store generation stats and check quality BEFORE loss computation
                                                 if not hasattr(self, '_gen_stats'):
                                                     self._gen_stats = []
                                                 self._gen_stats.append(gen_stats)
+
+                                                # EARLY EXIT: Skip window if frame quality is too poor
+                                                if gen_stats['valid_masks_ratio'] < 0.5:
+                                                    logger.warning(f"⚠️ SKIPPING WINDOW {window_idx}: Frame generation quality too poor ({gen_stats['valid_masks_ratio']:.1%} valid frames < 50% threshold)")
+                                                    logger.warning(f"  Skipping BEFORE loss computation to avoid wasted computation and gradient issues")
+                                                    self._gen_stats = []
+                                                    del generated_frames
+                                                    torch.cuda.empty_cache()
+                                                    continue  # Skip to next window
+
                                                 generated_frames = generated_frames.detach()
-                                        
+
                                     frame_type = "sparse (2 frames)" if use_sparse_frames else "full"
                                     logger.debug(f"Generated frames shape ({frame_type}): {generated_frames.shape}")
                                     logger.debug(f"Target frames shape ({frame_type}): {target_frames.shape}")
                                 except Exception as e:
                                     logger.error(f"Failed to generate frames for disentanglement loss: {str(e)}")
                                     generated_frames = None
-                           
+
                             # Prepare source identity for loss computation
                             source_identity_for_loss = None
                             if self.identity_image is not None:
@@ -1360,19 +1371,11 @@ class VASATrainer:
                                 for k, v in metrics.items():
                                     batch_metrics[f"metric_{k}"].append(v)
 
-                            # Add generation stats if available and check quality threshold
+                            # Add generation stats if available (quality check already done earlier)
                             if hasattr(self, '_gen_stats') and self._gen_stats:
                                 # Average across all generations in this batch
                                 avg_valid_ratio = sum(s['valid_masks_ratio'] for s in self._gen_stats) / len(self._gen_stats)
                                 batch_metrics['frame_generation/valid_masks_ratio'].append(avg_valid_ratio)
-
-                                # SKIP WINDOW if frame generation quality is too poor (< 50% valid frames)
-                                if avg_valid_ratio < 0.5:
-                                    logger.warning(f"⚠️ SKIPPING WINDOW {window_idx}: Frame generation quality too poor ({avg_valid_ratio:.1%} valid frames < 50% threshold)")
-                                    logger.warning(f"  This prevents training on collapsed/invalid predictions that cause NaN gradients")
-                                    self._gen_stats = []
-                                    self.optimizer.zero_grad()
-                                    continue  # Skip to next window
 
                                 # Clear after logging
                                 self._gen_stats = []
@@ -1448,6 +1451,7 @@ class VASATrainer:
                             # Store loss value before cleanup
                             window_loss = losses['total'].item()
                             batch_total_loss += window_loss
+                            windows_processed += 1  # Count this window as processed
                             logger.info(f"  Window {window_idx} completed - loss: {window_loss:.4f}")
                             
                             # Log visualizations before cleanup (every 5 batches)
@@ -1895,6 +1899,11 @@ class VASATrainer:
                             continue
 
                 # After processing all windows in the batch, do gradient clipping and optimizer step
+                # BUT ONLY if we actually processed at least one window (did at least one backward)
+                if windows_processed == 0:
+                    logger.warning(f"⚠️ Batch {batch_idx}: All {len(windows)} windows were skipped (poor quality). Skipping optimizer step.")
+                    continue  # Skip to next batch
+
                 try:
                     # Update gradient monitor if enabled (before clipping to see raw gradients)
                     if self.config.train.gradient_monitoring.enabled and self.accelerator.sync_gradients:
