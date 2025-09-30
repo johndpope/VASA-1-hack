@@ -300,15 +300,65 @@ class EfficientConditionEmbedding(nn.Module):
             logger.error(traceback.format_exc())
             raise
 
+
+class AudioCrossDecoderLayer(nn.TransformerDecoderLayer):
+    def __init__(self, d_model, nhead, **kwargs):
+        super().__init__(d_model, nhead, **kwargs)
+        self.audio_cross_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True)
+        self.audio_norm = nn.LayerNorm(d_model)
+        self.dropout2 = nn.Dropout(kwargs.get('dropout', 0.1))  # Add dropout layer
+    
+    def forward(self, tgt, memory, tgt_mask=None, memory_mask=None, 
+                tgt_key_padding_mask=None, memory_key_padding_mask=None,
+                audio_memory=None):
+        # Call parent's forward with all expected arguments
+        tgt = super().forward(
+            tgt, memory, 
+            tgt_mask=tgt_mask,
+            memory_mask=memory_mask,
+            tgt_key_padding_mask=tgt_key_padding_mask,
+            memory_key_padding_mask=memory_key_padding_mask
+        )
+        
+        # Additional audio cross-attention
+        if audio_memory is not None:
+            tgt2, _ = self.audio_cross_attn(
+                tgt, audio_memory, audio_memory,
+                key_padding_mask=None  # You could add audio padding mask if needed
+            )
+            tgt = tgt + self.dropout2(tgt2)
+            tgt = self.audio_norm(tgt)
+        
+        return tgt
+    
+
+
 class MotionTransformer(nn.Module):
-    """Decoder-based Transformer for motion generation with diffusion."""
+    """Decoder-based Transformer for motion generation matching H5 cache structure.
+
+    H5 Cache Structure (per frame):
+    - uv_warp: (1, 16, 64, 64, 3) - Target UV warps
+    - theta: (1, 4, 4) - Target pose matrix
+    - scale: (1, 3) - SRT scale component
+    - rotation: (1, 3) - SRT rotation component
+    - translation: (1, 3) - SRT translation component
+    - target_pose_embed: (1, 128) - Aligned expression embedding
+
+    For 50 frames, we predict:
+    - uv_warps: (B, 50, 16, 64, 64, 3)
+    - theta: (B, 50, 3, 4) - Note: 3x4 not 4x4 in model
+    - scale: (B, 50, 3)
+    - rotation: (B, 50, 3)
+    - translation: (B, 50, 3)
+    - expression_embed: (B, 50, 128)
+    """
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.d_model = config.model.hidden_dim
-        self.expression_dim = config.model.expression_dim
+        self.expression_dim = config.model.expression_dim  # Should be 128
         self.context_size = config.motion.context_size
-        self.window_size = config.motion.window_size
+        self.window_size = config.motion.window_size  # Should be 50
 
         # Transformer configuration
         nhead = config.model.n_heads
@@ -316,17 +366,30 @@ class MotionTransformer(nn.Module):
         dim_feedforward = config.model.dim_feedforward
         dropout = config.model.dropout
 
-        # Motion embeddings
-        self.theta_emb = nn.Linear(3 * 4, self.d_model // 2)
-        self.expr_emb = nn.Linear(self.expression_dim, self.d_model // 2)
+        # Motion embeddings matching H5 data
+        self.theta_emb = nn.Linear(3 * 4, self.d_model // 2)  # theta is 3x4
+        self.expr_emb = nn.Linear(128, self.d_model // 2)  # expression is 128-dim
 
-        # Additional motion parameter embeddings
+        # SRT component embeddings
         self.scale_emb = nn.Linear(3, self.d_model // 4)
         self.rotation_emb = nn.Linear(3, self.d_model // 4)
         self.translation_emb = nn.Linear(3, self.d_model // 4)
 
+        # UV Warp encoder - simplified since we're only using UV warps from H5
+        # Input UV warps: [B, T, 16, 64, 64, 3]
+        self.uv_warp_encoder = nn.Sequential(
+            nn.Conv3d(3, 16, kernel_size=(4, 8, 8), stride=(4, 8, 8)),  # [B*T, 3, 16, 64, 64] -> [B*T, 16, 4, 8, 8]
+            nn.ReLU(),
+            nn.Conv3d(16, 32, kernel_size=(2, 4, 4), stride=(2, 4, 4)),  # -> [B*T, 32, 2, 2, 2]
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(32 * 2 * 2 * 2, self.d_model // 4)  # Larger embedding for UV warps
+        )
+
         # Combine all motion embeddings
-        self.motion_proj = nn.Linear(self.d_model + self.d_model // 4 * 3, self.d_model)
+        # theta_emb (d_model/2) + expr_emb (d_model/2) + scale (d_model/4) + rotation (d_model/4) + translation (d_model/4) + uv_warp (d_model/4)
+        # = d_model + d_model/4 * 4 = 2 * d_model
+        self.motion_proj = nn.Linear(2 * self.d_model, self.d_model)
 
         # Timestep embedding
         self.time_emb = nn.Sequential(
@@ -350,23 +413,40 @@ class MotionTransformer(nn.Module):
         )
 
         # Transformer decoder
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=self.d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            activation=F.gelu,
-            batch_first=True,
-            norm_first=True  # Pre-LN for better stability
-        )
-        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
 
-        # Output heads for all motion parameters
+        # Create custom decoder that handles audio
+        self.decoder_layers = nn.ModuleList([
+            AudioCrossDecoderLayer(
+                d_model=self.d_model,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                activation=F.gelu,
+                batch_first=True,
+                norm_first=True
+            )
+            for _ in range(num_layers)
+        ])
+        
+        # Final layer norm
+        self.decoder_norm = nn.LayerNorm(self.d_model)
+
+
+
+        # Output heads for all motion parameters with improved initialization
         self.theta_head = nn.Sequential(
             nn.Linear(self.d_model, self.d_model // 2),
             nn.SiLU(),
+            nn.Dropout(0.1),  # Add dropout to prevent overfitting
             nn.Linear(self.d_model // 2, 3 * 4)
         )
+
+        # Initialize theta_head with larger weights for better gradient flow
+        for layer in self.theta_head:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_normal_(layer.weight, gain=2.0)  # Larger initialization for rotation
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
         self.expr_head = nn.Sequential(
             nn.Linear(self.d_model, self.d_model // 2),
             nn.SiLU(),
@@ -386,6 +466,18 @@ class MotionTransformer(nn.Module):
             nn.Linear(self.d_model, self.d_model // 4),
             nn.SiLU(),
             nn.Linear(self.d_model // 4, 3)
+        )
+
+        # UV Warp prediction head - only predict UV warps to match H5 cache
+        # Output size: 16 * 64 * 64 * 3 = 196,608 values per frame
+        warp_hidden_dim = self.d_model * 2  # Larger hidden dim for complex warp fields
+
+        self.uv_warp_head = nn.Sequential(
+            nn.Linear(self.d_model, warp_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(warp_hidden_dim, warp_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(warp_hidden_dim, 16 * 64 * 64 * 3)  # Full UV warp field
         )
 
     def _get_sinusoidal_embedding(self, ts, dim):
@@ -416,15 +508,42 @@ class MotionTransformer(nn.Module):
         theta_emb = self.theta_emb(theta_flat)
         expr_emb = self.expr_emb(expr)
 
-        # Handle additional motion parameters
+        # Handle additional motion parameters (SRT components)
         scale_emb = self.scale_emb(motion_data.get('scale', torch.zeros(B, T, 3, device=device)))
         rotation_emb = self.rotation_emb(motion_data.get('rotation', torch.zeros(B, T, 3, device=device)))
         translation_emb = self.translation_emb(motion_data.get('translation', torch.zeros(B, T, 3, device=device)))
 
+        # Process UV warps - during training they're provided, during generation they're predicted
+        BT = B * T
+
+        if 'uv_warps' in motion_data:
+            # Training mode - UV warps are provided
+            uv_warps = motion_data['uv_warps']  # [B, T, 16, 64, 64, 3]
+
+            # Add assertions to verify shapes match H5 cache expectations
+            assert uv_warps.shape[2:] == (16, 64, 64, 3), f"UV warp shape mismatch: expected (B, T, 16, 64, 64, 3), got {uv_warps.shape}"
+            assert motion_data['theta'].shape[2:] == (3, 4), f"Theta shape mismatch: expected (B, T, 3, 4), got {motion_data['theta'].shape}"
+            assert motion_data['scale'].shape[2:] == (3,), f"Scale shape mismatch: expected (B, T, 3), got {motion_data['scale'].shape}"
+            assert motion_data['rotation'].shape[2:] == (3,), f"Rotation shape mismatch: expected (B, T, 3), got {motion_data['rotation'].shape}"
+            assert motion_data['translation'].shape[2:] == (3,), f"Translation shape mismatch: expected (B, T, 3), got {motion_data['translation'].shape}"
+            assert expr.shape[2:] == (128,), f"Expression shape mismatch: expected (B, T, 128), got {expr.shape}"
+
+            # Reshape UV warps for 3D conv processing: [B*T, C, D, H, W]
+            uv_warps_reshaped = uv_warps.reshape(BT, 16, 64, 64, 3).permute(0, 4, 1, 2, 3)  # [B*T, 3, 16, 64, 64]
+
+            # Encode UV warps
+            uv_warp_emb = self.uv_warp_encoder(uv_warps_reshaped).view(B, T, -1)  # [B, T, d_model//4]
+        else:
+            # Generation mode - UV warps will be predicted, create placeholder embedding
+            # This will be learned to predict the appropriate UV warps
+            uv_warp_emb = torch.zeros(B, T, self.d_model // 4, device=device)
+
         # Combine all embeddings
         current_emb = torch.cat([
-            theta_emb, expr_emb, scale_emb, rotation_emb, translation_emb
-        ], dim=-1)
+            theta_emb, expr_emb,  # d_model/2 + d_model/2 = d_model
+            scale_emb, rotation_emb, translation_emb,  # d_model/4 * 3
+            uv_warp_emb  # d_model/4
+        ], dim=-1)  # Total: 2 * d_model
         current_emb = self.motion_proj(current_emb)  # [B, T, d_model]
 
         # Handle previous context if provided
@@ -441,9 +560,14 @@ class MotionTransformer(nn.Module):
             prev_rotation_emb = self.rotation_emb(prev_context.get('rotation', torch.zeros(B, C, 3, device=device)))
             prev_translation_emb = self.translation_emb(prev_context.get('translation', torch.zeros(B, C, 3, device=device)))
 
+            # For prev_context, use zeros for UV warps (they're frame-specific, not transferable)
+            prev_uv_warp_emb = torch.zeros(B, C, self.d_model // 4, device=device)
+
             prev_emb = torch.cat([
-                prev_theta_emb, prev_expr_emb, prev_scale_emb, prev_rotation_emb, prev_translation_emb
-            ], dim=-1)
+                prev_theta_emb, prev_expr_emb,  # d_model
+                prev_scale_emb, prev_rotation_emb, prev_translation_emb,  # d_model/4 * 3
+                prev_uv_warp_emb  # d_model/4
+            ], dim=-1)  # Total: 2 * d_model
             prev_emb = self.motion_proj(prev_emb)  # [B, C, d_model]
 
             # Concatenate context and current
@@ -503,28 +627,67 @@ class MotionTransformer(nn.Module):
         # Apply transformer decoder
         # tgt: query (motion embeddings)
         # memory: key/value (condition embeddings)
-        out = self.decoder(tgt=tgt, memory=cond_emb)  # [B, C+T or T, d_model]
+        # out = self.decoder(tgt=tgt, memory=cond_emb)  # [B, C+T or T, d_model]
+        out = tgt
+        for layer in self.decoder_layers:
+                    # Extract audio memory from conditions if available
+                    audio_memory = None
+                    audio_memory = self.cond_emb(
+                        {'audio_features': conditions['audio_features']}
+                    )
+                    if C > 0:
+                        audio_memory = audio_memory[:, C:]  # Remove context frames
+                    
+                    out = layer(
+                        out, 
+                        cond_emb,
+                        audio_memory=audio_memory
+                    )
+                
+                    out = self.decoder_norm(out)
 
         # Extract only current T frames if we had context
         if C > 0:
             out = out[:, C:]  # [B, T, d_model]
 
+       
+
         # Log output statistics
         logger.debug(f" Transformer output variance: {out.var().item():.6f}")
 
-        # Predict outputs (noise predictions for diffusion)
-        theta_pred = self.theta_head(out).view(B, T, 3, 4)
-        expr_pred = self.expr_head(out)
-        scale_pred = self.scale_head(out)
-        rotation_pred = self.rotation_head(out)
-        translation_pred = self.translation_head(out)
+        # Predict outputs matching H5 cache structure
+        theta_pred = self.theta_head(out).view(B, T, 3, 4)  # H5: (1, 4, 4) but model uses 3x4
+        expr_pred = self.expr_head(out)  # [B, T, 128] - matches target_pose_embed in H5
+        scale_pred = self.scale_head(out)  # [B, T, 3] - matches H5
+        rotation_pred = self.rotation_head(out)  # [B, T, 3] - matches H5
+        translation_pred = self.translation_head(out)  # [B, T, 3] - matches H5
+
+        # Debug expression predictions
+        if torch.rand(1).item() < 0.01:  # Log 1% of the time
+            logger.info(f"[DEBUG] Expression prediction stats:")
+            logger.info(f"  Mean: {expr_pred.mean().item():.6f}, Std: {expr_pred.std().item():.6f}")
+            logger.info(f"  Min: {expr_pred.min().item():.6f}, Max: {expr_pred.max().item():.6f}")
+            logger.info(f"  Has NaN: {torch.isnan(expr_pred).any().item()}")
+            logger.info(f"  Has Inf: {torch.isinf(expr_pred).any().item()}")
+
+        # Predict UV warps matching H5 structure
+        uv_warps_pred = self.uv_warp_head(out).view(B, T, 16, 64, 64, 3)  # matches H5: (1, 16, 64, 64, 3)
+
+        # Add assertions to verify output shapes match H5 expectations
+        assert theta_pred.shape == (B, T, 3, 4), f"Theta pred shape mismatch: {theta_pred.shape}"
+        assert expr_pred.shape == (B, T, 128), f"Expression pred shape mismatch: {expr_pred.shape}"
+        assert scale_pred.shape == (B, T, 3), f"Scale pred shape mismatch: {scale_pred.shape}"
+        assert rotation_pred.shape == (B, T, 3), f"Rotation pred shape mismatch: {rotation_pred.shape}"
+        assert translation_pred.shape == (B, T, 3), f"Translation pred shape mismatch: {translation_pred.shape}"
+        assert uv_warps_pred.shape == (B, T, 16, 64, 64, 3), f"UV warp pred shape mismatch: {uv_warps_pred.shape}"
 
         return {
-            'theta': theta_pred,
-            'expression_embed': expr_pred,
-            'scale': scale_pred,
-            'rotation': rotation_pred,
-            'translation': translation_pred
+            'theta': theta_pred,  # Pose matrix
+            'expression_embed': expr_pred,  # Aligned expression embedding (target_pose_embed in H5)
+            'scale': scale_pred,  # SRT scale
+            'rotation': rotation_pred,  # SRT rotation
+            'translation': translation_pred,  # SRT translation
+            'uv_warps': uv_warps_pred  # UV warps only - matches H5 cache
         }
 
 class VASAModel(nn.Module):
@@ -722,7 +885,7 @@ class VASAModel(nn.Module):
         initial_dynamics: torch.Tensor,  # [B, expression_dim]
         conditions: Dict[str, torch.Tensor],
         num_steps: int = 50,
-        eta: float = 0.5,
+        eta: float = 0.8,  # Increased from 0.5 to add more stochasticity
         cfg_scales: Optional[Dict[str, float]] = None
     ) -> Dict[str, torch.Tensor]:
         """Generate motion sequence using DDIM sampling."""
@@ -730,7 +893,7 @@ class VASAModel(nn.Module):
             # BOOST AUDIO CFG: Use much stronger audio CFG to overcome training issues
             if cfg_scales is None:
                 cfg_scales = {
-                    'audio': 10.0,  # Further increased from 7.5 to strongly amplify audio
+                    'audio': 20.0,  # Significantly increased to 20.0 to amplify audio guidance
                     'gaze': 0.5,    # Reduced to minimize control dominance
                     'head_distance': 0.3,  # Reduced to minimize control dominance
                     'emotion': 0.2   # Reduced to minimize control dominance
@@ -751,7 +914,8 @@ class VASAModel(nn.Module):
                 'scale': torch.zeros(B, total_T, 3, device=device),
                 'rotation': torch.zeros(B, total_T, 3, device=device),
                 'translation': torch.zeros(B, total_T, 3, device=device),
-                'expression_embed': torch.zeros(B, total_T, self.config.model.expression_dim, device=device)
+                'expression_embed': torch.zeros(B, total_T, self.config.model.expression_dim, device=device),
+                'uv_warps': torch.zeros(B, total_T, 16, 64, 64, 3, device=device)  # Add UV warps to output
             }
 
             # Set initial frame values if provided
@@ -795,13 +959,14 @@ class VASAModel(nn.Module):
                     audio_window_mean = window_conditions['audio_features'].mean().item()
                     logger.info(f"[GENERATE DEBUG] Window {start_idx//stride}: Audio features - Mean: {audio_window_mean:.6f}, Variance: {audio_window_var:.6f}")
 
-                # Initialize motion with noise for ALL parameters
+                # Initialize motion with noise for ALL parameters including UV warps
                 window_motion = {
                     'theta': torch.randn(B, current_T, 3, 4, device=device),
                     'scale': torch.randn(B, current_T, 3, device=device),
                     'rotation': torch.randn(B, current_T, 3, device=device),
                     'translation': torch.randn(B, current_T, 3, device=device),
-                    'expression_embed': torch.randn(B, current_T, self.config.model.expression_dim, device=device)
+                    'expression_embed': torch.randn(B, current_T, self.config.model.expression_dim, device=device),
+                    'uv_warps': torch.randn(B, current_T, 16, 64, 64, 3, device=device)  # UV warps must be predicted
                 }
 
                 # DDIM sampling loop
@@ -900,3 +1065,63 @@ class VASAModel(nn.Module):
                 'translation': torch.zeros(B, total_T, 3, device=device),
                 'expression_embed': torch.zeros(B, total_T, self.config.model.expression_dim, device=device)
             }
+
+    def decode_frame_with_warps(
+        self,
+        identity_info: Dict[str, torch.Tensor],
+        warp_data: Dict[str, torch.Tensor]
+    ) -> torch.Tensor:
+        """
+        Decode a frame using pre-calculated warps and identity info.
+        This matches the approach in create_video_face_swap.py's decode_with_warps.
+
+        Args:
+            identity_info: Dictionary containing:
+                - canonical_volume: [B, C, D, S, S] canonical 3D volume
+                - embed_dict: Identity embeddings
+                - idt_embed: Identity embedding
+            warp_data: Dictionary containing:
+                - uv_warp: [B, D, S, S, 3] target UV warps
+                - theta: [B, 3, 4] target pose matrix
+                - target_pose_embed: [B, 512] target expression embedding
+
+        Returns:
+            Generated frame [B, 3, H, W]
+        """
+        with torch.no_grad():
+            # Extract warp data
+            target_uv_warp = warp_data['uv_warp']
+            target_theta = warp_data['theta']
+            target_pose_embed = warp_data['target_pose_embed']
+
+            # Get volume dimensions
+            c = self.volumetric_avatar.args.latent_volume_channels
+            d = self.volumetric_avatar.args.latent_volume_depth
+            s = self.volumetric_avatar.args.latent_volume_size
+
+            # Generate 3D grid and rotation warp for target
+            grid = self.volumetric_avatar.identity_grid_3d.repeat_interleave(target_theta.shape[0], dim=0)
+            target_rotation_warp = grid.bmm(target_theta[:, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+
+            # Apply warps to canonical volume (nested grid_sample)
+            aligned_target_volume = self.volumetric_avatar.grid_sample(
+                self.volumetric_avatar.grid_sample(identity_info['canonical_volume'], target_uv_warp),
+                target_rotation_warp
+            )
+
+            # Decode
+            target_latent_feats = aligned_target_volume.view(target_theta.shape[0], c * d, s, s)
+            decode_dict = {
+                'target_theta': target_theta,
+                'target_pose_embed': target_pose_embed
+            }
+
+            generated_img, _, _, _ = self.volumetric_avatar.decoder_nw(
+                decode_dict,
+                identity_info['embed_dict'],  # Source identity
+                target_latent_feats,
+                False,
+                stage_two=True
+            )
+
+            return generated_img

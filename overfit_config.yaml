@@ -6,9 +6,9 @@ defaults:
 model:
   hidden_dim: 512
   n_heads: 8
-  n_layers: 8                 # Reduced to 1 for ultra-fast training (change to 2 or more for better quality)
+  n_layers: 2                 # Reduced to 1 for ultra-fast training (change to 2 or more for better quality)
   dim_feedforward: 2048
-  dropout: 0.1
+  dropout: 0.05
   expression_dim: 128  # Expression embedding dimension from volumetric avatar
   # Add these:
   condition_embedding_dim: 512  # Dimension for condition embeddings
@@ -18,10 +18,10 @@ model:
 
 # Diffusion parameters - SIMPLIFIED
 diffusion:
-  num_steps: 1000               # Reduced from 1000 to 100
+  num_steps: 1000                # Increased to 1000 for better sampling (was previously 50 in generation)
   beta_start: 1e-4
   beta_end: 0.02
-  cfg_start_epoch: 0  # When to start using CFG
+  cfg_start_epoch: 100  # When to start using CFG
   schedule_mode: 'linear'  # Changed from 'cosine' to fix DDIMScheduler error
   schedule_s: 0.008  # Schedule parameters (for cosine schedule)
 
@@ -37,7 +37,7 @@ motion:
   warmup_steps: 500          # Extended warmup for VASA-1 alignment
   scheduler:
     type: "cosine"            # Learning rate scheduler type
-    min_lr: 5e-5              # Increased minimum LR to prevent decay too low
+    min_lr: 1e-4             # Increased minimum LR to prevent decay too low
     warmup_ratio: 0.1         # Extended warmup ratio for stability
   
   # Progressive training
@@ -57,7 +57,7 @@ train:
   # when to add conditional signals
   control_start_epoch: 0      # Start control immediately for overfitting
 
-  lr: 1e-4 # Further reduced for stability  
+  lr: 1e-3 # Further reduced for stability  
   motion_proj_lr: 0.1 # Reduced motion projection LR multiplier
   expression_lr: 0.1   # Reduced expression LR multiplier 
 
@@ -69,14 +69,19 @@ train:
     transformer_late: 1e-4  # Further reduced for stability
     output_projections: 1e-4   # Further reduced for stability
 
-  batch_size: 2               # Increased from 16 to maximize 32GB VRAM utilization
-  windows_per_batch: 28         # Number of consecutive windows per sequence (auto-adjusts if too large)
+
+  # To increase GPU utilization:
+  # - Increase batch_size (e.g., from 28 to 56)
+  # - This processes more windows per step but maintains temporal continuity
+  batch_size: 16               # Batch size for training
+
+  windows_per_batch: 1          # Reduced from 14 to 4 for better sequence diversity
   gradient_accumulation_steps: 4  # Increase effective batch size to break plateau
-  num_epochs: 1000            # Reduced for quick testing
+  num_epochs: 200            # Reduced for quick testing
 
   beta1: 0.9
   beta2: 0.999
-  weight_decay: 0.01
+  weight_decay: 1e-5  # Reduced from 0.01 to allow more variance
   max_grad_norm: 0.5  # More aggressive gradient clipping for stability
   save_freq: 5                # Save very frequently to enable recovery from OOM
   
@@ -113,7 +118,7 @@ train:
 # Loss weights - TDD PROGRESSIVE SYSTEM
 loss:
   # Use TDD progressive loss system
-  use_tdd_progressive: true
+  use_tdd_progressive: false
   
   expression_weighting:
     enabled: true
@@ -123,52 +128,92 @@ loss:
   adaptive_update_freq: 100   # Update weights every N steps  # Minimum weight for least important dimensions
     
   use_sync_loss: false  # SyncNet is for evaluation only (per VASA-1 paper)
+  use_synchformer: false  # Use Synchformer instead of SyncNet for sync loss
   use_verification: false     # Disabled for faster training
   lambda_verification: 0
-  
+
+  # =============================================================================
+  # TRAINING STAGE PROGRESSION TABLE
+  # =============================================================================
+  # | Epoch | Stage | Unlocks           | Key Losses                    | Target Values |
+  # |-------|-------|-------------------|-------------------------------|---------------|
+  # | 0-4   | 1     | Foundation        | reconstruction: 2.0           | < 0.1         |
+  # |       |       |                   | dynamics: 1.0, pose: 5.0      |               |
+  # |       |       |                   | audio_lip: 10.0 (mouth motion)|               |
+  # |-------|-------|-------------------|-------------------------------|---------------|
+  # | 5-14  | 2     | Blinking          | blink: 0.1→2.0 (ramps)       | < 0.15        |
+  # |       |       |                   | expression_l1: 1.5            |               |
+  # |-------|-------|-------------------|-------------------------------|---------------|
+  # | 15-24 | 3     | Eye Gaze          | gaze_direction: 0.1→1.5      | < 0.2         |
+  # |       |       |                   | nonlip: 0.1                   |               |
+  # |-------|-------|-------------------|-------------------------------|---------------|
+  # | 25-34 | 4     | Head Pose         | head_distance: 0.1→1.0       | < 0.25        |
+  # |       |       |                   | identity: 0.3                 |               |
+  # |-------|-------|-------------------|-------------------------------|---------------|
+  # | 35-44 | 5     | Emotion           | emotion: 0.0→0.8             | < 0.3         |
+  # |       |       |                   | perceptual: 0.5               |               |
+  # |-------|-------|-------------------|-------------------------------|---------------|
+  # | 45+   | 6     | Lip Sync (Fine)   | lips: 2.0 (static, high)     | Refined       |
+  # |       |       |                   | audio_lip: 10.0 (maintained) |               |
+  # |       |       |                   | temporal: 0.01 (low variance)|               |
+  # =============================================================================
+
   # Foundation losses (always active)
   lambda_reconstruction: 2.0   # Increased for better reconstruction
   lambda_dynamics: 1.0         # Reduced from 10.0 to prevent variance collapse
-  lambda_pose: 1.0
-  
+  lambda_pose: 5.0  # Increased from 1.0 to enforce better head pose learning
+
   # Progressive losses (unlock based on thresholds)
   # Stage 2: Blinking (unlocks at epoch 5 if reconstruction < 0.1)
-  lambda_blink: 0.0           # Will ramp to 2.0
-  
-  # Stage 3: Eye Gaze (unlocks at epoch 15 if blink < 0.15)  
-  lambda_gaze_direction: 0.0  # Will ramp to 1.5
-  
+  lambda_blink: 0.1           # Will ramp to 2.0
+
+  # Stage 3: Eye Gaze (unlocks at epoch 15 if blink < 0.15)
+  lambda_gaze_direction: 0.1  # Will ramp to 1.5
+
   # Stage 4: Head Pose (unlocks at epoch 25 if gaze < 0.2)
-  lambda_head_distance: 0.0   # Will ramp to 1.0
-  
+  lambda_head_distance: 0.1   # Will ramp to 1.0
+
   # Stage 5: Emotion (unlocks at epoch 35 if head pose < 0.25)
-  lambda_emotion: 0.0         # Will ramp to 0.8
-  
+  lambda_emotion: 0.0        # Will ramp to 0.8 - https://github.com/johndpope/VASA-1-hack/issues/57
+
   # Stage 6: Lip Sync (unlocks at epoch 45 if emotion < 0.3)
-  lambda_lips: 0.0            # Will ramp to 2.0
+  lambda_lips: 2.0            # INCREASED from 0.1 to force better mouth movement
   lambda_sync: 0.0            # SyncNet for evaluation only, audio conditioning handles training
   
   # Other losses
-  lambda_nonlip: 0.0          # Weight for non-lip facial landmarks
+  lambda_nonlip: 0.1          # Weight for non-lip facial landmarks
   lambda_speed: 0.1
   lambda_control: 0.0         # Overall control weight
   lambda_lip: 0.0
   lambda_cfg: 0.5
   lambda_perceptual: 0.5      # Increased perceptual loss for better quality
-  lambda_temporal: 0.8        # Temporal consistency
+  lambda_temporal: 0.01       # GREATLY REDUCED from 0.8 to allow more variance
   use_consistency: true       # Enable VASA consistency loss
   use_identity: true          # Enable face identity preservation
-  lambda_consistency: 0.5     # Weight for consistency loss
+  lambda_consistency: 0.0     # Weight for consistency loss
   lambda_identity: 0.3        # Weight for identity loss loss
-  
+
   # NEW VASA-1 inspired losses
   use_score_matching: true    # Use VASA-1 style clean signal prediction (not noise)
-  lambda_consist: 0.0         # Pairwise transfer loss for disentanglement
-  lambda_cross_id: 0.0        # Cross-identity similarity loss
-  lambda_velocity: 0.5        # Velocity matching regularization (GREATLY increased to enforce motion)
+  lambda_consist: 0.5         # Pairwise transfer loss for disentanglement (re-enabled for consistency)
+  lambda_cross_id: 0.0        # Cross-identity similarity loss (re-enabled for identity preservation)
+  lambda_velocity: 1e-5       # REDUCED from 0.5 to 1e-5 to allow more variance
   lambda_smoothness: 0.01     # Acceleration smoothness regularization (increased for temporal consistency)
-  lambda_audio_lip: 5.0       # Audio-lip correlation loss - INCREASED for stronger audio-motion coupling
-  
+  lambda_audio_lip: 10.0      # Audio-lip correlation loss - DOUBLED to enforce mouth movement with audio
+
+  # L1 regularization for UV warps (prevents expression collapse)
+  lambda_warp_l1: 0.1         # L1 loss on UV warps for sparsity/robustness
+  lambda_warp_tv: 0.05        # Total Variation (TV-L1) for spatial smoothness
+  lambda_expression_l1: 1.5   # INCREASED from 0.7 to enforce expression variation and prevent static mouth
+
+  # EMO (Volumetric Avatar) Matching Loss - ensures VASA matches high-quality EMO output
+  use_emo_matching: true              # Enable EMO matching loss
+  lambda_emo_match: 8.0               # VERY HIGH weight - primary quality target
+  emo_match_type: 'combined'          # 'l1', 'l2', 'lpips', or 'combined'
+  emo_cache_dir: 'cache_emo'          # Directory for cached EMO outputs
+  emo_keyframes_per_window: 5         # Number of keyframes to compare per window
+  emo_match_start_epoch: 0            # Start EMO matching from epoch 0 for immediate quality
+
   # Disentanglement loss configuration
   disentangle_num_pairs: 3           # Number of frame pairs to sample for l_consist
   disentangle_sampling: 'random'     # Sampling strategy: 'random', 'uniform', or 'extremes'
@@ -176,6 +221,12 @@ loss:
   disentangle_vis_freq: 100          # Visualize disentanglement every N steps
   cross_id_num_frames: 3             # Number of frames to use for identity comparison
   cross_id_normalize: true           # Normalize frames before identity extraction
+
+  # Warping field loss weights
+  lambda_warp: 2.0                   # Main warp reconstruction loss weight
+  lambda_warp_smooth: 0.01           # Spatial smoothness regularization for warps
+  lambda_warp_temporal: 0.1          # Temporal consistency for warps
+  lambda_source_theta: 0.5           # Source theta warp loss weight
   
   # Frame generation for disentanglement losses
   use_sparse_frames: false    # If true, only generate first and last frame (saves 90% memory)
@@ -217,11 +268,15 @@ dataset:
   preextract_audio: true
   cache_audio: true
   hop_length: 10
-  max_videos: 100             # Use all available videos in junk folder
+  max_videos: 1             # Use all available videos in junk folder (134 total)
   min_sequence_length: 50    # Minimum sequence length (match window_size)
   max_sequence_samples: 1000 # Maximum samples per epoch
   use_identity_image: true    # Use high-quality identity image instead of video frame
   identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image
+  # EMO generation settings
+  generate_emo_frames: true   # Generate EMO frames for quality comparison
+  emo_identity_path: "nemo/data/IMG_1.png"  # Same identity image for EMO generation
+  emo_keyframes_per_window: 5  # Generate 5 EMO frames per window for comparison
   use_single_bucket: true     # Use single-bucket caching for all windows
   augmentation:
     enabled: false            # NO AUGMENTATION for overfitting
@@ -239,7 +294,7 @@ paths:
   volumetric_config: "nemo/models/stage_1/volumetric_avatar/va.yaml"
   data_dir: "data"
   video_folder: "junk"
-  cache_dir: "cache_overfit"
+  cache_dir: "cache_single_bucket"
 
 # Hardware/environment settings
 device: "cuda"
@@ -247,7 +302,7 @@ seed: 42
 num_workers: 8                # Multi-threading for data loading
 debug: false
 wandb:
-  project: "vasa-overfit-hp"
+  project: "vasa-overfitting"
   enabled: true
 
 # Additional components
@@ -280,9 +335,13 @@ logging:
 
   # Validation
   validation:
-    frequency: 5             # More frequent validation
-    num_samples: 10          # Fewer samples for speed
-    metrics: ["lip_sync", "id_similarity", "motion_naturalness"]
+    enabled: false            # Set to false to disable validation completely
+    frequency: 10            # Validate every N epochs (was 5, now 10 for less overhead)
+    num_samples: 4           # Fewer samples for speed (was 10, now 4)
+    max_batches: 2           # Process at most N batches during validation (new)
+    metrics: ["reconstruction_loss"]  # Only compute essential metrics
+    # Full metric list (enable when needed): ["lip_sync", "id_similarity", "motion_naturalness", "reconstruction_loss"]
+    skip_expensive_metrics: true  # Skip compute-heavy metrics like id_similarity
 
 # Distributed training
 distributed:

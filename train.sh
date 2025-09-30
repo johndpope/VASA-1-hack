@@ -8,17 +8,14 @@ echo "   VASA-1 Training Runner"
 echo "================================"
 echo ""
 echo "Select configuration file:"
-echo "1) overfit_config.yaml (for overfitting/testing)"
+echo "1) overfit_config.yaml (for overfitting/testing) [DEFAULT]"
 echo "2) vasa_config.yaml (for full training)"
 echo "3) Custom config file"
 echo ""
-read -p "Enter your choice (1-3): " choice
+read -p "Enter your choice (1-3, press Enter for default): " choice
 
+# Default to overfitting when pressing enter or invalid input
 case $choice in
-    1)
-        CONFIG_FILE="overfit_config.yaml"
-        echo "Using overfit configuration..."
-        ;;
     2)
         CONFIG_FILE="vasa_config.yaml"
         echo "Using full training configuration..."
@@ -31,19 +28,11 @@ case $choice in
         fi
         echo "Using custom configuration: $CONFIG_FILE"
         ;;
-    *)
-        echo "Invalid choice! Defaulting to vasa_config.yaml"
-        CONFIG_FILE="vasa_config.yaml"
+    1|""|*)
+        CONFIG_FILE="overfit_config.yaml"
+        echo "Using overfit configuration (default)..."
         ;;
 esac
-
-echo ""
-echo "Select training mode:"
-echo "1) Train from scratch"
-echo "2) Resume from checkpoint"
-echo "3) Fine-tune from checkpoint (not implemented yet)"
-echo ""
-read -p "Enter your choice (1-3): " mode_choice
 
 # Determine checkpoint directory based on config
 if [ "$CONFIG_FILE" == "overfit_config.yaml" ]; then
@@ -52,34 +41,46 @@ else
     CHECKPOINT_DIR="checkpoints"
 fi
 
-case $mode_choice in
-    1)
-        RESUME_PATH=""
-        echo "Training from scratch..."
-        ;;
-    2)
-        # Look for the best checkpoint
-        if [ -f "$CHECKPOINT_DIR/best_checkpoint.pt" ]; then
-            RESUME_PATH="$CHECKPOINT_DIR/best_checkpoint.pt"
-            echo "Found checkpoint: $RESUME_PATH"
-        elif [ -f "$CHECKPOINT_DIR/latest_checkpoint.pt" ]; then
-            RESUME_PATH="$CHECKPOINT_DIR/latest_checkpoint.pt"
-            echo "Found checkpoint: $RESUME_PATH"
-        else
-            echo "No checkpoint found in $CHECKPOINT_DIR/"
-            read -p "Enter checkpoint path manually (or press Enter to train from scratch): " RESUME_PATH
-        fi
-        ;;
-    3)
-        echo "Fine-tuning with optimizer reset not implemented yet."
-        echo "Please manually edit the training script if needed."
-        RESUME_PATH=""
-        ;;
-    *)
-        RESUME_PATH=""
-        echo "Defaulting to train from scratch..."
-        ;;
-esac
+# Auto-detect and use existing checkpoint
+if [ -f "$CHECKPOINT_DIR/best_checkpoint.pt" ]; then
+    RESUME_PATH="$CHECKPOINT_DIR/best_checkpoint.pt"
+    echo ""
+    echo "✅ Found existing checkpoint: $RESUME_PATH"
+    echo "   Resuming training from this checkpoint..."
+elif [ -f "$CHECKPOINT_DIR/latest_checkpoint.pt" ]; then
+    RESUME_PATH="$CHECKPOINT_DIR/latest_checkpoint.pt"
+    echo ""
+    echo "✅ Found existing checkpoint: $RESUME_PATH"
+    echo "   Resuming training from this checkpoint..."
+else
+    RESUME_PATH=""
+    echo ""
+    echo "📝 No checkpoint found in $CHECKPOINT_DIR/"
+    echo "   Starting training from scratch..."
+fi
+
+# Optional: Allow override to start fresh
+echo ""
+read -p "Override and start from scratch? (y/N, press Enter for No): " override_choice
+if [ "$override_choice" = "y" ] || [ "$override_choice" = "Y" ]; then
+    RESUME_PATH=""
+    echo "🔄 Override selected - will train from scratch"
+else
+    echo "📂 Keeping existing checkpoint configuration"
+fi
+
+echo ""
+# Ask if user wants to clear old cache
+read -p "Clear old cache directories? (y/N, press Enter for No): " clear_cache
+if [ "$clear_cache" = "y" ] || [ "$clear_cache" = "Y" ]; then
+    echo "🗑️  Cleaning old cache directories..."
+    rm -rf cache_single_bucket/
+    rm -rf cache/
+    rm -rf window_cache*/
+    echo "✅ Cache directories cleared."
+else
+    echo "📦 Keeping existing cache directories"
+fi
 
 echo ""
 echo "Select log level:"
@@ -114,30 +115,16 @@ case $log_choice in
 esac
 
 echo ""
-echo "Additional options:"
-echo "1) Normal training"
-echo "2) Fast mode (reduced validation)"
-echo ""
-read -p "Enter your choice (1-2): " debug_choice
-
-case $debug_choice in
-    2)
-        FAST_FLAG="--fast"
-        echo "Fast mode enabled..."
-        ;;
-    *)
-        FAST_FLAG=""
-        echo "Normal training mode..."
-        ;;
-esac
-
-echo ""
 echo "================================"
 echo "Starting training with:"
 echo "  Config: $CONFIG_FILE"
-echo "  Mode: $mode_choice"
+if [ ! -z "$RESUME_PATH" ]; then
+    echo "  Mode: Resume from checkpoint"
+    echo "  Checkpoint: $RESUME_PATH"
+else
+    echo "  Mode: Training from scratch"
+fi
 echo "  Log Level: $VASA_LOG_LEVEL"
-echo "  Options: $debug_choice"
 echo "================================"
 echo ""
 

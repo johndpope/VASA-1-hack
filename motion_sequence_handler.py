@@ -133,21 +133,29 @@ class MotionSequenceHandler:
             return []
             
     def prepare_motion_data(self, window: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Prepare motion data from window, ensuring batch dimension is preserved."""
+        """Prepare motion data from window matching H5 cache structure."""
+        # Validate that UV warps are present (main warping field from H5 cache)
+        if 'uv_warps' not in window:
+            raise KeyError(
+                f"CRITICAL: Missing required UV warps field. "
+                f"Dataset must provide this field. Available keys: {list(window.keys())}"
+            )
+
         motion_data = {
-            'theta': window['theta'],            # Should be [B, T, 3, 4]
-            'scale': window['scale'],            # Should be [B, T, 3]
-            'rotation': window['rotation'],      # Should be [B, T, 3]
-            'translation': window['translation'], # Should be [B, T, 3]
-            'expression_embed': window['expression_embed']  # Should be [B, T, 128]
+            'theta': window['theta'],            # [B, T, 3, 4] - pose matrix
+            'scale': window['scale'],            # [B, T, 3] - SRT scale
+            'rotation': window['rotation'],      # [B, T, 3] - SRT rotation
+            'translation': window['translation'], # [B, T, 3] - SRT translation
+            'expression_embed': window['expression_embed'],  # [B, T, 128] - aligned expression
+            'uv_warps': window['uv_warps'],      # [B, T, 16, 64, 64, 3] - UV warps from H5
         }
-        
+
         # Include audio features for sync loss and other audio-related losses
         if 'audio_features' in window:
             motion_data['audio_features'] = window['audio_features']  # Should be [B, T, D]
         if 'mfcc' in window:
             motion_data['mfcc'] = window['mfcc']  # MFCC features for SyncNet
-        
+
         return motion_data  
 
     def merge_windows(self, windows, total_frames, device):

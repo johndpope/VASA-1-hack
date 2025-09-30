@@ -1,0 +1,9 @@
+{
+  "step": 2,
+  "method": "video_frames",
+  "stage": "loaded",
+  "timestamp": "2025-09-19T19:59:47.579878",
+  "data": {
+    "num_frames": 3
+  }
+}

@@ -4,6 +4,7 @@ from torch.cuda import amp
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 import wandb
+import itertools
 from vasa_sampler import WindowSequenceSampler, create_window_sequence_collate_fn
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
@@ -29,6 +30,126 @@ import importlib
 import sys
 if 'nemo' not in sys.path:
     sys.path.insert(0, 'nemo')
+
+def debug_warps(
+    predicted_motion: dict,
+    target_motion: dict = None,
+    num_frames: int = 50,
+    log_to_wandb: bool = False,
+    step: int = None
+):
+    """
+    Debug warps over a sequence of frames by analyzing norms of rigid (theta rotation/translation)
+    and non-rigid (UV displacements) warps. Compares to target if provided to check variation matching.
+
+    Args:
+        predicted_motion: Dict with keys like 'theta' [B, T, 3, 4], 'uv_warps' [B, T, D, S, S, 3]
+        target_motion: Optional target/ground truth motion dict for comparison
+        num_frames: Number of frames to analyze (up to T)
+        log_to_wandb: If True, log metrics to wandb
+        step: Training step for wandb logging
+    """
+    # Extract dimensions
+    T = min(num_frames, next(iter(predicted_motion.values())).shape[1] if predicted_motion else 0)
+    if T == 0:
+        logger.warning("No frames in predicted_motion")
+        return
+
+    metrics = {
+        'rot_norm': [],
+        'trans_norm': [],
+        'uv_disp_norm': []
+    }
+    if target_motion:
+        target_metrics = {k: [] for k in metrics}
+        diff_metrics = {k: [] for k in metrics}
+
+    for t in range(T):
+        frame_metrics = {}
+
+        # Rigid: theta [B, T, 3, 4] -> rotation [3,3], translation [3]
+        if 'theta' in predicted_motion:
+            theta = predicted_motion['theta'][0, t]  # [3,4]
+            R = theta[:3, :3]  # Rotation matrix
+            trans = theta[:3, 3]   # Translation vector
+
+            # Rotation deviation norm: ||R - I||_F
+            I = torch.eye(3, device=theta.device)
+            rot_norm = torch.norm(R - I, p='fro').item()
+            trans_norm = torch.norm(trans, p=2).item()
+
+            frame_metrics['rot_norm'] = rot_norm
+            frame_metrics['trans_norm'] = trans_norm
+        else:
+            frame_metrics['rot_norm'] = 0.0
+            frame_metrics['trans_norm'] = 0.0
+
+        # Non-rigid: uv_warps [B, T, D, S, S, 3] displacements
+        if 'uv_warps' in predicted_motion:
+            uv = predicted_motion['uv_warps'][0, t]  # [D, S, S, 3]
+            # Mean L2 norm per voxel
+            uv_disp_norm = torch.mean(torch.norm(uv.view(-1, 3), p=2, dim=1)).item()
+            frame_metrics['uv_disp_norm'] = uv_disp_norm
+        else:
+            frame_metrics['uv_disp_norm'] = 0.0
+
+        # Append to lists
+        for k, v in frame_metrics.items():
+            metrics[k].append(v)
+
+        # Handle target if provided
+        if target_motion:
+            target_frame = {}
+            if 'theta' in target_motion:
+                theta_tgt = target_motion['theta'][0, t]
+                R_tgt = theta_tgt[:3, :3]
+                trans_tgt = theta_tgt[:3, 3]
+                rot_norm_tgt = torch.norm(R_tgt - I, p='fro').item()
+                trans_norm_tgt = torch.norm(trans_tgt, p=2).item()
+                target_frame['rot_norm'] = rot_norm_tgt
+                target_frame['trans_norm'] = trans_norm_tgt
+
+                # Differences
+                diff_metrics['rot_norm'].append(abs(rot_norm - rot_norm_tgt))
+                diff_metrics['trans_norm'].append(abs(trans_norm - trans_norm_tgt))
+
+            if 'uv_warps' in target_motion:
+                uv_tgt = target_motion['uv_warps'][0, t]
+                uv_disp_norm_tgt = torch.mean(torch.norm(uv_tgt.view(-1, 3), p=2, dim=1)).item()
+                target_frame['uv_disp_norm'] = uv_disp_norm_tgt
+                diff_metrics['uv_disp_norm'].append(abs(uv_disp_norm - uv_disp_norm_tgt))
+
+            for k, v in target_frame.items():
+                target_metrics[k].append(v)
+
+    # Compute averages
+    avg_metrics = {k: np.mean(v) if v else 0.0 for k, v in metrics.items()}
+    if target_motion:
+        avg_target = {k: np.mean(v) if v else 0.0 for k, v in target_metrics.items()}
+        avg_diff = {k: np.mean(v) if v else 0.0 for k, v in diff_metrics.items()}
+
+    if log_to_wandb and wandb.run is not None:
+        log_dict = {f"debug/warp_{k}_avg": v for k, v in avg_metrics.items()}
+        if target_motion:
+            log_dict.update({f"debug/warp_target_{k}_avg": v for k, v in avg_target.items()})
+            log_dict.update({f"debug/warp_diff_{k}_avg": v for k, v in avg_diff.items()})
+
+        # Also log variance to detect collapse
+        log_dict[f"debug/warp_uv_variance"] = np.var(metrics['uv_disp_norm']) if metrics['uv_disp_norm'] else 0.0
+
+        if step is not None:
+            wandb.log(log_dict, step=step)
+        else:
+            wandb.log(log_dict)
+    else:
+        logger.info("\n=== Warp Debug Averages ===")
+        for k, v in avg_metrics.items():
+            logger.info(f"  Predicted {k}: {v:.4f}")
+        if target_motion:
+            for k, v in avg_target.items():
+                logger.info(f"  Target {k}: {v:.4f}")
+            for k, v in avg_diff.items():
+                logger.info(f"  Diff {k}: {v:.4f}")
 from logger import logger,TorchDebugger
 import traceback
 from vasa_dataset import WorkerState, VASAIntegratedDataset
@@ -159,7 +280,6 @@ class LinearWarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
         self.num_warmup_steps = num_warmup_steps
         self.num_training_steps = num_training_steps
         self.min_lr = min_lr
-        self.expression_warmup_steps = 100  # Shorter warmup for expressions
 
         super().__init__(optimizer, last_epoch)
 
@@ -489,6 +609,7 @@ def collate_vasa_batch(batch: List[Dict]) -> Optional[Dict[str, torch.Tensor]]:
         all_windows = []
         for item in batch:
             if 'windows' in item:
+                # Old path: item has 'windows' key with list of windows
                 windows = item['windows']
                 # Add video path to window metadata
                 for window in windows:
@@ -496,9 +617,15 @@ def collate_vasa_batch(batch: List[Dict]) -> Optional[Dict[str, torch.Tensor]]:
                         window['metadata'] = {}
                     window['metadata']['video_path'] = item.get('video_path', '')
                 all_windows.extend(windows)
+            elif 'theta' in item:
+                # New path: item IS a window (from VASAIntegratedDataset.__getitem__)
+                # Treat the item itself as a window
+                if 'metadata' not in item:
+                    item['metadata'] = {}
+                all_windows.append(item)
 
         if not all_windows:
-            logger.error("No valid windows in batch")
+            logger.error("No valid windows in batch - neither 'windows' key nor direct window data found")
             return None
 
         # Get tensor keys from first window
@@ -608,14 +735,15 @@ class VASATrainer:
                 logger.info(f"Loading high-quality identity image from: {identity_path}")
                 
                 # Load and preprocess the identity image
+                # IMPORTANT: Volumetric avatar expects [0, 1] range, not [-1, 1]
                 img = Image.open(identity_path).convert('RGB')
                 transform = transforms.Compose([
                     transforms.Resize((512, 512)),
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+                    transforms.ToTensor(),  # Converts to [0, 1] range
+                    # DO NOT normalize to [-1, 1] - volumetric avatar expects [0, 1]
                 ])
-                self.identity_image = transform(img).unsqueeze(0)  # [1, C, H, W]
-                logger.info(f"Identity image loaded with shape: {self.identity_image.shape}")
+                self.identity_image = transform(img).unsqueeze(0)  # [1, C, H, W] in [0, 1] range
+                logger.info(f"Identity image loaded with shape: {self.identity_image.shape}, range: [0, 1]")
             else:
                 logger.warning(f"Identity image path not found: {identity_path}")
                 logger.warning("Falling back to using video frames for identity")
@@ -820,8 +948,21 @@ class VASATrainer:
             # Training phase
             train_stats = self.train_epoch()
             
-            # Validation phase
-            val_stats = self.validate() if self.val_loader else None
+            # Validation phase - check if we should validate this epoch
+            val_stats = None
+            # Check both logging.validation.enabled and top-level validation.enabled for backward compatibility
+            val_enabled = self.config.get('logging', {}).get('validation', {}).get('enabled',
+                          self.config.get('validation', {}).get('enabled', True))
+            if self.val_loader and val_enabled:
+                val_frequency = self.config.get('logging', {}).get('validation', {}).get('frequency',
+                               self.config.get('validation', {}).get('frequency', 5))
+                # Use total_epochs or num_epochs, with fallback to 100
+                total_epochs = self.config.get('total_epochs', self.config.get('num_epochs', 100))
+                if epoch % val_frequency == 0 or epoch == total_epochs - 1:
+                    logger.info(f"Running validation at epoch {epoch} (frequency: every {val_frequency} epochs)")
+                    val_stats = self.validate()
+                else:
+                    logger.info(f"Skipping validation at epoch {epoch} (next validation at epoch {((epoch // val_frequency) + 1) * val_frequency})")
             
             # Check if this is the best model based on training or validation loss
             if val_stats and isinstance(val_stats, dict):
@@ -844,10 +985,47 @@ class VASATrainer:
             self.cleanup_old_epoch_checkpoints(keep_last=3)
 
 
+    def get_current_stage(self, epoch: int = None) -> tuple:
+        """Get current training stage based on epoch.
+
+        Returns:
+            (stage_number, stage_name, active_losses)
+        """
+        if epoch is None:
+            epoch = self.current_epoch
+
+        if epoch >= 45:
+            return 6, "Lip Sync Refinement", ["lips: 2.0", "audio_lip: 10.0", "temporal: 0.01"]
+        elif epoch >= 35:
+            return 5, "Emotion", ["emotion: 0.0→0.8", "perceptual: 0.5"]
+        elif epoch >= 25:
+            return 4, "Head Pose", ["head_distance: 0.1→1.0", "identity: 0.3"]
+        elif epoch >= 15:
+            return 3, "Eye Gaze", ["gaze_direction: 0.1→1.5", "nonlip: 0.1"]
+        elif epoch >= 5:
+            return 2, "Blinking", ["blink: 0.1→2.0", "expression_l1: 1.5"]
+        else:
+            return 1, "Foundation", ["reconstruction: 2.0", "dynamics: 1.0", "pose: 5.0", "audio_lip: 10.0"]
+
     def train_epoch(self) -> Dict[str, float]:
         """Training loop with proper noise level sampling."""
         self.model.train()  # Put model in training mode
         self.train_metrics.reset()
+
+        # Log stage transition if needed
+        stage_num, stage_name, active_losses = self.get_current_stage()
+        prev_stage_num, _, _ = self.get_current_stage(self.current_epoch - 1) if self.current_epoch > 0 else (0, "", [])
+
+        if stage_num != prev_stage_num and self.config.wandb.enabled and self.accelerator.is_local_main_process:
+            logger.info(f"🎯 STAGE TRANSITION: Entering Stage {stage_num} - {stage_name}")
+            logger.info(f"   Active losses: {', '.join(active_losses)}")
+
+            if wandb.run:
+                wandb.log({
+                    "training/stage_transition": stage_num,
+                    "training/stage_transition_name": stage_name,
+                    "training/stage_transition_epoch": self.current_epoch
+                }, step=self.global_step)
         num_batches = len(self.train_loader)
         
         # Clear VA bridge cache at start of epoch
@@ -896,10 +1074,29 @@ class VASATrainer:
         
         # Initialize WandB metrics table for this epoch
         if self.config.wandb.enabled and self.accelerator.is_local_main_process:
+            # TRAINING STAGE PROGRESSION:
+            # Stage 1 (0-4):   Foundation - reconstruction, dynamics, pose, audio_lip (10.0)
+            # Stage 2 (5-14):  Blinking - blink (0.1→2.0), expression_l1 (1.5)
+            # Stage 3 (15-24): Eye Gaze - gaze_direction (0.1→1.5), nonlip (0.1)
+            # Stage 4 (25-34): Head Pose - head_distance (0.1→1.0), identity (0.3)
+            # Stage 5 (35-44): Emotion - emotion (0.0→0.8), perceptual (0.5)
+            # Stage 6 (45+):   Lip Sync - lips (2.0), audio_lip (10.0), temporal (0.01)
+
             self.epoch_table = wandb.Table(columns=[
-                "batch_idx", "window_idx", "total_loss", "reconstruction", 
-                "dynamics_loss", "expression_loss", "pose_loss", "perceptual",
-                "grad_norm", "l_consist", "l_cross_id"
+                "batch_idx", "window_idx", "total_loss",
+                # Core reconstruction losses
+                "reconstruction", "perceptual", "temporal",
+                # Motion prediction losses (matching H5 cache structure)
+                "uv_warp_loss", "theta_loss", "expression_loss",
+                "scale_loss", "rotation_loss", "translation_loss",
+                # Lip motion losses (critical for mouth movement)
+                "audio_lip_loss", "lips_loss", "expression_l1",
+                # Progressive stage losses
+                "blink_loss", "gaze_loss", "emotion_loss",
+                # Consistency losses
+                "l_consist", "l_cross_id", "velocity_smoothness",
+                # Training metrics
+                "grad_norm", "learning_rate", "stage"
             ])
 
         for batch_idx, batch in enumerate(self.train_loader):
@@ -939,10 +1136,15 @@ class VASATrainer:
                     with self.accelerator.accumulate(self.model):
                         try:
                             logger.debug(f"  Preparing motion data for window {window_idx}")
-                            # Extract target motion parameters
+                            # Extract target motion parameters and move to GPU immediately
                             motion_data = self.motion_handler.prepare_motion_data(window)
+
+                            # Move all motion_data tensors to GPU if not already there
+                            device = self.accelerator.device
+                            motion_data = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                                         for k, v in motion_data.items()}
+
                             B = motion_data['theta'].shape[0]
-                            device = motion_data['theta'].device
 
                             # In train_epoch:
                             if self.config.train.turn_off_noise:
@@ -966,19 +1168,20 @@ class VASATrainer:
                                 logger.error(f"audio_features not in window! Available keys: {list(window.keys())}")
                                 raise ValueError("audio_features missing from window data")
 
-                            control_signals = {
-                                'gaze': window.get('gaze'),
-                                'head_distance': window.get('head_distance'),
-                                'emotion': window.get('emotion'),
-                                'speed_bucket': window.get('speed_bucket'),
-                                'lips': window.get('lips'),
-                                'right_eye': window.get('right_eye'),
-                                'left_eye': window.get('left_eye'),
-                                'jaw': window.get('jaw'),
-                                'nose': window.get('nose'),
-                                'blink_state': window.get('blink_state'),
-                                'audio_features': window.get('audio_features')
-                            }
+                            # Extract control signals and move to GPU immediately
+                            control_signals = {}
+                            control_keys = ['gaze', 'head_distance', 'emotion', 'speed_bucket',
+                                          'lips', 'right_eye', 'left_eye', 'jaw', 'nose',
+                                          'blink_state', 'audio_features']
+                            for key in control_keys:
+                                value = window.get(key)
+                                if value is not None:
+                                    if isinstance(value, torch.Tensor):
+                                        control_signals[key] = value.to(device, non_blocking=True)
+                                    else:
+                                        control_signals[key] = value
+                                else:
+                                    control_signals[key] = None
 
                             # Debug: Verify audio_features is included
                             if 'audio_features' not in control_signals or control_signals['audio_features'] is None:
@@ -1148,6 +1351,19 @@ class VASATrainer:
                                 for k, v in metrics.items():
                                     batch_metrics[f"metric_{k}"].append(v)
 
+                            # Debug warps periodically to detect collapse
+                            if self.global_step % 100 == 0 and window_idx == 0:  # Log every 100 steps for first window
+                                try:
+                                    debug_warps(
+                                        predicted_motion=outputs,
+                                        target_motion=targets_with_lip,
+                                        num_frames=min(10, outputs['theta'].shape[1]),  # Analyze first 10 frames
+                                        log_to_wandb=True,
+                                        step=self.global_step
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"Failed to debug warps: {e}")
+
                             # Check for NaN/Inf in loss before backward pass
                             if not torch.isfinite(losses['total']):
                                 logger.error(f"NaN/Inf detected in loss at epoch {self.current_epoch}, batch {batch_idx}, window {window_idx}")
@@ -1251,18 +1467,53 @@ class VASATrainer:
                                     logger.info(f"DEBUG: l_consist value: {metrics.get('l_consist', 'NOT FOUND')}")
                                     logger.info(f"DEBUG: l_cross_id value: {metrics.get('l_cross_id', 'NOT FOUND')}")
                                 
+                                # Get current learning rate
+                                current_lr = self.optimizer.param_groups[0]['lr'] if self.optimizer.param_groups else 0.0001
+
+                                # Determine current training stage based on epoch
+                                current_stage = 1
+                                if self.current_epoch >= 45:
+                                    current_stage = 6  # Lip Sync refinement
+                                elif self.current_epoch >= 35:
+                                    current_stage = 5  # Emotion
+                                elif self.current_epoch >= 25:
+                                    current_stage = 4  # Head Pose
+                                elif self.current_epoch >= 15:
+                                    current_stage = 3  # Eye Gaze
+                                elif self.current_epoch >= 5:
+                                    current_stage = 2  # Blinking
+
                                 self.epoch_table.add_data(
                                     batch_idx,
                                     window_idx,
-                                    window_loss,  # Use the stored value
+                                    window_loss,  # total_loss
+                                    # Core reconstruction losses
                                     metrics.get('reconstruction', 0.0),
-                                    metrics.get('dynamics_loss', 0.0),
-                                    metrics.get('expression_loss', 0.0),
-                                    metrics.get('pose_loss', 0.0),
                                     metrics.get('perceptual', 0.0),
-                                    grad_norm_value,
+                                    metrics.get('temporal', 0.0),
+                                    # Motion prediction losses (matching H5 cache structure)
+                                    metrics.get('uv_warp_loss', 0.0),
+                                    metrics.get('theta_loss', metrics.get('pose_loss', 0.0)),  # theta is pose
+                                    metrics.get('expression_loss', 0.0),
+                                    metrics.get('scale_loss', 0.0),
+                                    metrics.get('rotation_loss', 0.0),
+                                    metrics.get('translation_loss', 0.0),
+                                    # Lip motion losses (critical for mouth movement)
+                                    metrics.get('audio_lip_correlation', metrics.get('audio_lip', 0.0)),  # Audio-lip sync
+                                    metrics.get('mouth_openness_direct', metrics.get('lips', 0.0)),  # Mouth openness
+                                    metrics.get('expression_loss', metrics.get('expression_l1', 0.0)),  # Expression L1/L2
+                                    # Progressive stage losses
+                                    metrics.get('blink_loss', metrics.get('blink', 0.0)),
+                                    metrics.get('gaze_loss', metrics.get('gaze_direction', 0.0)),
+                                    metrics.get('emotion_loss', metrics.get('emotion', 0.0)),
+                                    # Consistency losses
                                     metrics.get('l_consist', 0.0),
-                                    metrics.get('l_cross_id', 0.0)
+                                    metrics.get('l_cross_id', 0.0),
+                                    metrics.get('velocity_smoothness', 0.0),  # Combined velocity/smoothness
+                                    # Training metrics
+                                    grad_norm_value,
+                                    current_lr,
+                                    current_stage  # Add stage indicator
                                 )
                             
                             # Generate thumbnail with single frame only to save memory
@@ -1320,20 +1571,104 @@ class VASATrainer:
                                                 single_frame_generated = None
                                     
                                     # Pass single frames to thumbnail generator
+                                    # Include identity frame for 3-panel view
+                                    identity_for_thumbnail = None
+                                    if self.identity_image is not None:
+                                        identity_for_thumbnail = self.identity_image[0]  # Remove batch dimension
+                                    elif source_img is not None and source_img.numel() > 0:
+                                        identity_for_thumbnail = source_img[0] if source_img.dim() > 3 else source_img
+
+                                    # Get EMO frame from dataset if available
+                                    single_frame_emo = None
+                                    try:
+                                        # Check if window has pre-generated EMO frames
+                                        if 'emo_frames' in window and 'emo_keyframe_indices' in window:
+                                            emo_frames = window['emo_frames']  # Could be [B, num_keyframes, C, H, W] or [num_keyframes, C, H, W]
+                                            emo_indices = window['emo_keyframe_indices']
+                                            logger.info(f"✅ Found EMO frames in window, shape: {emo_frames.shape}, indices shape: {emo_indices.shape}")
+
+                                            # Handle batched EMO frames - extract for current window
+                                            if emo_frames.dim() == 5:  # [B, num_keyframes, C, H, W]
+                                                emo_frames = emo_frames[window_idx]  # [num_keyframes, C, H, W]
+                                            if emo_indices.dim() == 2:  # [B, num_keyframes]
+                                                emo_indices = emo_indices[window_idx]  # [num_keyframes]
+
+                                            # Find the closest EMO keyframe to our selected frame
+                                            closest_idx = 0
+                                            min_diff = abs(emo_indices[0].item() - frame_idx)
+                                            for i, emo_idx in enumerate(emo_indices):
+                                                diff = abs(emo_idx.item() - frame_idx)
+                                                if diff < min_diff:
+                                                    min_diff = diff
+                                                    closest_idx = i
+
+                                            single_frame_emo = emo_frames[closest_idx].detach().cpu()
+                                            logger.info(f"Using pre-generated EMO frame {closest_idx} (closest to frame {frame_idx})")
+                                        else:
+                                            logger.info(f"❌ No pre-generated EMO frames in window (has emo_frames: {'emo_frames' in window}, has indices: {'emo_keyframe_indices' in window})")
+
+                                        if single_frame_emo is None and hasattr(self, 'va_bridge') and self.va_bridge is not None and stored_outputs is not None:
+                                            # Fallback: generate EMO frame on-the-fly (slower)
+                                            logger.debug("No pre-generated EMO frames, generating on-the-fly...")
+                                            with torch.no_grad():
+                                                # Get motion for this specific frame
+                                                frame_motion = {}
+                                                if 'theta' in stored_outputs and stored_outputs['theta'] is not None:
+                                                    theta_tensor = stored_outputs['theta']
+                                                    if theta_tensor.dim() >= 2 and frame_idx < theta_tensor.shape[1]:
+                                                        frame_motion['theta'] = theta_tensor[:, frame_idx:frame_idx+1].to(self.device)
+
+                                                if 'expression_embed' in stored_outputs and stored_outputs['expression_embed'] is not None:
+                                                    expr_tensor = stored_outputs['expression_embed']
+                                                    if expr_tensor.dim() >= 2 and frame_idx < expr_tensor.shape[1]:
+                                                        frame_motion['expression_embed'] = expr_tensor[:, frame_idx:frame_idx+1].to(self.device)
+
+                                                # Only proceed if we have valid motion data
+                                                if frame_motion:
+                                                    # Prepare identity image
+                                                    emo_identity = identity_for_thumbnail.unsqueeze(0) if identity_for_thumbnail.dim() == 3 else identity_for_thumbnail
+                                                    emo_identity = emo_identity.to(self.device)
+
+                                                    # Generate EMO frame using volumetric avatar
+                                                    emo_output = self.va_bridge.generate_from_motion(
+                                                        identity_image=emo_identity,
+                                                        motion_params=frame_motion
+                                                    )
+
+                                                    if emo_output is not None and 'generated_frames' in emo_output:
+                                                        emo_frames = emo_output['generated_frames']
+                                                        if emo_frames.dim() >= 2:
+                                                            single_frame_emo = emo_frames[0, 0].detach().cpu() if emo_frames.shape[1] > 0 else emo_frames[0].detach().cpu()
+                                                            logger.debug(f"Generated EMO frame on-the-fly, shape: {single_frame_emo.shape}")
+                                    except Exception as e:
+                                        logger.debug(f"Could not get EMO frame for thumbnail: {e}")
+                                        # Continue without EMO frame
+
+                                    # Prepare EMO frames tensor if available
+                                    emo_frames_for_thumbnail = None
+                                    if single_frame_emo is not None:
+                                        # Add batch and time dimensions: [B=1, T=1, C, H, W]
+                                        emo_frames_for_thumbnail = single_frame_emo.unsqueeze(0).unsqueeze(0)
+                                        logger.info(f"✅ Prepared EMO frame for 4-panel thumbnail, shape: {emo_frames_for_thumbnail.shape}")
+                                    else:
+                                        logger.warning(f"⚠️  No EMO frame available - will use 3-panel thumbnail")
+
                                     thumbnail = generate_window_thumbnail(
-                                        generated_frames=single_frame_generated,  # Just one frame
-                                        target_frames=single_frame_target,        # Just one frame
-                                        motion_outputs=stored_outputs,            # For motion stats overlay (using stored)
-                                        size=(1024, 512)  # Wide format for side-by-side comparison
+                                        generated_frames=single_frame_generated,  # VASA generated frame
+                                        target_frames=single_frame_target,        # Ground truth frame
+                                        identity_frame=identity_for_thumbnail,    # Identity/source frame
+                                        emo_generated_frames=emo_frames_for_thumbnail,  # EMO generated frame (4-panel if available)
+                                        motion_outputs=stored_outputs,            # For motion stats overlay
+                                        size=(1024, 256) if emo_frames_for_thumbnail is not None else (768, 256)  # Wider if 4-panel
                                     )
 
                                     # Log to wandb with more descriptive caption
                                     if thumbnail is not None:
                                         if single_frame_generated is not None:
-                                            frame_info = f"Generated vs Target (frame {frame_idx} of T={stored_outputs['theta'].shape[1] if 'theta' in stored_outputs else 'unknown'})"
+                                            frame_info = f"Identity | Target | Predicted (frame {frame_idx} of T={stored_outputs['theta'].shape[1] if 'theta' in stored_outputs else 'unknown'})"
                                         else:
-                                            frame_info = f"Target frame only (frame {frame_idx}, generation failed)"
-                                        
+                                            frame_info = f"Identity | Target | (generation failed)"
+
                                         wandb.log({
                                             "visuals/training_thumbnail": wandb.Image(
                                                 thumbnail,
@@ -1341,9 +1676,189 @@ class VASATrainer:
                                             )
                                         }, step=self.global_step)
                                         logger.info(f"📸 Generated and logged training thumbnail for epoch {self.current_epoch}")
+
+                                        # Log warping field visualizations with target/predicted comparison
+                                        try:
+                                            if 'xy_warps' in motion_data and 'rigid_warps' in motion_data:
+                                                import matplotlib.pyplot as plt
+                                                import numpy as np
+
+                                                # Get first batch, middle frame, middle depth slice
+                                                b_idx = 0
+                                                t_idx = motion_data['xy_warps'].shape[1] // 2  # Middle frame
+                                                d_idx = 8  # Middle depth slice (16/2)
+
+                                                # Check if we have predictions to compare (stored_outputs contains model predictions)
+                                                has_predictions = stored_outputs and 'xy_warps' in stored_outputs
+
+                                                if has_predictions:
+                                                    # Create larger figure for target vs predicted comparison
+                                                    fig, axes = plt.subplots(4, 3, figsize=(15, 20))
+                                                else:
+                                                    # Original layout for target only
+                                                    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+
+                                                if has_predictions:
+                                                    # === TARGET WARPS (Row 0) ===
+                                                    # XY Warps (source non-rigid) - TARGET
+                                                    xy_warp_target = motion_data['xy_warps'][b_idx, t_idx, d_idx].cpu().numpy()
+                                                    xy_magnitude_target = np.linalg.norm(xy_warp_target, axis=-1)
+                                                    im1 = axes[0, 0].imshow(xy_magnitude_target, cmap='viridis')
+                                                    axes[0, 0].set_title(f'TARGET XY Warp (frame {t_idx}, depth {d_idx})')
+                                                    axes[0, 0].axis('off')
+                                                    plt.colorbar(im1, ax=axes[0, 0])
+
+                                                    # Rigid Warps - TARGET
+                                                    rigid_warp_target = motion_data['rigid_warps'][b_idx, t_idx, d_idx].cpu().numpy()
+                                                    rigid_magnitude_target = np.linalg.norm(rigid_warp_target, axis=-1)
+                                                    im2 = axes[0, 1].imshow(rigid_magnitude_target, cmap='plasma')
+                                                    axes[0, 1].set_title(f'TARGET Rigid Warp')
+                                                    axes[0, 1].axis('off')
+                                                    plt.colorbar(im2, ax=axes[0, 1])
+
+                                                    # UV Warps - TARGET
+                                                    uv_warp_target = motion_data['uv_warps'][b_idx, t_idx, d_idx].cpu().numpy()
+                                                    uv_magnitude_target = np.linalg.norm(uv_warp_target, axis=-1)
+                                                    im3 = axes[0, 2].imshow(uv_magnitude_target, cmap='coolwarm')
+                                                    axes[0, 2].set_title(f'TARGET UV Warp')
+                                                    axes[0, 2].axis('off')
+                                                    plt.colorbar(im3, ax=axes[0, 2])
+
+                                                    # === PREDICTED WARPS (Row 1) ===
+                                                    # XY Warps - PREDICTED
+                                                    xy_warp_pred = stored_outputs['xy_warps'][b_idx, t_idx, d_idx].numpy()
+                                                    xy_magnitude_pred = np.linalg.norm(xy_warp_pred, axis=-1)
+                                                    im4 = axes[1, 0].imshow(xy_magnitude_pred, cmap='viridis')
+                                                    axes[1, 0].set_title(f'PREDICTED XY Warp')
+                                                    axes[1, 0].axis('off')
+                                                    plt.colorbar(im4, ax=axes[1, 0])
+
+                                                    # Rigid Warps - PREDICTED
+                                                    rigid_warp_pred = stored_outputs['rigid_warps'][b_idx, t_idx, d_idx].numpy()
+                                                    rigid_magnitude_pred = np.linalg.norm(rigid_warp_pred, axis=-1)
+                                                    im5 = axes[1, 1].imshow(rigid_magnitude_pred, cmap='plasma')
+                                                    axes[1, 1].set_title(f'PREDICTED Rigid Warp')
+                                                    axes[1, 1].axis('off')
+                                                    plt.colorbar(im5, ax=axes[1, 1])
+
+                                                    # UV Warps - PREDICTED
+                                                    uv_warp_pred = stored_outputs['uv_warps'][b_idx, t_idx, d_idx].numpy()
+                                                    uv_magnitude_pred = np.linalg.norm(uv_warp_pred, axis=-1)
+                                                    im6 = axes[1, 2].imshow(uv_magnitude_pred, cmap='coolwarm')
+                                                    axes[1, 2].set_title(f'PREDICTED UV Warp')
+                                                    axes[1, 2].axis('off')
+                                                    plt.colorbar(im6, ax=axes[1, 2])
+
+                                                    # === DIFFERENCE MAPS (Row 2) ===
+                                                    # XY Warp Difference
+                                                    xy_diff = np.abs(xy_magnitude_target - xy_magnitude_pred)
+                                                    im7 = axes[2, 0].imshow(xy_diff, cmap='hot')
+                                                    axes[2, 0].set_title(f'XY Warp Error (MAE: {xy_diff.mean():.4f})')
+                                                    axes[2, 0].axis('off')
+                                                    plt.colorbar(im7, ax=axes[2, 0])
+
+                                                    # Rigid Warp Difference
+                                                    rigid_diff = np.abs(rigid_magnitude_target - rigid_magnitude_pred)
+                                                    im8 = axes[2, 1].imshow(rigid_diff, cmap='hot')
+                                                    axes[2, 1].set_title(f'Rigid Warp Error (MAE: {rigid_diff.mean():.4f})')
+                                                    axes[2, 1].axis('off')
+                                                    plt.colorbar(im8, ax=axes[2, 1])
+
+                                                    # UV Warp Difference
+                                                    uv_diff = np.abs(uv_magnitude_target - uv_magnitude_pred)
+                                                    im9 = axes[2, 2].imshow(uv_diff, cmap='hot')
+                                                    axes[2, 2].set_title(f'UV Warp Error (MAE: {uv_diff.mean():.4f})')
+                                                    axes[2, 2].axis('off')
+                                                    plt.colorbar(im9, ax=axes[2, 2])
+
+                                                    # === FLOW VISUALIZATIONS (Row 3) ===
+                                                    flow_row = 3
+                                                else:
+                                                    # Original single visualization for targets only
+                                                    xy_warp_target = motion_data['xy_warps'][b_idx, t_idx, d_idx].cpu().numpy()
+                                                    xy_magnitude_target = np.linalg.norm(xy_warp_target, axis=-1)
+                                                    im1 = axes[0, 0].imshow(xy_magnitude_target, cmap='viridis')
+                                                    axes[0, 0].set_title(f'XY Warp Magnitude (frame {t_idx}, depth {d_idx})')
+                                                    axes[0, 0].axis('off')
+                                                    plt.colorbar(im1, ax=axes[0, 0])
+
+                                                    rigid_warp_target = motion_data['rigid_warps'][b_idx, t_idx, d_idx].cpu().numpy()
+                                                    rigid_magnitude_target = np.linalg.norm(rigid_warp_target, axis=-1)
+                                                    im2 = axes[0, 1].imshow(rigid_magnitude_target, cmap='plasma')
+                                                    axes[0, 1].set_title(f'Rigid Warp Magnitude')
+                                                    axes[0, 1].axis('off')
+                                                    plt.colorbar(im2, ax=axes[0, 1])
+
+                                                    uv_warp_target = motion_data['uv_warps'][b_idx, t_idx, d_idx].cpu().numpy()
+                                                    uv_magnitude_target = np.linalg.norm(uv_warp_target, axis=-1)
+                                                    im3 = axes[0, 2].imshow(uv_magnitude_target, cmap='coolwarm')
+                                                    axes[0, 2].set_title(f'UV Warp Magnitude')
+                                                    axes[0, 2].axis('off')
+                                                    plt.colorbar(im3, ax=axes[0, 2])
+
+                                                    flow_row = 1
+
+                                                # Warp flow visualization (X and Y components)
+                                                axes[flow_row, 0].quiver(
+                                                    np.arange(0, 64, 4), np.arange(0, 64, 4),
+                                                    xy_warp_target[::4, ::4, 0], xy_warp_target[::4, ::4, 1],
+                                                    angles='xy', scale_units='xy', scale=0.5, color='blue'
+                                                )
+                                                axes[flow_row, 0].set_title('XY Warp Flow (Target)')
+                                                axes[flow_row, 0].set_xlim(0, 64)
+                                                axes[flow_row, 0].set_ylim(64, 0)
+                                                axes[flow_row, 0].set_aspect('equal')
+
+                                                # Source theta warp visualization
+                                                source_theta = motion_data['source_theta_warp'][b_idx, t_idx].cpu().numpy()  # [3, 4]
+                                                axes[flow_row, 1].imshow(source_theta, cmap='RdBu', aspect='auto')
+                                                axes[flow_row, 1].set_title(f'Source Theta Warp (frame {t_idx})')
+                                                axes[flow_row, 1].set_xlabel('Coefficients')
+                                                axes[flow_row, 1].set_ylabel('Dimensions')
+                                                for i in range(3):
+                                                    for j in range(4):
+                                                        axes[flow_row, 1].text(j, i, f'{source_theta[i, j]:.2f}',
+                                                                       ha='center', va='center', color='black')
+
+                                                # Temporal warp variation (std across time) or predicted flow if available
+                                                if has_predictions:
+                                                    # Show predicted flow visualization
+                                                    axes[flow_row, 2].quiver(
+                                                        np.arange(0, 64, 4), np.arange(0, 64, 4),
+                                                        xy_warp_pred[::4, ::4, 0], xy_warp_pred[::4, ::4, 1],
+                                                        angles='xy', scale_units='xy', scale=0.5, color='red'
+                                                    )
+                                                    axes[flow_row, 2].set_title('XY Warp Flow (Predicted)')
+                                                    axes[flow_row, 2].set_xlim(0, 64)
+                                                    axes[flow_row, 2].set_ylim(64, 0)
+                                                    axes[flow_row, 2].set_aspect('equal')
+                                                else:
+                                                    # Original temporal variation visualization
+                                                    xy_temporal_std = torch.std(motion_data['xy_warps'][b_idx], dim=0).mean(dim=0).mean(dim=-1).cpu().numpy()
+                                                    axes[flow_row, 2].imshow(xy_temporal_std, cmap='hot')
+                                                    axes[flow_row, 2].set_title('XY Warp Temporal Variation (std)')
+                                                    axes[flow_row, 2].axis('off')
+
+                                                # Add overall title
+                                                if has_predictions:
+                                                    fig.suptitle('Warping Fields: Target vs Predicted Comparison', fontsize=16, y=1.02)
+                                                else:
+                                                    fig.suptitle('Warping Fields: Target Only', fontsize=16, y=1.02)
+
+                                                plt.tight_layout()
+                                                wandb.log({"visuals/warping_fields": wandb.Image(fig)}, step=self.global_step)
+                                                plt.close(fig)
+
+                                                if has_predictions:
+                                                    logger.info("📊 Logged warping field comparison (target vs predicted)")
+                                                else:
+                                                    logger.info("📊 Logged warping field visualizations (target only)")
+
+                                        except Exception as e:
+                                            logger.warning(f"Could not visualize warping fields: {e}")
                                     else:
                                         logger.warning("Thumbnail generation returned None")
-                                    
+
                                 except Exception as e:
                                     logger.warning(f"Could not generate thumbnail: {e}")
 
@@ -1516,15 +2031,44 @@ class VASATrainer:
         # Store for TDD progressive loss
         self.last_epoch_metrics = epoch_averages
         
-        # Log epoch metrics
+        # Log epoch metrics with stage information
         if self.config.wandb.enabled and self.accelerator.is_local_main_process:
-            wandb.log(
-                {f"epoch/{k}": v for k, v in epoch_averages.items()},
-                step=self.global_step
-            )
+            # Determine current training stage
+            current_stage = 1
+            stage_name = "Foundation"
+            if self.current_epoch >= 45:
+                current_stage = 6
+                stage_name = "Lip Sync Refinement"
+            elif self.current_epoch >= 35:
+                current_stage = 5
+                stage_name = "Emotion"
+            elif self.current_epoch >= 25:
+                current_stage = 4
+                stage_name = "Head Pose"
+            elif self.current_epoch >= 15:
+                current_stage = 3
+                stage_name = "Eye Gaze"
+            elif self.current_epoch >= 5:
+                current_stage = 2
+                stage_name = "Blinking"
+
+            # Log metrics with stage info
+            log_dict = {f"epoch/{k}": v for k, v in epoch_averages.items()}
+            log_dict["training/stage"] = current_stage
+            log_dict["training/stage_name"] = stage_name
+
+            # Log specific lip motion metrics with correct keys
+            log_dict["lip_motion/audio_lip_correlation"] = epoch_averages.get('audio_lip_correlation', 0.0)
+            log_dict["lip_motion/mouth_openness"] = epoch_averages.get('mouth_openness_direct', 0.0)
+            log_dict["lip_motion/expression_loss"] = epoch_averages.get('expression_loss', 0.0)
+
+            wandb.log(log_dict, step=self.global_step)
             
             # Log the metrics table for this epoch
             wandb.log({"epoch_metrics_table": self.epoch_table}, step=self.global_step)
+
+            # Also add to wandb summary so it persists
+            wandb.run.summary["epoch_metrics_table"] = self.epoch_table
             
             # Add alert if loss is too high (for overfit detection)
             if epoch_averages.get('total', 0) > 50.0:
@@ -1736,7 +2280,7 @@ class VASATrainer:
         
         # Add component losses
         for k, v in metrics.items():
-            if k.startswith('control_') or k.startswith('metric_'):
+            if k.startswith('control_') or k.startswith('metric_') or 'warp' in k:
                 step_metrics[f'train/{k}'] = v
                 
         # Add gradient statistics from manual tracking
@@ -1948,31 +2492,90 @@ class VASATrainer:
         """Run validation with proper model mode handling."""
         if not self.val_loader:
             return {}
-            
+
+        # Check if validation is enabled
+        val_config = self.config.get('validation', {})
+        if not val_config.get('enabled', True):
+            logger.info("Validation is disabled in config")
+            return {}
+
         # Put model in eval mode
         self.model.eval()
         self.val_metrics.reset()
+
+        # Get validation settings
+        max_batches = val_config.get('max_batches', None)
+        skip_expensive = val_config.get('skip_expensive_metrics', False)
+        allowed_metrics = val_config.get('metrics', ['reconstruction_loss'])
+
+        logger.info(f"Validation settings: max_batches={max_batches}, skip_expensive={skip_expensive}, metrics={allowed_metrics}")
         
         cfg_scales = self._get_cfg_scales()  # Get current CFG scales
 
         with torch.no_grad():
-            for batch in tqdm(
-                self.val_loader,
+            # Limit number of batches if configured
+            val_iterator = enumerate(self.val_loader)
+            if max_batches:
+                val_iterator = itertools.islice(val_iterator, max_batches)
+                total_batches = min(max_batches, len(self.val_loader))
+            else:
+                total_batches = len(self.val_loader)
+
+            for batch_idx, batch in tqdm(
+                val_iterator,
+                total=total_batches,
                 disable=not self.accelerator.is_local_main_process,
-                desc="Validation"
+                desc=f"Validation (max {max_batches} batches)" if max_batches else "Validation"
             ):
                 try:
                     if batch is None:
                         continue
 
-                    # Process batch into windows
-                    windows = self.motion_handler.process_batch(
-                        batch, 
-                        current_window_size=self.config.motion.window_size
-                    )
-                    if not windows:
-                        logger.warning("No valid windows in validation batch")
-                        continue
+                    # Debug: Log batch keys to understand structure
+                    if batch_idx == 0:  # Only log once
+                        logger.info(f"Validation batch keys: {list(batch.keys())}")
+                        for key, value in batch.items():
+                            if isinstance(value, torch.Tensor):
+                                logger.info(f"  {key}: shape {value.shape}")
+                            elif isinstance(value, list):
+                                logger.info(f"  {key}: list of length {len(value)}")
+
+                    # For validation, the batch already contains windows from collate_vasa_batch
+                    # We need to restructure it for motion_handler or bypass it
+                    if 'theta' in batch and isinstance(batch['theta'], torch.Tensor):
+                        # Batch already has motion data stacked, create window-like structure
+                        B = batch['theta'].shape[0] if 'theta' in batch else 1
+                        windows = []
+                        for b in range(B):
+                            window = {}
+                            for key, value in batch.items():
+                                if isinstance(value, torch.Tensor) and value.shape[0] >= b + 1:
+                                    # Remove the extra dimension if present from stacking
+                                    if value.ndim > 2 and value.shape[1] == 1:
+                                        window[key] = value[b, 0]  # Remove batch and squeeze singleton
+                                    else:
+                                        window[key] = value[b:b+1]  # Keep batch dimension
+                                elif key == 'metadata' and isinstance(value, list) and len(value) > b:
+                                    window['metadata'] = value[b]
+                            windows.append(window)
+
+                        if not windows:
+                            logger.warning("No valid windows extracted from validation batch")
+                            continue
+                    else:
+                        # Try to process normally if batch has expected structure
+                        if 'frames' not in batch:
+                            # Skip if no frames to process
+                            logger.warning("No 'frames' key in validation batch, skipping")
+                            continue
+
+                        windows = self.motion_handler.process_batch(
+                            batch,
+                            current_window_size=self.config.motion.window_size
+                        )
+                        if not windows:
+                            logger.warning("No valid windows in validation batch")
+                            continue
 
                     # Process each window independently
                     for window in windows:
@@ -1980,7 +2583,7 @@ class VASATrainer:
                             # Generate sequence with CFG
                             generated_sequence = self.model.forward(
                                 motion_data={
-                                    'theta': window['theta'],  
+                                    'theta': window['theta'],
                                     'scale': window['scale'],
                                     'rotation': window['rotation'],
                                     'translation': window['translation'],
@@ -2005,37 +2608,40 @@ class VASATrainer:
 
                             # Compute metrics for this window
                             metrics = {}
-                            
-                            # Reconstruction metrics
-                            metrics.update(self.loss_module._compute_reconstruction_losses(
-                                generated_sequence, window, None
-                            ))
-                            
-                            # Control metrics if applicable
-                            if self.current_epoch >= self.config.train.control_start_epoch:
-                                control_metrics = self.loss_module._compute_control_losses(
-                                    generated_sequence, window, self.current_epoch
-                                )
-                                metrics.update(control_metrics)
 
-                            # Generate frames for sync evaluation if needed
-                            if self.config.loss.use_sync_loss:
-                                try:
-                                    generated_frames = self._generate_synced_frames(
-                                        window['frames'][:, 0],  # Use first frame as identity
-                                        generated_sequence
+                            # Always compute reconstruction metrics (they're fast)
+                            if 'reconstruction_loss' in allowed_metrics or not allowed_metrics:
+                                metrics.update(self.loss_module._compute_reconstruction_losses(
+                                    generated_sequence, window, None
+                                ))
+
+                            # Control metrics if applicable and not skipping expensive
+                            if not skip_expensive and self.current_epoch >= self.config.train.control_start_epoch:
+                                if 'control_loss' in allowed_metrics or 'motion_naturalness' in allowed_metrics:
+                                    control_metrics = self.loss_module._compute_control_losses(
+                                        generated_sequence, window, self.current_epoch
                                     )
-                                    # Evaluate sync quality
-                                    sync_metrics = self.loss_module.evaluate_sync_quality(
-                                        generated_frames=generated_frames,
-                                        audio_features=window['audio_features'],
-                                        audio_mfcc=window.get('audio_mfcc')
-                                    )
-                                    metrics.update(sync_metrics)
-                                    
-                                except Exception as e:
-                                    logger.error(f"Error generating frames: {str(e)}")
-                                    logger.error(traceback.format_exc())
+                                    metrics.update(control_metrics)
+
+                            # Generate frames for sync evaluation if needed (expensive!)
+                            if not skip_expensive and self.config.loss.use_sync_loss:
+                                if 'lip_sync' in allowed_metrics or 'id_similarity' in allowed_metrics:
+                                    try:
+                                        generated_frames = self._generate_synced_frames(
+                                            window['frames'][:, 0],  # Use first frame as identity
+                                            generated_sequence
+                                        )
+                                        # Evaluate sync quality
+                                        sync_metrics = self.loss_module.evaluate_sync_quality(
+                                            generated_frames=generated_frames,
+                                            audio_features=window['audio_features'],
+                                            audio_mfcc=window.get('audio_mfcc')
+                                        )
+                                        metrics.update(sync_metrics)
+
+                                    except Exception as e:
+                                        logger.error(f"Error generating frames: {str(e)}")
+                                        logger.error(traceback.format_exc())
 
                             # Update validation metrics
                             self.val_metrics.update(metrics)
@@ -2230,16 +2836,16 @@ class VASATrainer:
             unwrapped_model = self.accelerator.unwrap_model(self.model)
             state_dict = unwrapped_model.state_dict()
 
-            # Filter out volumetric_avatar parameters
-            # filtered_state_dict = {
-            #     k: v for k, v in state_dict.items()
-            #     if not k.startswith('volumetric_avatar.')
-            # }
+            # Filter out volumetric_avatar parameters (it's frozen and pre-trained)
+            filtered_state_dict = {
+                k: v for k, v in state_dict.items()
+                if not k.startswith('volumetric_avatar.')
+            }
 
             checkpoint = {
                 'epoch': self.current_epoch,
                 'global_step': self.global_step,
-                'model_state_dict': state_dict, # filtered_state_dict to exclude volumetric_avatar,
+                'model_state_dict': filtered_state_dict,  # Exclude volumetric_avatar
                 'optimizer_state_dict': self.optimizer.state_dict(),
                 'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
                 'loss': self.best_val_loss,
@@ -2255,12 +2861,14 @@ class VASATrainer:
             torch.save(checkpoint, save_path)
             logger.info(f"Saved checkpoint to {save_path}")
 
-            # Log saved parameters
+            # Log saved parameters (count from filtered state dict)
             total_params = sum(p.numel() for p in unwrapped_model.parameters())
-            saved_params = sum(v.numel() for v in state_dict.values())
-            logger.info(f"Total parameters: {total_params:,}")
+            saved_params = sum(v.numel() for v in filtered_state_dict.values())
+            excluded_params = sum(v.numel() for k, v in state_dict.items() if k.startswith('volumetric_avatar.'))
+
+            logger.info(f"Total model parameters: {total_params:,}")
             logger.info(f"Saved parameters: {saved_params:,}")
-            logger.info(f"Excluded parameters: {total_params - saved_params:,}")
+            logger.info(f"Excluded volumetric_avatar parameters: {excluded_params:,}")
 
         except Exception as e:
             logger.error(f"Error saving checkpoint: {str(e)}")
@@ -2268,22 +2876,28 @@ class VASATrainer:
     
     def save_epoch_checkpoint(self, save_path: Path):
         """Save checkpoint for current epoch (called every epoch).
-        
+
         Args:
             save_path: Path to save the checkpoint
         """
         if self.output_dir is None:
             return
-            
+
         try:
             # Get unwrapped model state dict
             unwrapped_model = self.accelerator.unwrap_model(self.model)
             state_dict = unwrapped_model.state_dict()
-            
+
+            # Filter out volumetric_avatar parameters (consistent with save_checkpoint)
+            filtered_state_dict = {
+                k: v for k, v in state_dict.items()
+                if not k.startswith('volumetric_avatar.')
+            }
+
             checkpoint = {
                 'epoch': self.current_epoch,
                 'global_step': self.global_step,
-                'model_state_dict': state_dict,
+                'model_state_dict': filtered_state_dict,
                 'optimizer_state_dict': self.optimizer.state_dict(),
                 'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
                 'loss': self.best_val_loss,
@@ -2328,14 +2942,14 @@ class VASATrainer:
             logger.info(f"Loading checkpoint from {checkpoint_path}")
             # PyTorch 2.6 requires weights_only=False for checkpoints with configs
             checkpoint = torch.load(checkpoint_path, map_location=self.accelerator.device, weights_only=False)
-            
+
             # Get original diffusion schedule configuration
             old_steps = checkpoint['config'].diffusion.num_steps
             new_steps = self.config.diffusion.num_steps
-            
+
             if old_steps != new_steps:
                 logger.info(f"Adjusting diffusion schedule from {old_steps} to {new_steps} steps")
-                
+
                 # Remove diffusion scheduler buffers - they'll be reinitialized
                 skip_keys = [
                     'scheduler.alpha_cumprod',
@@ -2349,15 +2963,15 @@ class VASATrainer:
                     'scheduler.sqrt_recipm1_alphas_cumprod',
                     'scheduler.posterior_variance'
                 ]
-                
+
                 filtered_state_dict = {
                     k: v for k, v in checkpoint['model_state_dict'].items()
                     if not any(skip_key in k for skip_key in skip_keys)
                 }
-                
+
                 # Load filtered state dict
                 self.model.load_state_dict(filtered_state_dict, strict=False)
-                
+
                 # Reinitialize scheduler with new steps
                 from diffusers import DDIMScheduler
                 self.model.scheduler = DDIMScheduler(
@@ -2367,16 +2981,47 @@ class VASATrainer:
                     clip_sample=True
                 )
                 self.model.scheduler.set_timesteps(50)  # Default inference steps
-                
+
             else:
                 # Load model state dict directly if steps match
                 self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
 
-            # Load optimizer and scheduler state
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            # Restore volumetric_avatar from original pre-trained model
+            # (since we exclude it from checkpoints to save space)
+            if hasattr(self.model, 'volumetric_avatar'):
+                logger.info("Restoring volumetric_avatar from pre-trained model...")
+                va_model_path = self.config.paths.volumetric_model
+                va_state_dict = torch.load(va_model_path, map_location=self.accelerator.device)
+
+                # Load volumetric avatar state
+                missing_keys, unexpected_keys = self.model.volumetric_avatar.load_state_dict(va_state_dict, strict=False)
+                if missing_keys:
+                    logger.warning(f"Missing {len(missing_keys)} keys when loading volumetric_avatar")
+                if unexpected_keys:
+                    logger.debug(f"Found {len(unexpected_keys)} unexpected keys (likely discriminator weights)")
+                logger.info("Volumetric avatar restored successfully")
+
+            # Load optimizer and scheduler state with error handling
+            try:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                logger.info("Optimizer state loaded successfully")
+            except ValueError as e:
+                if "doesn't match the size of optimizer's group" in str(e):
+                    logger.warning("⚠️ Optimizer state mismatch - likely due to model architecture changes")
+                    logger.warning("  Starting with fresh optimizer state (learning will continue from scratch)")
+                    logger.info("  Model weights are still loaded, only optimizer momentum/history is reset")
+                    # Don't load optimizer state, start fresh
+                else:
+                    raise e
+
             if 'scheduler_state_dict' in checkpoint and self.scheduler:
-                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-                
+                try:
+                    self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                    logger.info("Scheduler state loaded successfully")
+                except Exception as e:
+                    logger.warning(f"Could not load scheduler state: {e}")
+                    logger.warning("Starting with fresh scheduler")
+
             self.current_epoch = checkpoint.get('epoch', -1) + 1
             self.global_step = checkpoint.get('global_step', 0)
             self.best_val_loss = checkpoint.get('loss', float('inf'))
@@ -2739,6 +3384,13 @@ if __name__ == "__main__":
     gc.collect()
     torch.cuda.empty_cache()
 
+    # Create VA bridge for EMO generation if enabled
+    va_bridge_for_dataset = None
+    if config.dataset.get('generate_emo_frames', False):
+        logger.info("Creating VA bridge for EMO frame generation in dataset...")
+        # VASAVolumetricAvatarBridge just needs the loaded volumetric_avatar model
+        va_bridge_for_dataset = VASAVolumetricAvatarBridge(volumetric_avatar)
+
     # Create dataset with volumetric model
     use_single_bucket = config.dataset.get('use_single_bucket', False)  # Get from config
     full_dataset = VASAIntegratedDataset(
@@ -2755,7 +3407,12 @@ if __name__ == "__main__":
         preextract_audio=True,
         random_seed=42,
         cache_dir=config.paths.get('cache_dir', 'cache'),  # Use config cache dir
-        use_single_bucket=use_single_bucket  # Pass single-bucket flag
+        use_single_bucket=use_single_bucket,  # Pass single-bucket flag
+        # EMO generation parameters
+        generate_emo_frames=config.dataset.get('generate_emo_frames', False),
+        emo_identity_path=config.dataset.get('emo_identity_path', 'nemo/data/IMG_1.png'),
+        emo_keyframes_per_window=config.dataset.get('emo_keyframes_per_window', 5),
+        va_bridge=va_bridge_for_dataset
     )
 
     # Check if single-bucket cache exists
@@ -2764,7 +3421,7 @@ if __name__ == "__main__":
             logger.info("Single-bucket cache not found. Consider running preprocess_single_bucket.py first.")
         else:
             cache_info = full_dataset.cache.get_cache_info()
-            logger.info(f"Using single-bucket cache: {cache_info['num_windows']} windows, {cache_info['file_size_mb']:.1f} MB")
+            logger.info(f"Using single-bucket cache: {cache_info} windows, {cache_info['file_size_mb']:.1f} MB")
 
     # Print dataset stats
     logger.info(f"Dataset created:")
@@ -2802,20 +3459,17 @@ if __name__ == "__main__":
         train_dataset,
         batch_sampler=train_sampler,
         collate_fn=collate_fn,
-        num_workers=0,  # Set to 0 to avoid CUDA multiprocessing issues
-        # pin_memory=True
+        num_workers=0,  # Set to 0 to avoid CUDA multiprocessing issues (like in train_overfit.py)
+        pin_memory=False  # Disabled because tensors are already on GPU
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=1,  # Use batch size 1 for testing
         shuffle=False,
-        num_workers=1,  # Single worker for validation
-        # pin_memory=True,  # Pin memory for faster GPU transfer
-        collate_fn=collate_vasa_batch,
-        multiprocessing_context='spawn',
-        persistent_workers=False,
-        worker_init_fn=worker_init_fn  # Ensure worker consistency
+        num_workers=0,  # Set to 0 to avoid CUDA multiprocessing issues
+        pin_memory=False,  # Disabled because tensors are already on GPU
+        collate_fn=collate_vasa_batch
     )
 
 

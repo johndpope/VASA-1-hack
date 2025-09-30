@@ -10,6 +10,485 @@ import matplotlib.patches as patches
 from typing import Dict, Optional, Tuple
 import io
 
+
+
+
+
+import torch
+import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
+
+def debug_warps(
+    predicted_motion: dict,
+    target_motion: dict = None,
+    num_frames: int = 50,
+    log_to_wandb: bool = False
+):
+    """
+    Debug warps over a sequence of frames by printing norms of rigid (theta rotation/translation)
+    and non-rigid (UV displacements) warps. Compares to target if provided to check variation matching.
+    
+    Args:
+        predicted_motion: Dict from generate_sequence, with keys like 'theta' [B, T, 3, 4],
+                          'uv_warp' [B, T, D, S, S, 3] if available, etc.
+        target_motion: Optional target/ground truth motion dict for comparison.
+        num_frames: Number of frames to analyze (up to T).
+        log_to_wandb: If True, log metrics to wandb instead of printing.
+    
+    Prints or logs per-frame norms and averages, with differences if target provided.
+    """
+    # Extract dimensions
+    B = 1  # Assume batch size 1
+    T = min(num_frames, next(iter(predicted_motion.values())).shape[1] if predicted_motion else 0)
+    if T == 0:
+        logger.warning("No frames in predicted_motion")
+        return
+    
+    # Prepare metrics dictionaries
+    metrics = {
+        'rot_norm': [],
+        'trans_norm': [],
+        'uv_disp_norm': []
+    }
+    if target_motion:
+        target_metrics = {k: [] for k in metrics}
+        diff_metrics = {k: [] for k in metrics}
+    
+    for t in range(T):
+        frame_metrics = {}
+        
+        # Rigid: theta [B, T, 3, 4] -> rotation [3,3], translation [3]
+        if 'theta' in predicted_motion:
+            theta = predicted_motion['theta'][0, t]  # [3,4]
+            R = theta[:3, :3]  # Rotation matrix
+            t = theta[:3, 3]   # Translation vector
+            
+            # Rotation deviation norm: ||R - I||_F
+            I = torch.eye(3, device=theta.device)
+            rot_norm = torch.norm(R - I, p='fro').item()
+            trans_norm = torch.norm(t, p=2).item()
+            
+            frame_metrics['rot_norm'] = rot_norm
+            frame_metrics['trans_norm'] = trans_norm
+        else:
+            frame_metrics['rot_norm'] = 0.0
+            frame_metrics['trans_norm'] = 0.0
+        
+        # Non-rigid: uv_warp [B, T, D, S, S, 3] displacements
+        if 'uv_warp' in predicted_motion:
+            uv = predicted_motion['uv_warp'][0, t]  # [D, S, S, 3]
+            # Mean L2 norm per voxel
+            uv_disp_norm = torch.mean(torch.norm(uv.view(-1, 3), p=2, dim=1)).item()
+            frame_metrics['uv_disp_norm'] = uv_disp_norm
+        else:
+            frame_metrics['uv_disp_norm'] = 0.0
+        
+        # Append to lists
+        for k, v in frame_metrics.items():
+            metrics[k].append(v)
+        
+        # Handle target if provided
+        if target_motion:
+            target_frame = {}
+            if 'theta' in target_motion:
+                theta_tgt = target_motion['theta'][0, t]
+                R_tgt = theta_tgt[:3, :3]
+                t_tgt = theta_tgt[:3, 3]
+                rot_norm_tgt = torch.norm(R_tgt - I, p='fro').item()
+                trans_norm_tgt = torch.norm(t_tgt, p=2).item()
+                target_frame['rot_norm'] = rot_norm_tgt
+                target_frame['trans_norm'] = trans_norm_tgt
+                
+                # Differences
+                diff_metrics['rot_norm'].append(abs(rot_norm - rot_norm_tgt))
+                diff_metrics['trans_norm'].append(abs(trans_norm - trans_norm_tgt))
+            
+            if 'uv_warp' in target_motion:
+                uv_tgt = target_motion['uv_warp'][0, t]
+                uv_disp_norm_tgt = torch.mean(torch.norm(uv_tgt.view(-1, 3), p=2, dim=1)).item()
+                target_frame['uv_disp_norm'] = uv_disp_norm_tgt
+                diff_metrics['uv_disp_norm'].append(abs(uv_disp_norm - uv_disp_norm_tgt))
+            
+            for k, v in target_frame.items():
+                target_metrics[k].append(v)
+        
+        # Per-frame print/log
+        if not log_to_wandb:
+            print(f"Frame {t}:")
+            for k, v in frame_metrics.items():
+                print(f"  Predicted {k}: {v:.4f}")
+            if target_motion:
+                for k, v in target_frame.items():
+                    print(f"  Target {k}: {v:.4f}")
+                for k in diff_metrics:
+                    if diff_metrics[k]:
+                        print(f"  Diff {k}: {diff_metrics[k][-1]:.4f}")
+    
+    # Compute and print/log averages
+    avg_metrics = {k: np.mean(v) if v else 0.0 for k, v in metrics.items()}
+    if target_motion:
+        avg_target = {k: np.mean(v) if v else 0.0 for k, v in target_metrics.items()}
+        avg_diff = {k: np.mean(v) if v else 0.0 for k, v in diff_metrics.items()}
+    
+    if log_to_wandb:
+        import wandb
+        log_dict = {f"warp/{k}_avg": v for k, v in avg_metrics.items()}
+        if target_motion:
+            log_dict.update({f"warp/target_{k}_avg": v for k, v in avg_target.items()})
+            log_dict.update({f"warp/diff_{k}_avg": v for k, v in avg_diff.items()})
+        wandb.log(log_dict)
+    else:
+        print("\nAverages:")
+        for k, v in avg_metrics.items():
+            print(f"  Predicted {k}: {v:.4f}")
+        if target_motion:
+            for k, v in avg_target.items():
+                print(f"  Target {k}: {v:.4f}")
+            for k, v in avg_diff.items():
+                print(f"  Diff {k}: {v:.4f}")
+    
+    # Variation check: std dev
+    std_metrics = {k: np.std(v) if v else 0.0 for k, v in metrics.items()}
+    if target_motion:
+        std_target = {k: np.std(v) if v else 0.0 for k, v in target_metrics.items()}
+    
+    if not log_to_wandb:
+        print("\nVariation (std dev):")
+        for k, v in std_metrics.items():
+            print(f"  Predicted {k}: {v:.4f}")
+        if target_motion:
+            for k, v in std_target.items():
+                print(f"  Target {k}: {v:.4f}")
+            print("Note: Predicted variation should roughly match target for accurate motion.")
+            
+def create_four_panel_thumbnail(
+    identity_frame: Optional[torch.Tensor] = None,
+    target_frame: Optional[torch.Tensor] = None,
+    emo_frame: Optional[torch.Tensor] = None,
+    vasa_frame: Optional[torch.Tensor] = None,
+    motion_params: Optional[Dict[str, torch.Tensor]] = None,
+    size: Tuple[int, int] = (1024, 256),  # Wider for 4 panels
+    add_overlay: bool = True,
+    compute_loss: bool = True
+) -> Tuple[np.ndarray, Optional[float]]:
+    """
+    Create a four-panel thumbnail: Identity | Target | EMO Generated | VASA Generated.
+
+    Args:
+        identity_frame: Identity/source frame [C, H, W] or [H, W, C]
+        target_frame: Target/ground truth frame
+        emo_frame: EMO model (volumetric_avatar) generated frame
+        vasa_frame: VASA model generated frame
+        motion_params: Dict with motion parameters for overlay
+        size: Output thumbnail size (width, height)
+        add_overlay: Whether to add debug visualization overlay
+        compute_loss: Whether to compute EMO-VASA similarity loss
+
+    Returns:
+        Tuple of (thumbnail array, emo_vasa_loss if computed else None)
+    """
+
+    # Helper function to process frame
+    def process_frame(frame):
+        if frame is None:
+            return np.zeros((256, 256, 3), dtype=np.float32)
+
+        if isinstance(frame, torch.Tensor):
+            if frame.dim() == 4:  # [B, C, H, W]
+                frame = frame[0]
+            if frame.dim() == 3 and frame.shape[0] == 3:  # [C, H, W]
+                frame = frame.permute(1, 2, 0)
+            frame = frame.detach().cpu().numpy()
+
+        # Normalize to [0, 1] if needed
+        if frame.max() > 1.0:
+            frame = frame / 255.0
+        if frame.min() < 0:
+            frame = (frame + 1) / 2  # Convert from [-1, 1] to [0, 1]
+
+        return frame
+
+    # Process all frames
+    identity_np = process_frame(identity_frame)
+    target_np = process_frame(target_frame)
+    emo_np = process_frame(emo_frame)
+    vasa_np = process_frame(vasa_frame)
+
+    # Compute EMO-VASA similarity loss if both are available
+    emo_vasa_loss = None
+    if compute_loss and emo_frame is not None and vasa_frame is not None:
+        # Compute L1 + perceptual similarity
+        l1_loss = np.abs(emo_np - vasa_np).mean()
+        emo_vasa_loss = float(l1_loss)
+
+    # Create figure with 4 subplots
+    fig_scale = size[0] / 512  # Base scale on target width
+    fig, axes = plt.subplots(1, 4, figsize=(16 * fig_scale, 4 * fig_scale))
+
+    # Show Identity
+    axes[0].imshow(identity_np)
+    axes[0].set_title("Identity (Source)", fontsize=10 * fig_scale, weight='bold', color='blue')
+    axes[0].axis('off')
+
+    # Show Target
+    axes[1].imshow(target_np)
+    frame_idx = motion_params.get('_frame_idx', -1) if motion_params else -1
+    title = f"Target (t={frame_idx})" if frame_idx >= 0 else "Target Frame"
+    axes[1].set_title(title, fontsize=10 * fig_scale, weight='bold', color='green')
+    axes[1].axis('off')
+
+    # Show EMO Generated
+    axes[2].imshow(emo_np)
+    axes[2].set_title("EMO Generated", fontsize=10 * fig_scale, weight='bold', color='purple')
+    axes[2].axis('off')
+
+    # Show VASA Generated
+    axes[3].imshow(vasa_np)
+    vasa_title = "VASA Generated"
+    if emo_vasa_loss is not None:
+        vasa_title += f" (L1={emo_vasa_loss:.4f})"
+    axes[3].set_title(vasa_title, fontsize=10 * fig_scale, weight='bold', color='red')
+    axes[3].axis('off')
+
+    # Add motion overlay on VASA frame
+    if add_overlay and motion_params is not None:
+        ax = axes[3]
+
+        # Calculate motion indicators
+        indicators = []
+
+        # Add EMO-VASA loss if computed
+        if emo_vasa_loss is not None:
+            indicators.append(f"EMO Loss: {emo_vasa_loss:.4f}")
+
+        # Add frame index if available
+        if '_frame_idx' in motion_params:
+            indicators.append(f"Frame: {motion_params['_frame_idx']}")
+
+        # Add motion stats
+        if 'theta' in motion_params:
+            theta = motion_params['theta']
+            if isinstance(theta, torch.Tensor):
+                if theta.dim() > 1 and theta.shape[0] > 1:
+                    theta_diff = (theta[1:] - theta[:-1]).abs().mean().item()
+                    indicators.append(f"Motion: {theta_diff:.4f}")
+
+        # Add expression stats
+        if 'expression_embed' in motion_params:
+            expr = motion_params['expression_embed']
+            if isinstance(expr, torch.Tensor):
+                expr_std = expr.std().item()
+                indicators.append(f"Expr σ: {expr_std:.3f}")
+
+        # Add text overlay
+        font_scale = max(1.0, size[0] / 512)
+        text_y = 0.98
+        for indicator in indicators[:4]:  # Allow 4 indicators for more info
+            ax.text(0.02, text_y, indicator, transform=ax.transAxes,
+                   fontsize=7 * font_scale, color='white',
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.5),
+                   verticalalignment='top')
+            text_y -= 0.06
+
+    plt.tight_layout()
+
+    # Convert to numpy array using buffer approach (compatible with newer matplotlib)
+    fig.canvas.draw()
+    try:
+        # Try newer API first
+        buf = fig.canvas.buffer_rgba()
+        thumbnail = np.asarray(buf)
+        # Convert RGBA to RGB
+        thumbnail = thumbnail[:, :, :3]
+    except AttributeError:
+        # Fallback for older matplotlib
+        thumbnail = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        thumbnail = thumbnail.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    plt.close(fig)
+
+    # Resize if needed
+    if thumbnail.shape[:2][::-1] != size:
+        from PIL import Image
+        img = Image.fromarray(thumbnail)
+        img = img.resize(size, Image.LANCZOS)
+        thumbnail = np.array(img)
+
+    return thumbnail, emo_vasa_loss
+
+
+def create_three_panel_thumbnail(
+    identity_frame: Optional[torch.Tensor] = None,
+    target_frame: Optional[torch.Tensor] = None,
+    predicted_frame: Optional[torch.Tensor] = None,
+    motion_params: Optional[Dict[str, torch.Tensor]] = None,
+    size: Tuple[int, int] = (768, 256),  # Wider for 3 panels
+    add_overlay: bool = True
+) -> np.ndarray:
+    """
+    Create a three-panel thumbnail showing Identity | Target | Predicted.
+
+    Args:
+        identity_frame: Identity/source frame [C, H, W] or [H, W, C]
+        target_frame: Target/ground truth frame
+        predicted_frame: Generated/predicted frame
+        motion_params: Dict with motion parameters for overlay
+        size: Output thumbnail size (width, height)
+        add_overlay: Whether to add debug visualization overlay
+
+    Returns:
+        numpy array of thumbnail image [H, W, C] in uint8 format
+    """
+
+    # Helper function to process frame
+    def process_frame(frame):
+        if frame is None:
+            return np.zeros((256, 256, 3), dtype=np.float32)
+
+        if isinstance(frame, torch.Tensor):
+            if frame.dim() == 4:  # [B, C, H, W]
+                frame = frame[0]
+            if frame.dim() == 3 and frame.shape[0] == 3:  # [C, H, W]
+                frame = frame.permute(1, 2, 0)
+            frame = frame.detach().cpu().numpy()
+
+        # Normalize to [0, 1] if needed
+        if frame.max() > 1.0:
+            frame = frame / 255.0
+        if frame.min() < 0:
+            frame = (frame + 1) / 2  # Convert from [-1, 1] to [0, 1]
+
+        return frame
+
+    # Process all frames
+    identity_np = process_frame(identity_frame)
+    target_np = process_frame(target_frame)
+    predicted_np = process_frame(predicted_frame)
+
+    # Create figure with 3 subplots
+    fig_scale = size[0] / 384  # Base scale on target width
+    fig, axes = plt.subplots(1, 3, figsize=(12 * fig_scale, 4 * fig_scale))
+
+    # Show Identity
+    axes[0].imshow(identity_np)
+    axes[0].set_title("Identity (Source)", fontsize=10 * fig_scale, weight='bold', color='blue')
+    axes[0].axis('off')
+
+    # Show Target
+    axes[1].imshow(target_np)
+    frame_idx = motion_params.get('_frame_idx', -1) if motion_params else -1
+    title = f"Target (t={frame_idx})" if frame_idx >= 0 else "Target Frame"
+    axes[1].set_title(title, fontsize=10 * fig_scale, weight='bold', color='green')
+    axes[1].axis('off')
+
+    # Show Predicted
+    axes[2].imshow(predicted_np)
+    axes[2].set_title("Predicted", fontsize=10 * fig_scale, weight='bold', color='red')
+    axes[2].axis('off')
+
+    # Add motion overlay on predicted frame
+    if add_overlay and motion_params is not None:
+        ax = axes[2]
+
+        # Calculate motion indicators
+        indicators = []
+
+        # Add frame index if available
+        if '_frame_idx' in motion_params:
+            indicators.append(f"Frame: {motion_params['_frame_idx']}")
+
+        # Add motion stats
+        if 'theta' in motion_params:
+            theta = motion_params['theta']
+            if isinstance(theta, torch.Tensor):
+                if theta.dim() > 1 and theta.shape[0] > 1:
+                    theta_diff = (theta[1:] - theta[:-1]).abs().mean().item()
+                    indicators.append(f"Motion: {theta_diff:.4f}")
+
+        # Add expression stats
+        if 'expression_embed' in motion_params:
+            expr = motion_params['expression_embed']
+            if isinstance(expr, torch.Tensor):
+                expr_std = expr.std().item()
+                indicators.append(f"Expr σ: {expr_std:.3f}")
+
+        # Add text overlay
+        font_scale = max(1.0, size[0] / 512)
+        text_y = 0.98
+        for indicator in indicators[:3]:  # Limit to 3 indicators to avoid clutter
+            ax.text(0.02, text_y, indicator, transform=ax.transAxes,
+                   fontsize=7 * font_scale, color='white',
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.5),
+                   verticalalignment='top')
+            text_y -= 0.06
+
+        # Add theta warp matrix visualization
+        if 'theta' in motion_params:
+            theta = motion_params['theta']
+            if isinstance(theta, torch.Tensor):
+                # Get the theta matrix for current frame
+                if theta.dim() == 4:  # [B, T, 3, 4]
+                    frame_idx = motion_params.get('_frame_idx', 0)
+                    if frame_idx < theta.shape[1]:
+                        theta_matrix = theta[0, frame_idx].detach().cpu().numpy()  # [3, 4]
+                    else:
+                        theta_matrix = theta[0, -1].detach().cpu().numpy()
+                elif theta.dim() == 3:  # [B, 3, 4]
+                    theta_matrix = theta[0].detach().cpu().numpy()
+                elif theta.dim() == 2:  # [3, 4]
+                    theta_matrix = theta.detach().cpu().numpy()
+                else:
+                    theta_matrix = None
+
+                if theta_matrix is not None and theta_matrix.shape == (3, 4):
+                    # Create inset axes for theta matrix in bottom-right corner
+                    inset_ax = ax.inset_axes([0.55, 0.02, 0.43, 0.25])
+
+                    # Visualize theta matrix as heatmap
+                    im = inset_ax.imshow(theta_matrix, cmap='RdBu_r', aspect='auto', vmin=-1, vmax=1)
+
+                    # Add values as text annotations
+                    for i in range(3):
+                        for j in range(4):
+                            val = theta_matrix[i, j]
+                            color = 'white' if abs(val) > 0.5 else 'black'
+                            inset_ax.text(j, i, f'{val:.2f}', ha='center', va='center',
+                                        fontsize=5 * font_scale, color=color, weight='bold')
+
+                    # Style the inset
+                    inset_ax.set_xticks([0, 1, 2, 3])
+                    inset_ax.set_yticks([0, 1, 2])
+                    inset_ax.set_xticklabels(['R1', 'R2', 'R3', 'T'], fontsize=5 * font_scale)
+                    inset_ax.set_yticklabels(['X', 'Y', 'Z'], fontsize=5 * font_scale)
+                    inset_ax.set_title('Theta Warp (3x4)', fontsize=6 * font_scale, color='white', pad=2)
+
+                    # Add subtle border
+                    for spine in inset_ax.spines.values():
+                        spine.set_edgecolor('white')
+                        spine.set_linewidth(0.5)
+
+    # Convert figure to numpy array
+    fig.tight_layout(pad=0.5)
+    fig.canvas.draw()
+
+    # Get numpy array from figure
+    buf = io.BytesIO()
+    target_dpi = max(100, int(size[0] / 6))  # Scale DPI based on target size
+    fig.savefig(buf, format='png', dpi=target_dpi, bbox_inches='tight', pad_inches=0.1)
+    buf.seek(0)
+    img = Image.open(buf)
+
+    # Resize to exact target size with high quality resampling
+    img = img.resize(size, Image.Resampling.LANCZOS)
+    thumbnail = np.array(img)
+
+    plt.close(fig)
+    buf.close()
+
+    return thumbnail
+
+
 def create_debug_thumbnail(
     generated_frame: torch.Tensor,
     source_frame: Optional[torch.Tensor] = None,
@@ -423,20 +902,48 @@ def generate_training_thumbnail(
             source_warp_embed_dict, target_warp_embed_dict, _, embed_dict = \
                 volumetric_avatar.predict_embed(data_dict)
             
-            # Apply motion to canonical volume
+            # Apply motion to canonical volume using warping fields
             if 'canonical_volume' in source_params:
                 canonical_volume = source_params['canonical_volume']
-                
-                # Create rotation warp
-                grid = volumetric_avatar.identity_grid_3d.repeat_interleave(1, dim=0)
-                if 'theta' in frame_params:
-                    target_rotation_warp = grid.bmm(frame_params['theta'][:, 0, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+
+                # Check if we have warping fields from the motion prediction
+                if 'xy_warps' in predicted_motion and 'rigid_warps' in predicted_motion and 'uv_warps' in predicted_motion:
+                    # Extract warping fields for the selected frame
+                    xy_warp = predicted_motion['xy_warps'][:, window_idx]  # [B, 16, 64, 64, 3]
+                    rigid_warp = predicted_motion['rigid_warps'][:, window_idx]  # [B, 16, 64, 64, 3]
+                    uv_warp = predicted_motion['uv_warps'][:, window_idx]  # [B, 16, 64, 64, 3]
+
+                    # Apply warps in sequence like pipeline_face_attr.py
+                    # 1. Apply source warps to canonical volume (neutralize identity)
+                    source_warped = volumetric_avatar.grid_sample(
+                        volumetric_avatar.grid_sample(canonical_volume, rigid_warp),
+                        xy_warp
+                    )
+
+                    # 2. Apply target warp to get final volume
+                    grid = volumetric_avatar.identity_grid_3d.repeat_interleave(1, dim=0)
+                    if 'theta' in frame_params:
+                        target_rotation_warp = grid.bmm(frame_params['theta'][:, 0, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+                    else:
+                        target_rotation_warp = grid.view(-1, d, s, s, 3)
+
+                    # Apply UV warp and then rotation
+                    warped_volume = volumetric_avatar.grid_sample(
+                        volumetric_avatar.grid_sample(source_warped, uv_warp),
+                        target_rotation_warp
+                    )
+                    target_latent_feats = warped_volume.view(1, c * d, s, s)
                 else:
-                    target_rotation_warp = grid.view(-1, d, s, s, 3)
-                
-                # Apply warping
-                warped_volume = volumetric_avatar.grid_sample(canonical_volume, target_rotation_warp)
-                target_latent_feats = warped_volume.view(1, c * d, s, s)
+                    # Fallback: simple rotation warp without xy/uv warps
+                    grid = volumetric_avatar.identity_grid_3d.repeat_interleave(1, dim=0)
+                    if 'theta' in frame_params:
+                        target_rotation_warp = grid.bmm(frame_params['theta'][:, 0, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+                    else:
+                        target_rotation_warp = grid.view(-1, d, s, s, 3)
+
+                    # Apply warping
+                    warped_volume = volumetric_avatar.grid_sample(canonical_volume, target_rotation_warp)
+                    target_latent_feats = warped_volume.view(1, c * d, s, s)
             else:
                 # Fallback: use zero volume
                 target_latent_feats = torch.zeros(1, c * d, s, s).cuda()
@@ -478,6 +985,8 @@ def generate_training_thumbnail(
 def generate_window_thumbnail(
     generated_frames: Optional[torch.Tensor] = None,
     target_frames: Optional[torch.Tensor] = None,
+    identity_frame: Optional[torch.Tensor] = None,
+    emo_generated_frames: Optional[torch.Tensor] = None,  # NEW: EMO model generated frames
     motion_outputs: Optional[Dict] = None,
     window: Optional[Dict] = None,
     motion_data: Optional[Dict] = None,
@@ -485,19 +994,21 @@ def generate_window_thumbnail(
     size: Tuple[int, int] = (512, 512)
 ) -> np.ndarray:
     """
-    Generate thumbnail from generated and target frames.
-    
+    Generate thumbnail from generated and target frames with identity reference and EMO comparison.
+
     Args:
-        generated_frames: Generated frames from volumetric avatar [B, T, C, H, W]
+        generated_frames: Generated frames from VASA model [B, T, C, H, W]
         target_frames: Target/ground truth frames [B, T, C, H, W]
+        identity_frame: Identity/source frame used for generation [C, H, W] or [B, C, H, W]
+        emo_generated_frames: EMO model (volumetric_avatar) generated frames for comparison [B, T, C, H, W]
         motion_outputs: Motion outputs for overlay stats
         window: (Optional, for backward compatibility) Window data dictionary
         motion_data: (Optional, for backward compatibility) Motion data from prepare_motion_data
         outputs: (Optional, for backward compatibility) Model outputs
         size: Target thumbnail size
-        
+
     Returns:
-        Thumbnail as numpy array
+        Thumbnail as numpy array showing Identity | Target | EMO Generated | VASA Generated
     """
     import random
     
@@ -588,16 +1099,52 @@ def generate_window_thumbnail(
     
     # Add frame index to motion params for display
     random_motion_params['_frame_idx'] = motion_frame_idx
-    
-    # Generate appropriate thumbnail
-    if selected_generated is not None:
-        # Use debug thumbnail with overlay showing generated vs target
-        return create_debug_thumbnail(
-            selected_generated,
-            source_frame=selected_target,  # Show target frame for comparison
+
+    # Process identity frame if provided
+    selected_identity = None
+    if identity_frame is not None and isinstance(identity_frame, torch.Tensor):
+        if identity_frame.dim() == 4:  # [B, C, H, W]
+            selected_identity = identity_frame[0]
+        elif identity_frame.dim() == 3:  # [C, H, W]
+            selected_identity = identity_frame
+        else:
+            selected_identity = identity_frame
+
+    # Extract EMO generated frame if provided
+    selected_emo = None
+    if emo_generated_frames is not None and isinstance(emo_generated_frames, torch.Tensor):
+        if emo_generated_frames.numel() > 0:
+            # Handle shape [B, T, C, H, W] or [T, C, H, W]
+            if emo_generated_frames.dim() == 5:
+                selected_emo = emo_generated_frames[0, selected_idx] if selected_idx < emo_generated_frames.shape[1] else emo_generated_frames[0, 0]
+            elif emo_generated_frames.dim() == 4:
+                selected_emo = emo_generated_frames[selected_idx] if selected_idx < emo_generated_frames.shape[0] else emo_generated_frames[0]
+
+    # Use 4-panel if EMO frame is available, otherwise 3-panel
+    if selected_emo is not None:
+        # Create 4-panel thumbnail: Identity | Target | EMO | VASA
+        thumbnail, emo_vasa_loss = create_four_panel_thumbnail(
+            identity_frame=selected_identity,
+            target_frame=selected_target,
+            emo_frame=selected_emo,
+            vasa_frame=selected_generated,
             motion_params=random_motion_params,
-            size=size,
-            add_overlay=True
+            size=(1024, 256)  # Wider for 4 panels
+        )
+
+        # Log EMO-VASA loss if available
+        if emo_vasa_loss is not None and random_motion_params is not None:
+            random_motion_params['emo_vasa_loss'] = emo_vasa_loss
+
+        return thumbnail
+    elif selected_generated is not None or selected_target is not None or selected_identity is not None:
+        # Create 3-panel thumbnail: Identity | Target | Predicted
+        return create_three_panel_thumbnail(
+            identity_frame=selected_identity,
+            target_frame=selected_target,
+            predicted_frame=selected_generated,
+            motion_params=random_motion_params,
+            size=size
         )
     else:
         # Fallback to simple stats thumbnail

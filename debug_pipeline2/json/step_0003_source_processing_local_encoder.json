@@ -1,0 +1,15 @@
+{
+  "step": 3,
+  "method": "source_processing",
+  "stage": "local_encoder",
+  "timestamp": "2025-09-19T19:59:50.659623",
+  "data": {
+    "source_latents_shape": [
+      1,
+      1536,
+      64,
+      64
+    ],
+    "numel": 6291456
+  }
+}

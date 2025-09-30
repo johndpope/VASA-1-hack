@@ -34,7 +34,8 @@ import h5py
 from tqdm import tqdm
 from typing import *
 from collections import defaultdict
-
+from torchvision.transforms import ToTensor, ToPILImage
+to_image = ToPILImage()
 # Import the new chunked window cache
 try:
     from window_cache import WindowCache as ChunkedWindowCache
@@ -501,11 +502,12 @@ class WindowCache:
 class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
     def __init__(
-        self, 
+        self,
         video_folder: str,
         emo_model,
         window_size: int = 50,
         stride: int = 25,
+        max_batch_size: int = 20,  # Max windows to save at once
         context_size: int = 10,
         frame_size: Tuple[int, int] = (512, 512),
         sequence_length: int = 50,
@@ -517,6 +519,10 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         device: str = 'cuda',
         cache_dir: Optional[str] = 'cache',
         use_single_bucket: bool = True,  # New parameter for single-bucket caching
+        generate_emo_frames: bool = False,  # NEW: Whether to generate EMO frames
+        emo_identity_path: str = "nemo/data/IMG_1.png",  # NEW: Identity image for EMO
+        emo_keyframes_per_window: int = 5,  # NEW: Number of EMO keyframes to generate
+        va_bridge = None,  # NEW: Volumetric avatar bridge for EMO generation
     ):
         VASADatasetMixin.__init__(self)
         
@@ -525,6 +531,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         self.emo_model = emo_model
         self.window_size = window_size
         self.stride = stride
+        self.max_batch_size = max_batch_size
         self.context_size = context_size
         self.cache_audio = cache_audio
         self.frame_size = frame_size
@@ -535,6 +542,29 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
         # Initialize LipStateAnalyzer for lip metrics computation
         self.lip_analyzer = LipStateAnalyzer()
+
+        # EMO generation setup
+        self.generate_emo_frames = generate_emo_frames
+        self.emo_keyframes_per_window = emo_keyframes_per_window
+        self.va_bridge = va_bridge
+        self.emo_identity_image = None
+
+        if generate_emo_frames:
+            # Load identity image for EMO generation
+            if os.path.exists(emo_identity_path):
+                from PIL import Image
+                import torchvision.transforms as transforms
+
+                img = Image.open(emo_identity_path).convert('RGB')
+                transform = transforms.Compose([
+                    transforms.Resize((512, 512)),
+                    transforms.ToTensor(),
+                ])
+                self.emo_identity_image = transform(img).unsqueeze(0).to(device)
+                logger.info(f"Loaded EMO identity image from {emo_identity_path}")
+            else:
+                logger.warning(f"EMO identity image not found at {emo_identity_path}")
+                self.generate_emo_frames = False
 
         # Set cache directory
         self.cache_dir = Path(cache_dir) if cache_dir else Path(video_folder) / "cache"
@@ -922,8 +952,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             # Get predictions - returns (label, scores) where scores includes VA values
             labels, scores = self.emotion_recognizer.predict_emotions(face_crop, logits=True)
             
-            logger.debug(f"Emotion scores: {scores}")
-            logger.debug(f"Emotion labels: {labels}")
+            # logger.debug(f"Emotion scores: {scores}")
+            # logger.debug(f"Emotion labels: {labels}")
             
             # Extract VA values (last two values in scores)
             if isinstance(scores, np.ndarray) and scores.size >= 2:
@@ -1132,11 +1162,12 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
 
 
+
     def _extract_emo_features(self, frames: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """Extract EMO features with proper batch and sequence dimensions, including warps"""
+        """Calculate target warps and features for frames - cherry-picked from calculate_target_warps."""
         with torch.no_grad():
             try:
-                logger.debug("\n=== EMO Feature Extraction Start ===")
+                logger.debug("\n=== Calculate Target Warps Start ===")
                 logger.debug(f"Input frames shape: {frames.shape}")
                 logger.debug(f"Input frames device: {frames.device}")
                 logger.debug(f"EMO model device: {next(self.emo_model.parameters()).device}")
@@ -1145,7 +1176,6 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 assert frames.shape[1] == 3, f"Expected 3 channels, got {frames.shape[1]}"
 
                 T = frames.shape[0]
-                # Accept variable window sizes, not just 50
                 logger.debug(f"Processing sequence of length {T}")
 
                 # Add batch dimension and move to device
@@ -1154,163 +1184,142 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 logger.debug(f"After adding batch dim - frames shape: {frames.shape}")
 
                 outputs = {
-                    'theta': [],
-                    'scale': [],
-                    'rotation': [],
-                    'translation': [],
-                    'expression_embed': [],
-                    'rigid_warps': [],      # Per-frame rigid warps (source_rotation_warp)
-                    'uv_warps': [],         # Per-frame non-rigid target warps
-                    'xy_warps': [],         # Per-frame non-rigid source warps (source_xy_warp)
-                    'source_theta': []      # Per-frame source thetas
+                    'theta': [],            # Target pose
+                    'scale': [],            # SRT scale component
+                    'rotation': [],         # SRT rotation component
+                    'translation': [],      # SRT translation component
+                    'expression_embed': [], # Renamed from target_pose_embed as requested
+                    'uv_warps': [],        # Target UV warps (main warping field)
+                    'target_masks': [],    # Target face masks
                 }
 
                 # Use first frame as identity for warp generation
                 identity_frame = frames[:, 0]  # [1,C,H,W]
 
-                # Process identity frame once
-                identity_dict = {
-                    'source_img': identity_frame,
-                    'target_img': identity_frame.clone(),
-                    'source_mask': torch.ones_like(identity_frame[:, :1]),
-                    'target_mask': torch.ones_like(identity_frame[:, :1]),
-                    'source_theta': torch.eye(3, 4).unsqueeze(0).to(identity_frame.device),  # Identity pose
-                    'target_theta': torch.eye(3, 4).unsqueeze(0).to(identity_frame.device),  # Identity pose
-                    'crop': False
-                }
+                # Extract identity features once (similar to extract_identity_features in create_video_face_swap.py)
+                with torch.no_grad():
+                    # Get face mask
+                    identity_mask, _, _, _ = self.emo_model.face_idt.forward(identity_frame)
+                    identity_mask = (identity_mask > 0.6).float()
+                    identity_mask = F.avg_pool2d(identity_mask, 3, stride=1, padding=1)
 
-                # Extract identity embedding
-                identity_dict = self.emo_model.expression_embedder_nw(identity_dict, True, False)
-                idt_embed = identity_dict.get('idt_embed')
+                    # Mask source image
+                    masked_identity = identity_frame * identity_mask
 
-                # Get model dimensions for warps
-                if hasattr(self.emo_model, 'args'):
-                    d = self.emo_model.args.latent_volume_depth
-                    s = self.emo_model.args.latent_volume_size
-                    c = self.emo_model.args.latent_volume_channels
-                elif hasattr(self.emo_model, 'latent_volume_depth'):
-                    d = self.emo_model.latent_volume_depth
-                    s = self.emo_model.latent_volume_size
-                    c = 96  # Default channel count
-                else:
-                    d = 16  # Default values
-                    s = 64
-                    c = 96
+                    # Extract identity embedding
+                    idt_embed = self.emo_model.idt_embedder_nw(masked_identity)
 
-                # Check if we can extract warps from InferenceWrapper
-                can_extract_warps = hasattr(self.emo_model, 'forward') and hasattr(self.emo_model, 'source_xy_warp_resize')
+                    # Get head pose for identity
+                    identity_theta = self.emo_model.head_pose_regressor.forward(identity_frame)
 
-                # Try to import helper function if we can extract warps
-                to_image = None
-                if can_extract_warps:
-                    try:
-                        from nemo.pipeline_face_attr_full import to_image
-                    except ImportError:
-                        try:
-                            from nemo.pipeline_face_attr import to_image
-                        except ImportError:
-                            logger.warning("Could not import to_image function, warps will be zeros")
-                            can_extract_warps = False
-
-                # logger.debug("\nProcessing frames in sequence...")
-
-                for t in range(T):
-                    frame = frames[:, t]  # [1,C,H,W]
-                    # logger.debug(f"\nFrame {t}:")
-                    # logger.debug(f"  Current frame shape: {frame.shape}")
-
-                    input_dict = {
-                        'source_img': identity_frame,  # Use identity as source
-                        'target_img': frame,
-                        'source_mask': torch.ones_like(frame[:, :1]),
-                        'target_mask': torch.ones_like(frame[:, :1]),
-                        'crop': False
+                    # Prepare identity data dict
+                    identity_dict = {
+                        'source_img': identity_frame,
+                        'source_mask': identity_mask,
+                        'source_theta': identity_theta,
+                        'target_img': identity_frame,
+                        'target_mask': identity_mask,
+                        'target_theta': identity_theta,
+                        'idt_embed': idt_embed
                     }
 
-                    # Get theta AND scale/rotation/translation
-                    theta, scale, rotation, translation = self.emo_model.head_pose_regressor.forward(
-                        frame,  # Use current frame for pose
-                        return_srt=True
+                    # Get expression embedding for identity
+                    identity_dict = self.emo_model.expression_embedder_nw(identity_dict, True, False, False)
+
+                    # Get warp embeddings
+                    source_warp_embed, _, _, embed_dict = self.emo_model.predict_embed(identity_dict)
+
+                    # Generate XY warps for source
+                    source_xy_warp, _ = self.emo_model.xy_generator_nw(source_warp_embed)
+
+                    # Extract source volume
+                    source_latents = self.emo_model.local_encoder_nw(masked_identity)
+                    c = self.emo_model.args.latent_volume_channels
+                    d = self.emo_model.args.latent_volume_depth
+                    s = self.emo_model.args.latent_volume_size
+                    source_volume = source_latents.view(1, c, d, s, s)
+
+                    # Generate 3D grid for transformations
+                    identity_grid_3d = self.emo_model.identity_grid_3d.repeat_interleave(1, dim=0)
+
+                    # Apply inverse theta to create canonical volume
+                    theta_inv = torch.zeros(1, 3, 4, device=identity_frame.device)
+                    theta_inv[:, :3, :3] = identity_theta[:, :3, :3].transpose(1, 2)
+                    theta_inv[:, :3, 3] = -identity_theta[:, :3, :3].transpose(1, 2).bmm(identity_theta[:, :3, 3:4]).squeeze(-1)
+
+                    source_rotation_warp = identity_grid_3d.bmm(theta_inv[:, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+
+                    # Create canonical volume by applying inverse warps
+                    canonical_volume = self.emo_model.grid_sample(
+                        self.emo_model.grid_sample(source_volume, source_xy_warp),
+                        source_rotation_warp
                     )
-                    theta = self.convert_theta_format(theta)
-                    expression_embed = self.emo_model.expression_embedder_nw.net_face(
-                        frame  # Use current frame for expression
-                    )[0]
 
-                    # Extract per-frame warps if we have InferenceWrapper
-                    if can_extract_warps and to_image is not None:
-                        try:
-                            # Convert frame to PIL for the model
-                            frame_pil = to_image(frame.squeeze(0))
+                    # Store identity info
+                    identity_info = {
+                        'idt_embed': idt_embed,
+                        'embed_dict': embed_dict,
+                        'canonical_volume': canonical_volume,
+                        'source_theta': identity_theta,
+                        'source_mask': identity_mask
+                    }
 
-                            # Run forward to generate warps for this frame
-                            _ = self.emo_model.forward(
-                                source_image=to_image(identity_frame.squeeze(0)),  # Identity as source
-                                driver_image=frame_pil,  # Current frame as driver
-                                crop=False,
-                                smooth_pose=False,
-                                target_theta=True,
-                                mix=True,
-                                mix_old=False,
-                                modnet_mask=False
-                            )
 
-                            # Extract the computed warps for this frame
-                            if hasattr(self.emo_model, 'source_xy_warp_resize'):
-                                outputs['xy_warps'].append(self.emo_model.source_xy_warp_resize.clone().cpu())
-                            else:
-                                outputs['xy_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
+                # Process each frame (cherry-picked from calculate_target_warps)
+                for t in range(T):
+                    frame = frames[:, t]  # [1,C,H,W]
 
-                            if hasattr(self.emo_model, 'source_rotation_warp'):
-                                outputs['rigid_warps'].append(self.emo_model.source_rotation_warp.clone().cpu())
-                            else:
-                                outputs['rigid_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
+                    with torch.no_grad():
+                        # Get target face mask
+                        target_mask, _, _, _ = self.emo_model.face_idt.forward(frame)
+                        target_mask = (target_mask > 0.6).float()
+                        target_mask = F.avg_pool2d(target_mask, 3, stride=1, padding=1)
 
-                            # Try to get UV warps (target warps) if available
-                            if hasattr(self.emo_model, 'target_uv_warp'):
-                                outputs['uv_warps'].append(self.emo_model.target_uv_warp.clone().cpu())
-                            elif hasattr(self.emo_model, 'uv_generator_nw') and hasattr(self.emo_model, 'target_latent_volume'):
-                                # UV warps might be generated but not stored, use zeros for now
-                                outputs['uv_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
-                            else:
-                                outputs['uv_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
+                        # Get target pose with SRT components
+                        target_theta, scale, rotation, translation = self.emo_model.head_pose_regressor.forward(
+                            frame, return_srt=True
+                        )
+                        target_theta = self.convert_theta_format(target_theta)
 
-                            if hasattr(self.emo_model, 'pred_source_theta'):
-                                outputs['source_theta'].append(self.emo_model.pred_source_theta.clone().cpu())
-                            else:
-                                outputs['source_theta'].append(torch.zeros(1, 3, 4, device='cpu'))
+                        # Create target data dict with source identity
+                        data_dict = {
+                            'source_img': frame,
+                            'source_mask': target_mask,
+                            'source_theta': target_theta,
+                            'target_img': frame,
+                            'target_mask': target_mask,
+                            'target_theta': target_theta,
+                            'idt_embed': identity_info['idt_embed']  # Use source identity
+                        }
 
-                        except Exception as e:
-                            logger.warning(f"Could not extract warps for frame {t}: {e}")
-                            # Add zeros if extraction failed
-                            outputs['xy_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
-                            outputs['rigid_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
-                            outputs['uv_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
-                            outputs['source_theta'].append(torch.zeros(1, 3, 4, device='cpu'))
-                    else:
-                        # Add zeros if we can't extract warps
-                        outputs['xy_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
-                        outputs['rigid_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
-                        outputs['uv_warps'].append(torch.zeros(1, d, s, s, 3, device='cpu'))
-                        outputs['source_theta'].append(torch.zeros(1, 3, 4, device='cpu'))
+                        # Get aligned expression embedding
+                        data_dict = self.emo_model.expression_embedder_nw(data_dict, True, False, False)
+                        expression_embed = data_dict['source_pose_embed']  # This is the aligned expression
+
+                        # Generate target warps
+                        _, target_warp_embed, _, _ = self.emo_model.predict_embed(data_dict)
+                        target_uv_warp, _ = self.emo_model.uv_generator_nw(target_warp_embed)
 
                     # Verify feature shapes
-                    assert theta.shape == (1, 3, 4), f"Wrong theta shape: {theta.shape}"
+                    assert target_theta.shape == (1, 3, 4), f"Wrong theta shape: {target_theta.shape}"
                     assert scale.shape == (1, 3), f"Wrong scale shape: {scale.shape}"
                     assert rotation.shape == (1, 3), f"Wrong rotation shape: {rotation.shape}"
                     assert translation.shape == (1, 3), f"Wrong translation shape: {translation.shape}"
                     assert expression_embed.shape == (1, 128), f"Wrong expression shape: {expression_embed.shape}"
+                    assert target_uv_warp.shape == (1, 16, 64, 64, 3), f"Wrong uv_warp shape: {target_uv_warp.shape}"
 
-                    # Store outputs
-                    outputs['theta'].append(theta)
-                    outputs['scale'].append(scale)
-                    outputs['rotation'].append(rotation)
-                    outputs['translation'].append(translation)
-                    outputs['expression_embed'].append(expression_embed)
+                    # Store outputs matching H5 cache structure
+                    outputs['theta'].append(target_theta.cpu())
+                    outputs['scale'].append(scale.cpu())
+                    outputs['rotation'].append(rotation.cpu())
+                    outputs['translation'].append(translation.cpu())
+                    outputs['expression_embed'].append(expression_embed.cpu())  # Using aligned expression
+                    outputs['uv_warps'].append(target_uv_warp.cpu())
+                    outputs['target_masks'].append(target_mask.cpu())
 
                 # Stack along time dimension for per-frame features
                 per_frame_keys = ['theta', 'scale', 'rotation', 'translation', 'expression_embed',
-                                 'xy_warps', 'rigid_warps', 'uv_warps', 'source_theta']
+                                 'uv_warps', 'target_masks']
                 for k in per_frame_keys:
                     if k in outputs and isinstance(outputs[k], list) and len(outputs[k]) > 0:
                         outputs[k] = torch.stack(outputs[k], dim=1)
@@ -1322,40 +1331,38 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 diff_norm = torch.norm(frame_diff, dim=-1)  # [T-1]
                 is_constant = torch.allclose(expr_flat[0], expr_flat, atol=1e-5)
 
-                logger.info(f"[EXPRESSION DEBUG] Shape: {expr_tensor.shape}")
-                logger.info(f"[EXPRESSION DEBUG] Constant across frames? {is_constant}")
-                logger.info(f"[EXPRESSION DEBUG] Frame-to-frame diff - Mean: {diff_norm.mean():.6f}, Max: {diff_norm.max():.6f}")
-                logger.info(f"[EXPRESSION DEBUG] First frame values (first 5): {expr_flat[0, :5].tolist()}")
-                logger.info(f"[EXPRESSION DEBUG] Last frame values (first 5): {expr_flat[-1, :5].tolist()}")
+                logger.debug(f"Expression embed shape: {expr_tensor.shape}")
+                logger.debug(f"Constant across frames? {is_constant}")
+                logger.debug(f"Frame-to-frame diff - Mean: {diff_norm.mean():.6f}, Max: {diff_norm.max():.6f}")
+                logger.debug(f"First frame values (first 5): {expr_flat[0, :5].tolist()}")
+                logger.debug(f"Last frame values (first 5): {expr_flat[-1, :5].tolist()}")
 
-                # Verify final output shapes
-                logger.debug("\nFinal output shapes:")
+                # Add identity info to outputs
+                outputs['identity_info'] = identity_info
+
+                # Verify final output shapes matching H5 cache
+                logger.debug("\nFinal output shapes (matching H5):")
+                d = 16  # depth
+                s = 64  # spatial size
                 expected_shapes = {
-                    'theta': (1, T, 3, 4), # [B, T, 3, 4]
-                    'scale': (1, T, 3),
-                    'rotation': (1, T, 3),
-                    'translation': (1, T, 3),
-                    'expression_embed': (1, T, 128),
-                    'xy_warps': (1, T, d, s, s, 3),  # Per-frame non-rigid source warps
-                    'rigid_warps': (1, T, d, s, s, 3),  # Per-frame rigid warps
-                    'uv_warps': (1, T, d, s, s, 3),  # Per-frame non-rigid target warps
-                    'source_theta': (1, T, 3, 4)  # Per-frame thetas
+                    'theta': (1, T, 3, 4),  # Target pose (H5: 1, 4, 4 but model uses 3, 4)
+                    'scale': (1, T, 3),  # SRT scale - matches H5
+                    'rotation': (1, T, 3),  # SRT rotation - matches H5
+                    'translation': (1, T, 3),  # SRT translation - matches H5
+                    'expression_embed': (1, T, 128),  # Aligned expression - matches H5 target_pose_embed
+                    'uv_warps': (1, T, d, s, s, 3),  # Target UV warps - matches H5
+                    'target_masks': (1, T, 1, 512, 512),  # Face masks
                 }
 
                 for k, expected_shape in expected_shapes.items():
                     if k in outputs:
                         actual_shape = outputs[k].shape
-                        # Only check shapes for keys that exist
-                        if k in ['xy_warps', 'rigid_warps', 'uv_warps', 'source_theta']:
-                            # These are optional warps, just log if present
-                            if actual_shape[0] > 0:  # Not a zero tensor
-                                logger.debug(f"  {k}: {actual_shape} on CPU")
-                        else:
-                            # Check per-frame features
-                            assert actual_shape == expected_shapes[k], f"Wrong {k} shape: expected {expected_shapes[k]}, got {actual_shape}"
-                            logger.debug(f"  {k}: {actual_shape} on {outputs[k].device if hasattr(outputs[k], 'device') else 'CPU'}")
 
-                logger.debug("=== EMO Feature Extraction Complete (with warps) ===\n")
+                        # Check per-frame features
+                        assert actual_shape == expected_shapes[k], f"Wrong {k} shape: expected {expected_shapes[k]}, got {actual_shape}"
+                        logger.debug(f"  {k}: {actual_shape} on {outputs[k].device if hasattr(outputs[k], 'device') else 'CPU'}")
+
+                logger.debug("=== Calculate Target Warps Complete ===\n")
 
                 return outputs
                 
@@ -1896,6 +1903,17 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
     def __len__(self) -> int:
         return len(self.windows)
+
+    def save_cache(self):
+        """Explicitly save any pending cache data."""
+        if hasattr(self, 'cache_type') and self.cache_type == 'single_bucket' and hasattr(self, '_pending_windows'):
+            self._save_pending_windows()
+            logger.info("Cache saved successfully")
+
+    def __del__(self):
+        """Cleanup - save any pending windows before destruction."""
+        if hasattr(self, 'cache_type') and self.cache_type == 'single_bucket' and hasattr(self, '_pending_windows'):
+            self._save_pending_windows()
 
 
 
@@ -2546,12 +2564,51 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 # For single-bucket cache, load by index directly
                 cached_data = self.cache.load_window(idx)
                 if cached_data is not None:
+                    logger.info(f"👽 Getting cached window {idx} from H5 cache")
+                    # Ensure metadata contains required fields from the window
+                    if 'metadata' not in cached_data:
+                        cached_data['metadata'] = {}
+                    cached_data['metadata'].update({
+                        'video_path': str(video_path),
+                        'start_frame': window['start_frame'],
+                        'window_idx': window['window_idx'],
+                        'fps': window.get('fps', 30),
+                        'has_context': window.get('has_context', False)
+                    })
+                    return cached_data
+            elif self.cache_type == 'chunked':
+                # For chunked cache (WindowCache), load from chunk
+                chunk_idx = window['start_frame'] // self.cache.chunk_size
+                chunk = self.cache.load_chunk(video_path, chunk_idx)
+                if chunk is not None and f"window_{window['window_idx']}" in chunk:
+                    cached_data = chunk[f"window_{window['window_idx']}"]
+                    logger.info(f"👽 Getting cached window {window['window_idx']} from chunk {chunk_idx} for {Path(video_path).name}")
+                    # Ensure metadata contains required fields from the window
+                    if 'metadata' not in cached_data:
+                        cached_data['metadata'] = {}
+                    cached_data['metadata'].update({
+                        'video_path': str(video_path),
+                        'start_frame': window['start_frame'],
+                        'window_idx': window['window_idx'],
+                        'fps': window.get('fps', 30),
+                        'has_context': window.get('has_context', False)
+                    })
                     return cached_data
             else:
-                # For per-video caching
-                cache_key = f"{video_path}_window_{window['window_idx']}"
+                # For built-in cache
                 cached_data = self._load_cached_window(video_path, window['window_idx'])
                 if cached_data is not None:
+                    logger.info(f"👽 Getting cached window {window['window_idx']} for video {Path(video_path).name}")
+                    # Ensure metadata contains required fields from the window
+                    if 'metadata' not in cached_data:
+                        cached_data['metadata'] = {}
+                    cached_data['metadata'].update({
+                        'video_path': str(video_path),
+                        'start_frame': window['start_frame'],
+                        'window_idx': window['window_idx'],
+                        'fps': window.get('fps', 30),
+                        'has_context': window.get('has_context', False)
+                    })
                     return cached_data
             
             # Process the single window
@@ -2699,12 +2756,13 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
                         'blink_state': torch.tensor(np.stack(blink_states), dtype=torch.float32),
 
-                        # Add per-frame warps (now extracted for each frame)
+                        # Add UV warps from calculate_target_warps (matching H5 cache)
                         # Note: warps have shape [1, T, ...] so we squeeze the batch dimension
-                        'xy_warps': emo_features.get('xy_warps', torch.zeros(1, self.sequence_length, 16, 64, 64, 3)).squeeze(0),
-                        'rigid_warps': emo_features.get('rigid_warps', torch.zeros(1, self.sequence_length, 16, 64, 64, 3)).squeeze(0),
                         'uv_warps': emo_features.get('uv_warps', torch.zeros(1, self.sequence_length, 16, 64, 64, 3)).squeeze(0),
-                        'source_theta_warp': emo_features.get('source_theta', torch.zeros(1, self.sequence_length, 3, 4)).squeeze(0),
+                        'target_masks': emo_features.get('target_masks', torch.zeros(1, self.sequence_length, 1, 512, 512)).squeeze(0),
+
+                        # Add identity info for reconstruction
+                        'identity_info': emo_features.get('identity_info', {}),
 
                         # Add lip metrics for audio-lip correlation loss
                         'lip_metrics': {
@@ -2719,7 +2777,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                             'video_path': str(video_path),
                             'start_frame': window['start_frame'],
                             'fps': window['fps'],
-                            'has_context': window['has_context']
+                            'has_context': window['has_context'],
+                            'window_idx': window['window_idx']
                         }
                     }
                     
@@ -2742,9 +2801,97 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                             window_data[key] = torch.zeros(expected_shape, dtype=torch.float32)
                     
                     # Save to cache before returning
-                    # Only save to per-video cache if not using single-bucket
-                    if self.cache_type != 'single_bucket':
+                    if self.cache_type == 'chunked':
+                        # For chunked cache (WindowCache), use save_chunk
+                        chunk_idx = window['start_frame'] // self.cache.chunk_size
+                        self.cache.save_chunk(
+                            video_path=video_path,
+                            chunk_idx=chunk_idx,
+                            chunk_data={f"window_{window['window_idx']}": window_data},
+                            start_frame=window['start_frame'],
+                            end_frame=window['start_frame'] + self.sequence_length
+                        )
+                        logger.info(f"Saved window {window['window_idx']} to chunk {chunk_idx} for {Path(video_path).name}")
+                    elif self.cache_type == 'single_bucket':
+                        # For single-bucket cache, append the window
+                        # Store the window with index for later batch saving
+                        if not hasattr(self, '_pending_windows'):
+                            self._pending_windows = []
+                        self._pending_windows.append((idx, window_data))
+
+                        # Batch save periodically to avoid memory issues
+                        if len(self._pending_windows) >= self.max_batch_size:
+                            self._save_pending_windows()
+
+                    elif self.cache_type == 'built_in':
+                        # For built-in cache, use the original save method
                         self._save_window_to_cache(video_path, window['window_idx'], window_data)
+
+                    # Generate EMO frames if enabled
+                    if self.generate_emo_frames and self.va_bridge is not None and self.emo_identity_image is not None:
+                        try:
+                            with torch.no_grad():
+                                # Clear VA bridge cache to ensure fresh embeddings for EMO identity
+                                if hasattr(self.va_bridge, 'clear_cache'):
+                                    self.va_bridge.clear_cache()
+
+                                # Select keyframe indices
+                                T = window_data['theta'].shape[0]
+                                keyframe_indices = np.linspace(0, T-1, self.emo_keyframes_per_window, dtype=int)
+
+                                emo_frames = []
+                                for frame_idx in keyframe_indices:
+                                    # Extract motion for this frame and ensure all on same device
+                                    frame_motion = {
+                                        'theta': window_data['theta'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device),  # [1, 1, 3, 4]
+                                        'expression_embed': window_data['expression_embed'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device),  # [1, 1, 128]
+                                        'uv_warps': window_data['uv_warps'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device) if 'uv_warps' in window_data else None,  # [1, 1, 16, 64, 64, 3]
+                                    }
+
+                                    # Check if we have uv_warps (required for EMO generation)
+                                    if frame_motion['uv_warps'] is None:
+                                        logger.debug(f"Skipping EMO frame {frame_idx}: uv_warps not available")
+                                        emo_frames.append(torch.zeros(3, 512, 512, device=self.device))
+                                        continue
+
+                                    # Generate EMO frame using va_bridge
+                                    # Output will be [1, 1, C, H, W]
+                                    emo_identity = self.emo_identity_image.to(self.device)
+
+                                    # DEBUG: Save identity image once to verify it's correct
+                                    if frame_idx == 0 and idx % 100 == 0:
+                                        import torchvision
+                                        torchvision.utils.save_image(emo_identity[0], f'debug_emo_identity_window_{idx}.png')
+                                        logger.info(f"Saved debug EMO identity image for window {idx}")
+
+                                    emo_output = self.va_bridge.generate_frames_from_motion(
+                                        motion_outputs=frame_motion,
+                                        source_img=emo_identity,
+                                        use_black_background=True  # Use black background to ensure clean EMO render
+                                    )
+
+                                    if emo_output is not None:
+                                        # Extract the single frame [1, 1, C, H, W] -> [C, H, W]
+                                        frame = emo_output[0, 0]
+                                        emo_frames.append(frame)
+                                    else:
+                                        # Add blank frame if generation failed
+                                        emo_frames.append(torch.zeros(3, 512, 512, device=self.device))
+
+                                # Stack EMO frames [num_keyframes, C, H, W]
+                                if len(emo_frames) == 0:
+                                    raise RuntimeError(f"EMO generation is enabled but produced no frames for window {idx}")
+
+                                window_data['emo_frames'] = torch.stack(emo_frames, dim=0)
+                                window_data['emo_keyframe_indices'] = torch.tensor(keyframe_indices, dtype=torch.long)
+                                logger.info(f"✅ Generated {len(emo_frames)} EMO frames for window {idx}")
+
+                        except Exception as e:
+                            logger.error(f"❌ FAILED to generate EMO frames for window {idx}: {e}")
+                            import traceback
+                            logger.error(traceback.format_exc())
+                            # EMO frames are REQUIRED - re-raise the exception
+                            raise RuntimeError(f"EMO frame generation is mandatory but failed: {e}") from e
 
                     # Return the single window data directly
                     return window_data
@@ -2765,6 +2912,33 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             import traceback
             logger.error(traceback.format_exc())
             return self._get_zero_sample()
+
+    def _save_pending_windows(self):
+        """Save any pending windows to SingleBucketCache."""
+        if not hasattr(self, '_pending_windows') or not self._pending_windows:
+            return
+
+        try:
+            # Sort windows by index
+            self._pending_windows.sort(key=lambda x: x[0])
+
+            # Prepare windows list for appending
+            windows_to_save = [window_data for _, window_data in self._pending_windows]
+
+            # Append to cache
+            self.cache.append_windows(windows_to_save)
+            logger.info(f"Saved {len(self._pending_windows)} windows to SingleBucketCache")
+
+            # Clear pending windows and force garbage collection
+            self._pending_windows = []
+            del windows_to_save
+
+            # Force memory cleanup
+            import gc
+            gc.collect()
+
+        except Exception as e:
+            logger.error(f"Error saving pending windows: {str(e)}")
 
     def _get_zero_sample(self) -> Dict[str, torch.Tensor]:
         """Return a zero-filled sample with all required features including landmarks and lip motion"""

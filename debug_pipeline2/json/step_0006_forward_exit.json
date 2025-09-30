@@ -1,0 +1,10 @@
+{
+  "step": 6,
+  "method": "forward",
+  "stage": "exit",
+  "timestamp": "2025-09-19T16:04:48.251627",
+  "data": {
+    "success": true,
+    "num_images": 1
+  }
+}

@@ -19,6 +19,7 @@ if 'nemo' not in sys.path:
     sys.path.insert(0, 'nemo')
 from logger import logger
 from syncnet import SyncNetInstance
+from synchformer_wrapper import SynchformerInstance
 
 
 def safe_matrix_to_euler(R: torch.Tensor) -> torch.Tensor:
@@ -167,8 +168,14 @@ class VASALossModule:
 
         self.speed_handler = SpeedLossHandler(num_buckets=9)
 
- # Initialize SyncNet evaluator
-        self.syncnet = SyncNetInstance(device=device)
+ # Initialize sync evaluator (SyncNet or Synchformer)
+        use_synchformer = config.loss.get('use_synchformer', False)
+        if use_synchformer:
+            logger.info("Using Synchformer for audio-visual synchronization")
+            self.syncnet = SynchformerInstance(device=device)
+        else:
+            logger.info("Using SyncNet for audio-visual synchronization")
+            self.syncnet = SyncNetInstance(device=device)
         self.syncnet.eval()
         
         self.batch_size =  config.train.batch_size
@@ -176,7 +183,7 @@ class VASALossModule:
            # Extract loss weights from config
         self.lambda_pose = config.loss.lambda_pose
         self.lambda_dynamics = config.loss.lambda_dynamics
-        self.lambda_gaze = config.loss.lambda_gaze_direction
+        self.lambda_gaze_direction = config.loss.lambda_gaze_direction
         self.lambda_distance = config.loss.lambda_head_distance
         self.lambda_emotion = config.loss.lambda_emotion
         self.lambda_speed = config.loss.lambda_speed
@@ -207,11 +214,16 @@ class VASALossModule:
         self.lambda_consist = getattr(config.loss, 'lambda_consist', 1.0)
         self.lambda_cross_id = getattr(config.loss, 'lambda_cross_id', 0.1)
         self.lambda_velocity = getattr(config.loss, 'lambda_velocity', 1e-4)
+        self.lambda_expression_l1 = getattr(config.loss, 'lambda_expression_l1', 0.5)  # Balance between L1 and L2
         self.lambda_smoothness = getattr(config.loss, 'lambda_smoothness', 1e-4)
 
         # Audio-lip correlation loss weight
         self.lambda_audio_lip = getattr(config.loss, 'lambda_audio_lip', 2.0)
-        
+
+        # L1 regularization for UV warps to prevent collapse
+        self.lambda_warp_l1 = getattr(config.loss, 'lambda_warp_l1', 0.1)
+        self.lambda_warp_tv = getattr(config.loss, 'lambda_warp_tv', 0.05)  # Total variation regularization
+
         # Initialize identity feature extractor for cross-id loss
         try:
             from facenet_pytorch import InceptionResnetV1
@@ -478,7 +490,48 @@ class VASALossModule:
                 if isinstance(v, torch.Tensor):
                     logger.debug(f"  {k}: {v.item():.6f}")
 
-            # 2. Expression Verification Loss
+            # 1.5 Motion Diversity Loss - Encourage variance to prevent collapse
+            logger.debug("\nComputing motion diversity loss:")
+            if 'expression_embed' in outputs:
+                expr = outputs['expression_embed']  # [B, T, D]
+                B, T, D = expr.shape
+
+                # Compute entropy of expression embeddings to encourage diversity
+                # Higher entropy = more diverse expressions
+                expr_flat = expr.view(-1, D)  # Flatten to [B*T, D]
+
+                # Normalize to probabilities using softmax
+                expr_norm = F.softmax(expr_flat.abs(), dim=-1)  # Use abs to handle negative values
+
+                # Compute entropy: -sum(p * log(p))
+                entropy = -(expr_norm * torch.log(expr_norm + 1e-8)).sum(-1).mean()
+
+                # We want HIGH entropy (diverse), so we minimize negative entropy
+                diversity_loss = -entropy * 0.1  # Small weight to encourage diversity
+                losses['motion_diversity'] = diversity_loss
+
+                logger.debug(f"  Expression entropy: {entropy.item():.6f}")
+                logger.debug(f"  Motion diversity loss: {diversity_loss.item():.6f}")
+
+                # Also compute standard deviation as a metric
+                expr_std = expr.std(dim=-1).mean()
+                losses['expression_std'] = expr_std  # Just for monitoring
+                logger.debug(f"  Expression std: {expr_std.item():.6f}")
+
+            # 2. Warp Regularization Loss
+            logger.debug("\nComputing warp regularization losses:")
+            # Check for any warp fields (UV warps is our main one now)
+            if ('uv_warps' in outputs and 'uv_warps' in targets) or \
+               ('xy_warps' in outputs and 'xy_warps' in targets) or \
+               ('rigid_warps' in outputs and 'rigid_warps' in targets):
+                warp_losses = self._compute_warp_regularization_losses(outputs, targets)
+                losses.update(warp_losses)
+                logger.debug("Warp regularization losses:")
+                for k, v in warp_losses.items():
+                    if isinstance(v, torch.Tensor):
+                        logger.debug(f"  {k}: {v.item():.6f}")
+
+            # 3. Expression Verification Loss
             logger.debug("\nChecking verification loss conditions:")
             should_compute_verify = (
                 current_epoch is not None and 
@@ -611,10 +664,11 @@ class VASALossModule:
             compute_disentangle = False
             disentangle_freq = getattr(self.config.loss, 'disentangle_compute_freq', 1)
             
-            if step is not None and step % disentangle_freq == 0:
-                compute_disentangle = True
-            elif step is None:  # Always compute during validation
-                compute_disentangle = True
+            # JP - 🤷 unplug this because is it making the motion predictions blur to sameness - https://wandb.ai/snoozie/vasa-overfitting/runs/9d0di1su?nw=nwusersnoozie
+            # if step is not None and step % disentangle_freq == 0:
+            #     compute_disentangle = True
+            # elif step is None:  # Always compute during validation
+            #     compute_disentangle = True
                 
             if compute_disentangle and has_pose and has_dynamics:
                 # Get source identity from target frames (first frame)
@@ -675,12 +729,25 @@ class VASALossModule:
             disentangle_term = losses.get('disentangle_total', torch.tensor(0.0, device=device))
             vel_smooth_term = losses.get('velocity_smoothness', torch.tensor(0.0, device=device))
 
+            # Aggregate warp losses (UV warps is the main one now)
+            warp_term = (
+                losses.get('uv_warp_loss', torch.tensor(0.0, device=device)) +
+                losses.get('uv_warp_smooth', torch.tensor(0.0, device=device)) +
+                losses.get('xy_warp_loss', torch.tensor(0.0, device=device)) +
+                losses.get('xy_warp_smooth', torch.tensor(0.0, device=device)) +
+                losses.get('rigid_warp_loss', torch.tensor(0.0, device=device)) +
+                losses.get('rigid_warp_smooth', torch.tensor(0.0, device=device)) +
+                losses.get('source_theta_warp_loss', torch.tensor(0.0, device=device)) +
+                losses.get('warp_temporal_consistency', torch.tensor(0.0, device=device))
+            )
+
             logger.debug(f"  Reconstruction term: {recon_term.item():.6f}")
             logger.debug(f"  Verification term: {verify_term.item():.6f}")
             logger.debug(f"  Control term: {control_term.item():.6f}")
             logger.debug(f"  Sync term: {sync_term.item():.6f}")
             logger.debug(f"  Disentangle term: {disentangle_term.item():.6f}")
             logger.debug(f"  Velocity/smoothness term: {vel_smooth_term.item():.6f}")
+            logger.debug(f"  Warp term (UV + smoothness): {warp_term.item():.6f}")
             
             # Get diversity term
             diversity_term = losses.get('motion_diversity', torch.tensor(0.0, device=device))
@@ -710,6 +777,21 @@ class VASALossModule:
                 losses['audio_lip_correlation'] = audio_lip_term
                 logger.debug(f"Final audio-lip correlation loss term: {audio_lip_term.item():.6f}")
                 logger.debug("=== Finished Audio-Lip Correlation Loss ===\n")
+
+                # Add direct mouth openness supervision
+                if 'openness' in targets['lip_metrics']:
+                    target_openness = targets['lip_metrics']['openness']  # [B, T]
+                    # Normalize openness to [0, 1] range
+                    openness_norm = (target_openness - target_openness.min()) / (target_openness.max() - target_openness.min() + 1e-6)
+
+                    # The audio energy should correlate with mouth openness
+                    audio_energy = torch.norm(conditions[audio_key], dim=-1)  # [B, T]
+                    audio_norm = (audio_energy - audio_energy.min()) / (audio_energy.max() - audio_energy.min() + 1e-6)
+
+                    # Direct supervision: mouth should be open when audio is strong
+                    mouth_openness_loss = F.mse_loss(openness_norm, audio_norm) * 10.0  # Strong weight
+                    losses['mouth_openness_direct'] = mouth_openness_loss
+                    logger.debug(f"Mouth openness direct loss: {mouth_openness_loss.item():.6f}")
             else:
                 missing_keys = []
                 if not audio_key:
@@ -758,7 +840,7 @@ class VASALossModule:
                 logger.debug("  No frames provided for perceptual loss")
                 losses['perceptual'] = torch.tensor(0.0, device=device)
 
-            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + diversity_term + perceptual_term + audio_lip_term
+            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + warp_term + diversity_term + perceptual_term + audio_lip_term
             losses['total'] = total_loss
             logger.debug(f"Total loss (with perceptual): {total_loss.item():.6f}")
 
@@ -1026,65 +1108,182 @@ class VASALossModule:
             logger.error(traceback.format_exc())
             raise
     
+    def _compute_temporal_offset(
+        self,
+        generated_frames: torch.Tensor,  # [B, T, C, H, W]
+        audio_features: torch.Tensor,    # [B, T, D] - can be MFCC or wav2vec features
+        window_size: int = 5
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute temporal offset between audio and video using sliding window correlation.
+
+        Returns:
+            offset_magnitude: Magnitude of temporal offset (frames)
+            offset_timestamp: Timestamp where maximum misalignment occurs
+        """
+        # Validate inputs
+        if generated_frames.dim() != 5:
+            raise ValueError(f"Expected generated_frames to have 5 dims [B, T, C, H, W], got {generated_frames.shape}")
+
+        B, T, C, H, W = generated_frames.shape
+        device = generated_frames.device
+
+        # Ensure audio has batch dimension
+        if audio_features.dim() == 2:  # [T, D]
+            audio_features = audio_features.unsqueeze(0).expand(B, -1, -1)
+        elif audio_features.dim() != 3:
+            raise ValueError(f"Expected audio_features to have 2 or 3 dims, got {audio_features.shape}")
+
+        # Ensure batch sizes match
+        if audio_features.shape[0] != B:
+            if audio_features.shape[0] == 1:
+                audio_features = audio_features.expand(B, -1, -1)
+            else:
+                raise ValueError(f"Batch size mismatch: frames {B} vs audio {audio_features.shape[0]}")
+
+        # If using Synchformer, it can directly predict offsets
+        if isinstance(self.syncnet, SynchformerInstance):
+            # Get offset predictions from Synchformer
+            with torch.no_grad():
+                logits = self.syncnet.compute_sync_score(
+                    generated_frames, audio_features, return_logits=True
+                )
+                # Synchformer outputs 21 classes for offsets from -2 to +2 seconds
+                # Convert logits to offset predictions
+                offset_probs = F.softmax(logits, dim=-1)
+
+                # Create offset grid (21 classes from -10 to +10 frames at 25fps)
+                offset_grid = torch.linspace(-10, 10, 21, device=device)
+
+                # Weighted average to get predicted offset
+                offset_magnitude = (offset_probs * offset_grid).sum(dim=-1)
+
+                # Find timestamp of maximum misalignment (highest entropy in predictions)
+                entropy = -(offset_probs * torch.log(offset_probs + 1e-8)).sum(dim=-1)
+                offset_timestamp = torch.zeros(B, device=device)  # Simplified: use frame 0
+
+                return offset_magnitude.abs(), offset_timestamp
+
+        # Fallback: Use cross-correlation based offset detection
+        offsets = []
+        timestamps = []
+
+        for b in range(B):
+            max_offset = 0
+            max_timestamp = 0
+            max_correlation = -float('inf')
+
+            # Slide window through the sequence
+            for t in range(0, T - window_size + 1):
+                window_frames = generated_frames[b:b+1, t:t+window_size]
+                window_audio = audio_features[b:b+1, t:t+window_size]
+
+                # Compute correlation at different offsets
+                for offset in range(-2, 3):  # Check offsets from -2 to +2 frames
+                    if t + offset < 0 or t + offset + window_size > T:
+                        continue
+
+                    offset_audio = audio_features[b:b+1, t+offset:t+offset+window_size]
+
+                    # Simple correlation metric (can be replaced with more sophisticated sync evaluation)
+                    with torch.no_grad():
+                        if hasattr(self.syncnet, 'evaluate'):
+                            _, confidence = self.syncnet.evaluate(
+                                window_frames.transpose(1, 2),  # [B, C, T, H, W]
+                                offset_audio.unsqueeze(1),      # [B, 1, T, D]
+                                batch_size=1
+                            )
+                            correlation = confidence.item()
+                        else:
+                            # Simple correlation fallback
+                            correlation = 0.0
+
+                    if correlation > max_correlation:
+                        max_correlation = correlation
+                        max_offset = abs(offset)
+                        max_timestamp = t
+
+            offsets.append(max_offset)
+            timestamps.append(max_timestamp)
+
+        offset_magnitude = torch.tensor(offsets, dtype=torch.float32, device=device)
+        offset_timestamp = torch.tensor(timestamps, dtype=torch.float32, device=device)
+
+        return offset_magnitude, offset_timestamp
+
     def _compute_sync_loss(
         self,
         generated_frames: torch.Tensor,  # [B, T, C, H, W]
         targets: Dict[str, torch.Tensor]
     ) -> torch.Tensor:
         """
-        Compute sync loss using SyncNet to evaluate lip-audio synchronization.
-        Returns a loss that should be minimized (lower is better).
+        Compute sync loss as described in the paper using temporal offset detection.
+
+        L_sync = (Δt_p - Δt_gt)² + (t_p - t_gt)²
+
+        where:
+        - Δt_p, Δt_gt: predicted and ground truth temporal offset magnitudes
+        - t_p, t_gt: timestamps where misalignment occurs
         """
         try:
-            # Get audio features - prefer MFCC for SyncNet, fallback to audio_features
+            # Get audio features - check multiple possible keys
             if 'mfcc' in targets:
                 audio_features = targets['mfcc']
                 logger.debug("Using MFCC features for sync loss")
+            elif 'audio_mfcc' in targets:
+                audio_features = targets['audio_mfcc']
+                logger.debug("Using audio_mfcc features for sync loss")
             elif 'audio_features' in targets:
                 audio_features = targets['audio_features']
-                logger.debug("Using audio_features for sync loss")
+                logger.debug("Using audio_features (wav2vec) for sync loss")
             else:
-                logger.warning("No audio features (mfcc or audio_features) in targets, returning zero sync loss")
+                logger.warning(f"No audio features in targets, returning zero sync loss. Available keys: {list(targets.keys())}")
                 return torch.tensor(0.0, device=generated_frames.device)
-            
+
+            # Get ground truth frames if available
+            gt_frames = targets.get('frames', None)
+
             # Ensure proper shapes
             B, T = generated_frames.shape[:2]
-            
+
             # Only compute sync loss if we have enough frames
-            if T < 5:  # SyncNet needs at least 5 frames
+            if T < 5:
                 logger.debug(f"Not enough frames for sync loss (T={T})")
                 return torch.tensor(0.0, device=generated_frames.device)
-            
-            # Prepare frames for SyncNet (expects [B, C, T, H, W])
-            if generated_frames.dim() == 5 and generated_frames.shape[1] == T:
-                frames_for_sync = generated_frames.transpose(1, 2)  # [B, T, C, H, W] -> [B, C, T, H, W]
-            else:
-                frames_for_sync = generated_frames
-            
-            # Prepare audio (SyncNet expects [B, 1, T, D])
-            if audio_features.dim() == 3:  # [B, T, D]
-                audio_for_sync = audio_features.unsqueeze(1)  # -> [B, 1, T, D]
-            else:
-                audio_for_sync = audio_features
-            
-            # Evaluate sync with SyncNet
-            with torch.no_grad():
-                offset, confidence = self.syncnet.evaluate(
-                    frames=frames_for_sync,
-                    audio_features=audio_for_sync,
-                    batch_size=B
+
+            # Ensure audio features have the right shape [B, T, D]
+            if audio_features.dim() == 2:  # [T, D]
+                audio_features = audio_features.unsqueeze(0)  # Add batch dim
+            elif audio_features.dim() == 4:  # [B, 1, T, D]
+                audio_features = audio_features.squeeze(1)  # Remove channel dim
+
+            # Compute temporal offsets for generated frames
+            delta_t_pred, t_pred = self._compute_temporal_offset(
+                generated_frames, audio_features
+            )
+
+            # Compute temporal offsets for ground truth if available
+            if gt_frames is not None:
+                delta_t_gt, t_gt = self._compute_temporal_offset(
+                    gt_frames, audio_features
                 )
-            
-            # Convert confidence to loss
-            # SyncNet confidence is higher when sync is better
-            # We want to minimize loss, so use negative confidence
-            # Scale by 5.0 to make the loss magnitude reasonable
-            sync_loss = 5.0 - confidence.mean()  # Target confidence of 5.0
-            
-            # Ensure loss is positive
-            sync_loss = torch.clamp(sync_loss, min=0.0)
-            
-            logger.debug(f"Sync confidence: {confidence.mean().item():.4f}, loss: {sync_loss.item():.4f}")
+            else:
+                # If no ground truth, assume perfect sync (offset=0, timestamp=0)
+                delta_t_gt = torch.zeros_like(delta_t_pred)
+                t_gt = torch.zeros_like(t_pred)
+
+            # Compute sync loss as per the paper equation:
+            # L_sync = (Δt_p - Δt_gt)² + (t_p - t_gt)²
+            offset_loss = F.mse_loss(delta_t_pred, delta_t_gt)
+            timestamp_loss = F.mse_loss(t_pred, t_gt)
+
+            # Normalize timestamp loss by sequence length to make it scale-invariant
+            timestamp_loss = timestamp_loss / T
+
+            # Combine the two components
+            sync_loss = offset_loss + timestamp_loss
+
+            logger.debug(f"Sync loss - Offset: {offset_loss.item():.4f}, Timestamp: {timestamp_loss.item():.4f}, Total: {sync_loss.item():.4f}")
             
             return sync_loss
             
@@ -1243,6 +1442,126 @@ class VASALossModule:
             }
 
 
+    def _compute_warp_regularization_losses(
+        self,
+        pred: Dict[str, torch.Tensor],
+        target: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        """Compute regularization losses for warping fields."""
+        losses = {}
+
+        # Get lambda values from config
+        lambda_warp = getattr(self.config.loss, 'lambda_warp', 1.0)
+        lambda_warp_smooth = getattr(self.config.loss, 'lambda_warp_smooth', 0.01)
+        lambda_warp_temporal = getattr(self.config.loss, 'lambda_warp_temporal', 0.1)
+        lambda_source_theta = getattr(self.config.loss, 'lambda_source_theta', 0.5)
+
+        # Warp consistency losses
+        if 'xy_warps' in pred and 'xy_warps' in target:
+            # L2 loss for xy warps
+            losses['xy_warp_loss'] = F.mse_loss(pred['xy_warps'], target['xy_warps']) * lambda_warp
+
+            # Smoothness regularization for xy warps (penalize large spatial gradients)
+            xy_warp_smooth = self._compute_warp_smoothness(pred['xy_warps'])
+            losses['xy_warp_smooth'] = xy_warp_smooth * lambda_warp_smooth
+
+        if 'rigid_warps' in pred and 'rigid_warps' in target:
+            # L2 loss for rigid warps
+            losses['rigid_warp_loss'] = F.mse_loss(pred['rigid_warps'], target['rigid_warps']) * lambda_warp
+
+            # Rigid warps should be smoother than non-rigid
+            rigid_warp_smooth = self._compute_warp_smoothness(pred['rigid_warps'])
+            losses['rigid_warp_smooth'] = rigid_warp_smooth * lambda_warp_smooth * 2  # Extra smoothness for rigid
+
+        if 'uv_warps' in pred and 'uv_warps' in target:
+            # L2 loss for uv warps (reconstruction)
+            losses['uv_warp_loss'] = F.mse_loss(pred['uv_warps'], target['uv_warps']) * lambda_warp
+
+            # L1 loss for uv warps (sparsity and robustness to prevent collapse)
+            losses['uv_warp_l1'] = F.l1_loss(pred['uv_warps'], target['uv_warps']) * self.lambda_warp_l1
+
+            # L1 on velocity (frame-to-frame differences) for temporal consistency
+            if pred['uv_warps'].shape[1] > 1:
+                pred_vel = pred['uv_warps'][:, 1:] - pred['uv_warps'][:, :-1]
+                target_vel = target['uv_warps'][:, 1:] - target['uv_warps'][:, :-1]
+                losses['uv_warp_velocity_l1'] = F.l1_loss(pred_vel, target_vel) * (self.lambda_warp_l1 * 0.5)
+
+            # Smoothness regularization
+            uv_warp_smooth = self._compute_warp_smoothness(pred['uv_warps'])
+            losses['uv_warp_smooth'] = uv_warp_smooth * lambda_warp_smooth
+
+            # Total variation (TV-L1) regularization for spatial smoothness
+            if self.lambda_warp_tv > 0:
+                tv_loss = self._compute_tv_loss(pred['uv_warps'])
+                losses['uv_warp_tv'] = tv_loss * self.lambda_warp_tv
+
+        if 'source_theta_warp' in pred and 'source_theta_warp' in target:
+            # L2 loss for source theta warp
+            losses['source_theta_warp_loss'] = F.mse_loss(pred['source_theta_warp'], target['source_theta_warp']) * lambda_source_theta
+
+        # Temporal consistency loss for warps
+        # Check for any available warp field for temporal consistency
+        warp_field = None
+        if pred.get('uv_warps', None) is not None:
+            warp_field = pred['uv_warps']
+        elif pred.get('xy_warps', None) is not None:
+            warp_field = pred['xy_warps']
+
+        if warp_field is not None and warp_field.shape[1] > 1:
+            # Penalize large temporal changes in warps
+            temporal_diff = warp_field[:, 1:] - warp_field[:, :-1]
+            losses['warp_temporal_consistency'] = temporal_diff.abs().mean() * lambda_warp_temporal
+
+        return losses
+
+    def _compute_warp_smoothness(self, warp: torch.Tensor) -> torch.Tensor:
+        """Compute smoothness regularization for warp fields."""
+        # warp shape: [B, T, D, H, W, 3] or similar
+        # Compute spatial gradients
+        if warp.dim() == 6:  # [B, T, D, H, W, 3]
+            # Compute differences along spatial dimensions
+            diff_h = warp[:, :, :, 1:, :, :] - warp[:, :, :, :-1, :, :]
+            diff_w = warp[:, :, :, :, 1:, :] - warp[:, :, :, :, :-1, :]
+            diff_d = warp[:, :, 1:, :, :, :] - warp[:, :, :-1, :, :, :]
+
+            # L2 norm of gradients
+            smoothness = (diff_h.pow(2).mean() + diff_w.pow(2).mean() + diff_d.pow(2).mean()) / 3.0
+        else:
+            # Fallback for different dimensions
+            smoothness = torch.tensor(0.0, device=warp.device)
+
+        return smoothness
+
+    def _compute_tv_loss(self, warp: torch.Tensor) -> torch.Tensor:
+        """Compute Total Variation (TV-L1) loss for spatial smoothness.
+
+        TV loss encourages piecewise smooth warps by penalizing the L1 norm of gradients.
+        This is particularly useful for preventing over-deformation and maintaining
+        sparse, localized deformations.
+        """
+        if len(warp.shape) == 6:  # [B, T, D, H, W, C]
+            # Compute spatial gradients (subsample for efficiency)
+            warp_sub = warp[:, :, ::2, ::2, ::2, :]  # Reduce spatial dimensions by half
+
+            # TV along height
+            diff_h = torch.abs(warp_sub[:, :, :, 1:, :, :] - warp_sub[:, :, :, :-1, :, :])
+            # TV along width
+            diff_w = torch.abs(warp_sub[:, :, :, :, 1:, :] - warp_sub[:, :, :, :, :-1, :])
+            # TV along depth
+            diff_d = torch.abs(warp_sub[:, :, 1:, :, :, :] - warp_sub[:, :, :-1, :, :, :])
+
+            # L1 norm of gradients (sum then mean)
+            tv_loss = diff_h.mean() + diff_w.mean() + diff_d.mean()
+        elif len(warp.shape) == 5:  # [B, T, H, W, C]
+            # 2D case
+            diff_h = torch.abs(warp[:, :, 1:, :, :] - warp[:, :, :-1, :, :])
+            diff_w = torch.abs(warp[:, :, :, 1:, :] - warp[:, :, :, :-1, :])
+            tv_loss = diff_h.mean() + diff_w.mean()
+        else:
+            tv_loss = torch.tensor(0.0, device=warp.device)
+
+        return tv_loss
+
     def _compute_reconstruction_losses(
         self,
         pred: Dict[str, torch.Tensor],
@@ -1316,25 +1635,45 @@ class VASALossModule:
                     comparison_target['translation']
                 )
 
-            # 5. Expression loss 
+            # 5. Expression loss with variance preservation
             if 'expression_embed' in pred:
-                # Apply dimension weights
-                losses['expression_loss'] = F.mse_loss(
+                # L1 loss for expression embeddings (prevents collapse, encourages sparsity)
+                losses['expression_loss'] = F.l1_loss(
                     pred['expression_embed'],
                     comparison_target['expression_embed']
-                )
-                
+                ) * self.lambda_expression_l1
+
+                # Also add MSE for smoothness
+                losses['expression_mse'] = F.mse_loss(
+                    pred['expression_embed'],
+                    comparison_target['expression_embed']
+                ) * (1.0 - self.lambda_expression_l1)  # Balance between L1 and L2
+
+                # Add variance preservation loss to prevent collapse
+                pred_std = pred['expression_embed'].std(dim=-1).mean()  # Std across features, mean across batch/time
+                target_std = comparison_target['expression_embed'].std(dim=-1).mean()
+                variance_loss = F.mse_loss(pred_std, target_std)
+                losses['expression_variance_loss'] = variance_loss * 0.1  # Weight it lower than main loss
+
+                # Add temporal variation loss to encourage dynamics
+                if pred['expression_embed'].shape[1] > 1:  # If we have temporal dimension
+                    pred_temporal_diff = (pred['expression_embed'][:, 1:] - pred['expression_embed'][:, :-1]).abs().mean()
+                    target_temporal_diff = (comparison_target['expression_embed'][:, 1:] - comparison_target['expression_embed'][:, :-1]).abs().mean()
+                    temporal_loss = F.mse_loss(pred_temporal_diff, target_temporal_diff)
+                    losses['expression_temporal_loss'] = temporal_loss * 0.05  # Small weight
+
                 # Log statistics to detect collapse
                 if step is not None and step % 100 == 0:
-                    pred_std = pred['expression_embed'].std().item()
-                    target_std = comparison_target['expression_embed'].std().item()
+                    pred_std_scalar = pred['expression_embed'].std().item()
+                    target_std_scalar = comparison_target['expression_embed'].std().item()
                     pred_mean = pred['expression_embed'].mean().item()
                     target_mean = comparison_target['expression_embed'].mean().item()
-                    logger.info(f"Expression stats - Pred: mean={pred_mean:.3f}, std={pred_std:.3f} | Target: mean={target_mean:.3f}, std={target_std:.3f}")
-                    
+                    logger.info(f"Expression stats - Pred: mean={pred_mean:.3f}, std={pred_std_scalar:.3f} | Target: mean={target_mean:.3f}, std={target_std_scalar:.3f}")
+                    logger.info(f"  Variance loss: {variance_loss.item():.6f}, Temporal loss: {temporal_loss.item() if 'temporal_loss' in locals() else 0:.6f}")
+
                     # Warn if prediction variance is collapsing
-                    if pred_std < target_std * 0.1:
-                        logger.warning(f"⚠️ Prediction variance collapse detected! pred_std={pred_std:.3f} << target_std={target_std:.3f}")
+                    if pred_std_scalar < target_std_scalar * 0.1:
+                        logger.warning(f"⚠️ Prediction variance collapse detected! pred_std={pred_std_scalar:.3f} << target_std={target_std_scalar:.3f}")
          
                 should_visualize = step is not None and step > 0 and step % self.vis_freq == 0
                 if should_visualize:
@@ -2002,7 +2341,7 @@ class VASALossModule:
                         logger.warning("NaN/Inf in final gaze loss, using zero")
                         gaze_loss = torch.tensor(0.0, device=device)
                     
-                    losses['control_gaze'] = gaze_loss * self.lambda_gaze
+                    losses['control_gaze'] = gaze_loss * self.lambda_gaze_direction
                     total_loss = total_loss + losses['control_gaze']
                     logger.debug(f"  Gaze loss: {losses['control_gaze'].item():.6f}")
                 else:
@@ -2334,18 +2673,32 @@ class VASALossModule:
                 pred_t = pred_theta[..., :3, 3]
                 target_t = target_theta[..., :3, 3]
                 
-                # Compute rotation loss using geodesic distance
-                R_diff = torch.matmul(pred_R, target_R.transpose(-2, -1))
+                # Compute rotation loss using multiple metrics for better gradients
+
+                # 1. Geodesic distance (angular error)
+                R_diff = torch.matmul(pred_R.transpose(-2, -1), target_R)
                 trace = torch.diagonal(R_diff, dim1=-2, dim2=-1).sum(-1)
                 cos_theta = (trace - 1) / 2
-                cos_theta = torch.clamp(cos_theta, -1, 1)  # Numerical stability
-                rotation_loss = torch.acos(cos_theta).mean()
-                
+                cos_theta = torch.clamp(cos_theta, -0.9999, 0.9999)  # Numerical stability
+                geodesic_loss = torch.acos(cos_theta).mean()
+
+                # 2. Frobenius norm (provides better gradients when rotations are small)
+                frobenius_loss = torch.norm(pred_R - target_R, dim=(-2, -1)).mean()
+
+                # 3. 6D rotation representation loss (for better optimization)
+                # Convert to 6D representation (first two columns of rotation matrix)
+                pred_6d = pred_R[..., :, :2].reshape(B * T, 6)
+                target_6d = target_R[..., :, :2].reshape(B * T, 6)
+                rotation_6d_loss = F.mse_loss(pred_6d, target_6d)
+
+                # Combine rotation losses with adaptive weighting
+                rotation_loss = 0.5 * geodesic_loss + 0.3 * frobenius_loss + 0.2 * rotation_6d_loss
+
                 # Compute translation loss (L2)
                 translation_loss = F.mse_loss(pred_t, target_t)
-                
-                # Combine losses with weighting
-                total_loss = rotation_loss + 0.5 * translation_loss
+
+                # Add stronger weighting to rotation to ensure head movement
+                total_loss = 2.0 * rotation_loss + translation_loss
                 
             else:
                 # Direct matrix comparison using Frobenius norm

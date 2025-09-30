@@ -46,45 +46,69 @@ class WindowSequenceSampler(Sampler):
         # Group windows by video
         self.video_windows = defaultdict(list)
         for idx, window in enumerate(dataset.windows):
-            self.video_windows[window['video_path']].append({
+            # Windows can be either dict with metadata or window info dict
+            if isinstance(window, dict):
+                # Check if it's a window info dict (from _create_window_indices)
+                if 'video_path' in window:
+                    # Window info dict structure
+                    video_path = window['video_path']
+                    window_idx = window.get('window_idx', idx)
+                    has_context = window.get('has_context', idx > 0)
+                else:
+                    # Window data dict with metadata
+                    video_path = window.get('metadata', {}).get('video_path', f'unknown_{idx}')
+                    window_idx = window.get('metadata', {}).get('window_idx', idx)
+                    has_context = window.get('metadata', {}).get('has_context', idx > 0)
+            else:
+                # Fallback for unknown structure
+                video_path = f'unknown_{idx}'
+                window_idx = idx
+                has_context = idx > 0
+
+            self.video_windows[video_path].append({
                 'index': idx,
-                'window_idx': window['window_idx'],
-                'has_context': window['has_context']
+                'window_idx': window_idx,
+                'has_context': has_context
             })
         
         # Sort windows within each video by window index
         for video_path in self.video_windows:
             self.video_windows[video_path].sort(key=lambda x: x['window_idx'])
-        
+
         # Create sequences of consecutive windows
         self.sequences = []
-        max_available_windows = max(len(windows) for windows in self.video_windows.values())
-        
-        # Warn if requested windows exceed available
-        if windows_per_sequence > max_available_windows:
-            logger.warning(f"⚠️ Requested windows_per_sequence ({windows_per_sequence}) exceeds maximum available ({max_available_windows})")
-            logger.warning(f"⚠️ Adjusting windows_per_sequence to {max_available_windows}")
-            self.windows_per_sequence = max_available_windows
-            windows_per_sequence = max_available_windows
-        
+
         for video_path, windows in self.video_windows.items():
             # Skip videos with insufficient windows
             if len(windows) < windows_per_sequence:
                 logger.debug(f"Skipping video {video_path}: only {len(windows)} windows, need {windows_per_sequence}")
                 continue
                 
-            # Create overlapping sequences
-            for start_idx in range(len(windows) - windows_per_sequence + 1):
+            # Create NON-overlapping sequences for more diversity
+            # Use stride equal to windows_per_sequence to avoid repetition
+            stride = max(1, windows_per_sequence // 2)  # 50% overlap for some temporal context
+            for start_idx in range(0, len(windows) - windows_per_sequence + 1, stride):
                 sequence = windows[start_idx:start_idx + windows_per_sequence]
                 # Ensure we have the right number of windows
                 if len(sequence) == windows_per_sequence:
                     self.sequences.append([w['index'] for w in sequence])
         
-        # Create batches from sequences
+        # Create batches from sequences - mix sequences from different videos
         self.batches = []
-        for i in range(0, len(self.sequences), 1):  # Process one sequence at a time
-            batch = self.sequences[i]
-            if len(batch) == windows_per_sequence or not drop_last:
+        sequences_per_batch = max(1, batch_size // windows_per_sequence)  # How many sequences per batch
+
+        # Shuffle sequences first for better mixing across videos
+        if self.shuffle:
+            random.shuffle(self.sequences)
+
+        for i in range(0, len(self.sequences), sequences_per_batch):
+            # Combine multiple sequences into one batch for more variety
+            batch = []
+            for j in range(sequences_per_batch):
+                if i + j < len(self.sequences):
+                    batch.extend(self.sequences[i + j])
+
+            if len(batch) >= windows_per_sequence or not drop_last:
                 self.batches.append(batch)
         
         # Ensure we have at least some sequences
@@ -94,8 +118,9 @@ class WindowSequenceSampler(Sampler):
             raise ValueError(f"No valid sequences could be created with windows_per_sequence={windows_per_sequence}")
         
         logger.info(f"Created {len(self.sequences)} window sequences from {len(self.video_windows)} videos")
-        logger.info(f"Created {len(self.batches)} batches")
-        logger.info(f"Each batch contains {windows_per_sequence} consecutive windows")
+        logger.info(f"Created {len(self.batches)} batches with {sequences_per_batch} sequences per batch")
+        logger.info(f"Using stride {stride} for sequence creation (50% overlap)")
+        logger.info(f"Each sequence contains {windows_per_sequence} consecutive windows")
     
     def __iter__(self) -> Iterator[List[int]]:
         """Iterate through batches of window indices."""
@@ -104,11 +129,27 @@ class WindowSequenceSampler(Sampler):
             indices = list(range(len(self.batches)))
             random.shuffle(indices)
             batches = [self.batches[i] for i in indices]
+            logger.info(f"🔀 Shuffled {len(batches)} batches for new epoch")
+            # Log first few batches to debug
+            for i in range(min(3, len(batches))):
+                logger.debug(f"  Batch {i}: windows {batches[i]}")
         else:
             batches = self.batches
-        
+            logger.info(f"📋 Using {len(batches)} batches in sequential order")
+
         # Yield batches of window indices
-        for batch in batches:
+        for i, batch in enumerate(batches):
+            if i < 3 or i % 50 == 0:  # Log first few batches and periodic updates
+                # Find which videos these windows come from
+                video_sources = []
+                for idx in batch[:4]:  # Check first 4 windows
+                    for video_path, windows in self.video_windows.items():
+                        if any(w['index'] == idx for w in windows):
+                            video_name = video_path.split('/')[-1]
+                            if video_name not in video_sources:
+                                video_sources.append(video_name)
+                            break
+                logger.info(f"📦 Batch {i}/{len(batches)}: {len(batch)} windows from videos: {', '.join(video_sources[:2])}")
             yield batch
     
     def __len__(self) -> int:
@@ -233,13 +274,17 @@ def create_window_sequence_collate_fn(context_size: int = 10):
         # Create batched dictionary
         batched = {}
         keys_to_stack = [
-            'frames', 'theta', 'scale', 'rotation', 'translation', 
+            'frames', 'theta', 'scale', 'rotation', 'translation',
             'expression_embed', 'audio_features', 'audio_mfcc',
             'gaze', 'emotion', 'head_distance', 'speed_bucket',
             'lips', 'right_eye', 'left_eye', 'jaw', 'nose',
             'lip_motion', 'blink_state',
-            'prev_theta', 'prev_rotation', 'prev_translation', 
-            'prev_expression', 'prev_audio'
+            'prev_theta', 'prev_rotation', 'prev_translation',
+            'prev_expression', 'prev_audio',
+            # REQUIRED warping fields for MotionTransformer
+            'xy_warps', 'rigid_warps', 'uv_warps', 'source_theta_warp',
+            # EMO (Volumetric Avatar) generated frames for comparison
+            'emo_frames', 'emo_keyframe_indices'
         ]
         
         for key in keys_to_stack:

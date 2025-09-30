@@ -2,6 +2,14 @@
 
 This repository contains the VASA implementation separated from EMOPortraits, with all components properly configured for standalone training.
 
+## 🎯 Key Features
+
+- **Clean separation** of VASA motion generation from EMOPortraits volumetric rendering
+- **Bridge interface** for easy swapping of volumetric avatar backends
+- **XY/UV warping system** for expression transfer and canonical view generation
+- **Efficient caching** with single-bucket preprocessing
+- **Multi-mode training** support (overfitting, full dataset)
+
 
 
 
@@ -289,7 +297,237 @@ The trainer will:
 | Batch Size | 1 | 4 | 4x |
 | Workers | 0 | 8 | Parallel loading |
 | Epoch Time (RTX 5090) | ~5 min | ~1.5 min | 3.3x |
+
+## 🔍 Debugging Tools
+
+### Pipeline Debug Scripts
+
+The project includes several debugging pipelines for analyzing face swap and identity preservation issues:
+
+#### 1. **pipeline3.py** - Advanced Debug Pipeline
+```bash
+# Test with video (uses joint extraction to prevent identity drift)
+python nemo/pipeline3.py --target nemo/data/VID_1.mp4 --max-frames 10
+
+# Test with single image
+python nemo/pipeline3.py --target nemo/data/IMG_2.png
+
+# Use custom source identity
+python nemo/pipeline3.py --source path/to/source.png --target path/to/target.mp4
+
+# Swap identity mode (use driver's identity with source's expression)
+python nemo/pipeline3.py --default-video --swap-identity
+
+# This is useful when the model is extracting the wrong identity
+```
+
+Features:
+- **Joint extraction**: Processes source+first_driver_frame together to calibrate embeddings
+- **Identity swapping**: `--swap-identity` flag to use driver's identity with source's expression
+- **Comprehensive tracing**: Every step logged with images and tensors
+- **Comparison grids**: Side-by-side visualization of results
+- **Warp visualization**: XY/UV warp magnitude heatmaps
+- **Debug output**: All intermediates saved to `debug_pipeline3/`
+
+#### 2. **pipeline2.py** - Reference Implementation
+```bash
+# The reference pipeline that produces correct results
+python nemo/pipeline2.py
+```
+
+This is the baseline implementation that pipeline3.py was designed to match.
+
+#### 3. **Debug Analysis Scripts**
+
+Various analysis scripts for specific debugging:
+- `check_identity_confusion.py` - Analyze identity preservation
+- `debug_identity_extraction.py` - Test identity feature extraction
+- `test_polished_face_swap.py` - Test face swap quality
+- `extract_and_apply_warps_properly.py` - Analyze warp field application
+
+### Understanding XY/UV Warps
+
+The volumetric avatar system uses two types of warps:
+
+1. **XY Warps (Rigid + Non-rigid 3D warping)**
+   - Transform from posed face → canonical (neutral) space
+   - Removes head pose and expression from source
+   - Creates identity-preserving canonical volume
+
+2. **UV Warps (Expression transfer)**
+   - Transform from canonical → target expression
+   - Applies target's expression and pose
+   - Preserves source identity while adopting target motion
+
+### Common Issues and Solutions
+
+#### Identity Drift
+**Problem**: Generated face morphs away from source identity
+**Cause**: Solo extraction (processing source alone without driver context)
+**Solution**: Joint extraction - process source+first_driver_frame together
+
+#### Feminine Appearance on Male Faces
+**Problem**: Male faces (e.g., IMG_1.png) appear feminine in results
+**Cause**: Identity embeddings not properly calibrated to driver motion space
+**Solution**: Joint extraction ensures embeddings are aligned with driver poses
+
+#### Debugging Output Structure
+```
+debug_pipeline3/
+├── trace_YYYYMMDD_HHMMSS.json    # Complete execution trace
+├── step_NNNN_*.png                # Intermediate images at each step
+├── step_NNNN_*.pt                 # Tensor checkpoints
+├── frame_NNN_result.png           # Final output frames
+└── video_comparison.png           # Grid comparison of all frames
+```
+
+### Trace Analysis
+
+The trace files contain detailed information about each processing step:
+- Entry/exit points for all major functions
+- Tensor shapes and statistics
+- Mask generation and compositing steps
+- Warp field generation and application
+
+Use the trace to identify where identity drift or other issues occur in the pipeline.
 | Convergence | 1000+ epochs | 10-20 epochs | 50x+ |
+
+## 🔄 Warping System: XY vs UV Warps
+
+The VASA model uses a sophisticated two-stage warping system to separate identity from expression, enabling clean expression transfer between faces.
+
+### Understanding XY and UV Warps
+
+#### XY Warps (Source/Canonical Space)
+- **Coordinate System**: XY refers to spatial coordinates (X=width, Y=height) in the 3D volume space (16×64×64 grid)
+- **Direction**: FROM current expression → TO canonical (neutral)
+- **Purpose**: Expression normalization - removes the current expression to get back to a neutral state
+- **Effect**: "Undoes" expressions (e.g., moves smiling mouth corners back to neutral positions)
+- **Applied to**: The source volume before any target expression is added
+
+#### UV Warps (Target/Texture Space)
+- **Coordinate System**: UV uses texture/surface coordinates (0-1 normalized range)
+- **Direction**: FROM canonical → TO target expression
+- **Purpose**: Expression application - adds the desired expression to the neutral volume
+- **Effect**: Deforms canonical volume to create new expressions (smile, frown, surprise, etc.)
+- **Applied to**: The volume after XY warping (canonical state)
+
+### The Two-Stage Pipeline
+
+```
+Source Face (😊) → [XY Warp] → Canonical (😐) → [UV Warp] → Target Face (😮)
+```
+
+1. **Stage 1 (XY Warping)**: Normalizes any expression to canonical
+2. **Stage 2 (UV Warping)**: Applies target expression to canonical
+
+This separation enables:
+- **Clean expression transfer** between any source and target
+- **Identity preservation** while changing expressions
+- **Consistent canonical representation** for all faces
+
+### Warp Extraction in Training
+
+The warps are extracted during dataset preprocessing:
+
+```python
+# In vasa_dataset.py - extract warps for training
+motion_data = {
+    'xy_warps': xy_warps,      # [T, 16, 64, 64, 3] - normalizes to canonical
+    'rigid_warps': rigid_warps,  # [T, 16, 64, 64, 3] - head pose alignment
+    'uv_warps': uv_warps,       # [T, 16, 64, 64, 3] - applies target expression
+    'source_theta': thetas      # [T, 3, 4] - pose matrices
+}
+```
+
+## 🌉 Bridge Interface Architecture
+
+To cleanly separate VASA from the volumetric avatar implementation, we've developed a bridge interface that abstracts all EMOPortraits-specific details.
+
+### Core Components
+
+#### 1. VolumetricAvatarBridgeInterface (`vasa_emo_bridge_interface.py`)
+
+Abstract interface that any volumetric avatar backend must implement:
+
+```python
+class VolumetricAvatarBridgeInterface:
+    def extract_warps_for_window(frames, identity_frame_idx) -> WindowWarpData
+    def extract_warps_for_frame(identity_frame, target_frame) -> FrameWarpData
+    def generate_canonical_view(identity_frame) -> canonical_image
+    def get_identity_embedding(identity_frame) -> identity_embed
+```
+
+#### 2. EMOPortraitsBridge
+
+Concrete implementation for EMOPortraits/MegaPortraits models:
+- Handles all model-specific details internally
+- Provides clean warp extraction API
+- Manages caching for efficiency
+- Supports batch processing for entire windows
+
+### Usage Example
+
+```python
+from vasa_emo_bridge_interface import create_bridge
+
+# Create bridge (abstracts all EMO details)
+bridge = create_bridge("emoportraits", emo_model)
+
+# Extract warps for entire window at once
+window_warps = bridge.extract_warps_for_window(
+    frames=frames,           # [T, C, H, W]
+    identity_frame_idx=0     # Use first frame as identity
+)
+
+# Access extracted warps
+xy_warps = window_warps.xy_warps        # [T, D, H, W, 3]
+rigid_warps = window_warps.rigid_warps  # [T, D, H, W, 3]
+uv_warps = window_warps.uv_warps        # [T, D, H, W, 3]
+
+# Generate canonical view
+canonical = bridge.generate_canonical_view(identity_frame)
+```
+
+### Benefits of the Bridge Pattern
+
+1. **Clean Separation**: VASA code doesn't need to know EMOPortraits internals
+2. **Easy Swapping**: Can replace volumetric backend without changing VASA
+3. **Batch Efficiency**: Process entire windows at once
+4. **Automatic Caching**: Identity embeddings cached automatically
+5. **Type Safety**: Clear data structures with type hints
+
+## 🎭 Canonical View Generation
+
+The system can generate canonical (neutral, front-facing) views from any input expression:
+
+### What is a Canonical View?
+
+A canonical view represents a person in a standardized state:
+- **Neutral expression** (no smile, closed mouth)
+- **Front-facing pose** (no head rotation)
+- **Consistent lighting** and appearance
+
+### How It Works
+
+1. **Extract identity embedding** from the source frame
+2. **Create canonical pose** (identity matrix = no rotation)
+3. **Process through volumetric model** to get canonical volume
+4. **Decode with minimal warping** to get neutral view
+
+### Applications
+
+- **Reference frame generation** for consistent motion synthesis
+- **Expression normalization** for training
+- **Identity preservation** during expression transfer
+- **Quality evaluation** of the volumetric model
+
+### Example Results
+
+When given different expressions as input, the canonical generation produces nearly identical neutral views:
+- Average difference between canonical views: < 0.1 (excellent consistency)
+- Identity fully preserved
+- All expressions normalized to neutral
 
 ## 📝 Logging Configuration
 

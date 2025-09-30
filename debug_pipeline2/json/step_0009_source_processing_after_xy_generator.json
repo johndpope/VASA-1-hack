@@ -1,0 +1,9 @@
+{
+  "step": 9,
+  "method": "source_processing",
+  "stage": "after_xy_generator",
+  "timestamp": "2025-09-19T19:59:50.935379",
+  "data": {
+    "num_outputs": 1
+  }
+}

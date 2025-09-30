@@ -1,0 +1,7 @@
+{
+  "step": 6,
+  "method": "source_processing",
+  "stage": "before_predict_embed",
+  "timestamp": "2025-09-19T19:59:50.803364",
+  "data": {}
+}

@@ -10,13 +10,21 @@ import logging
 from vasa_dataset import VASAIntegratedDataset
 from single_bucket_cache import SingleBucketCache
 import argparse
+import gc
+import traceback
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def preprocess_and_cache(dataset, cache_dir: Path):
-    """Preprocess all windows and save to single-bucket cache."""
+def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True):
+    """Preprocess all windows and save to single-bucket cache.
+
+    Args:
+        dataset: The VASA dataset
+        cache_dir: Directory to save cache
+        resume: If True, resume from existing partial cache
+    """
 
     cache = SingleBucketCache(
         cache_dir=cache_dir,
@@ -25,48 +33,131 @@ def preprocess_and_cache(dataset, cache_dir: Path):
         compression_level=4
     )
 
-    if cache.has_cache():
-        logger.info("Cache already exists. Delete it first if you want to rebuild.")
+    # Check if we can resume from existing cache
+    existing_windows = []
+    processed_indices = set()
+    start_idx = 0
+
+    if cache.has_cache() and resume:
+        logger.info("🔄 Found existing cache, checking for resume capability...")
+        info = cache.get_cache_info()
+        logger.info(f"Cache info: {info}")
+
+        # Load existing windows to check what's already processed
+        try:
+            # Try to load metadata to see how many windows are already cached
+            existing_count = info.get('num_windows', 0)
+            if existing_count > 0:
+                logger.info(f"✅ Found {existing_count} already processed windows")
+                # Load existing windows to get their indices
+                for i in range(existing_count):
+                    try:
+                        window = cache.load_window(i)
+                        if window and 'metadata' in window and 'window_index' in window['metadata']:
+                            processed_indices.add(window['metadata']['window_index'])
+                            existing_windows.append(window)
+                    except:
+                        break
+                logger.info(f"📊 Successfully loaded {len(processed_indices)} existing windows")
+                logger.info(f"🚀 Will skip already processed indices: {sorted(processed_indices)[:10]}...")
+        except Exception as e:
+            logger.warning(f"Could not load existing cache for resume: {e}")
+            logger.info("Starting fresh...")
+    elif cache.has_cache() and not resume:
+        logger.info("Cache already exists. Delete it first if you want to rebuild from scratch.")
         info = cache.get_cache_info()
         logger.info(f"Cache info: {info}")
         return
 
-    logger.info(f"Processing {len(dataset)} windows...")
+    logger.info(f"Processing {len(dataset)} windows (skipping {len(processed_indices)} already done)...")
 
-    all_windows = []
+    all_windows = existing_windows.copy()  # Start with existing windows
     failed_indices = []
+    skipped_count = 0
 
     for idx in range(len(dataset)):
+        # Skip if already processed
+        if idx in processed_indices:
+            skipped_count += 1
+            if skipped_count % 10 == 0:
+                logger.info(f"⏭️ Skipped {skipped_count} already processed windows...")
+            continue
+
         if idx % 10 == 0:
-            logger.info(f"Processing window {idx}/{len(dataset)}")
+            processed_new = len(all_windows) - len(existing_windows)
+            logger.info(f"Processing window {idx}/{len(dataset)} (new: {processed_new}, skipped: {skipped_count})")
+
+            # Clear CUDA cache and run garbage collection periodically
+            if idx > 0 and idx % 50 == 0:
+                logger.info(f"🧹 Cleaning memory at window {idx}...")
+                torch.cuda.empty_cache()
+                gc.collect()
+
+                # Log memory usage
+                if torch.cuda.is_available():
+                    allocated = torch.cuda.memory_allocated() / 1024**3
+                    reserved = torch.cuda.memory_reserved() / 1024**3
+                    logger.info(f"GPU Memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
 
         try:
             # Get window data from dataset
             window_data = dataset[idx]
 
             if window_data is not None:
-                # Add index to metadata
-                if 'metadata' not in window_data:
-                    window_data['metadata'] = {}
-                window_data['metadata']['window_index'] = idx
+                # Convert tensors to CPU and detach to avoid memory accumulation
+                window_data_cpu = {}
+                for key, value in window_data.items():
+                    if isinstance(value, torch.Tensor):
+                        # Move to CPU and detach from computation graph
+                        window_data_cpu[key] = value.detach().cpu()
+                    elif isinstance(value, dict):
+                        # Handle nested dicts (like metadata)
+                        window_data_cpu[key] = {}
+                        for k, v in value.items():
+                            if isinstance(v, torch.Tensor):
+                                window_data_cpu[key][k] = v.detach().cpu()
+                            else:
+                                window_data_cpu[key][k] = v
+                    else:
+                        window_data_cpu[key] = value
 
-                all_windows.append(window_data)
+                # Add index to metadata
+                if 'metadata' not in window_data_cpu:
+                    window_data_cpu['metadata'] = {}
+                window_data_cpu['metadata']['window_index'] = idx
+
+                all_windows.append(window_data_cpu)
+
+                # Clear the original window_data to free memory
+                del window_data
+
             else:
                 failed_indices.append(idx)
                 logger.warning(f"Window {idx} returned None")
 
         except Exception as e:
             logger.error(f"Error processing window {idx}: {str(e)}")
+            logger.error(traceback.format_exc())
             failed_indices.append(idx)
 
-    # Save all windows to cache
+        # Clear cache after each window to prevent accumulation
+        if idx % 10 == 0:
+            torch.cuda.empty_cache()
+
+    # Save all windows to cache at once
     if all_windows:
-        logger.info(f"Saving {len(all_windows)} windows to cache...")
+        new_windows = len(all_windows) - len(existing_windows)
+
+        if new_windows > 0:
+            logger.info(f"💾 Saving {len(all_windows)} total windows to cache ({new_windows} new, {len(existing_windows)} existing)...")
+        else:
+            logger.info(f"✅ All windows already cached! Total: {len(all_windows)}")
 
         metadata = {
             'total_windows': len(dataset),
             'successful_windows': len(all_windows),
             'failed_windows': len(failed_indices),
+            'skipped_windows': skipped_count,
             'dataset_config': {
                 'window_size': dataset.window_size,
                 'stride': dataset.stride,
@@ -77,18 +168,22 @@ def preprocess_and_cache(dataset, cache_dir: Path):
 
         cache.save_all_windows(all_windows, metadata)
 
-        logger.info(f"Successfully cached {len(all_windows)} windows")
+        logger.info(f"✅ Successfully cached {len(all_windows)} windows")
+        if new_windows > 0:
+            logger.info(f"   📈 Processed {new_windows} new windows")
+        if skipped_count > 0:
+            logger.info(f"   ⏭️ Skipped {skipped_count} already processed windows")
         if failed_indices:
-            logger.warning(f"Failed to process {len(failed_indices)} windows: {failed_indices[:10]}...")
+            logger.warning(f"   ❌ Failed to process {len(failed_indices)} windows: {failed_indices[:10]}...")
 
         # Validate cache
         is_valid, issues = cache.validate_cache()
         if is_valid:
-            logger.info("Cache validation passed!")
+            logger.info("✅ Cache validation passed!")
         else:
-            logger.error(f"Cache validation failed: {issues}")
+            logger.error(f"❌ Cache validation failed: {issues}")
     else:
-        logger.error("No windows were successfully processed!")
+        logger.error("❌ No windows were successfully processed!")
 
 
 def main():
@@ -103,6 +198,8 @@ def main():
                         help='Window size')
     parser.add_argument('--stride', type=int, default=25,
                         help='Stride between windows')
+    parser.add_argument('--no-resume', action='store_true',
+                        help='Start fresh instead of resuming from existing cache')
     args = parser.parse_args()
 
     # Load EMO model
@@ -137,11 +234,11 @@ def main():
         stride=args.stride,
         max_videos=args.max_videos,
         cache_dir=args.cache_dir,
-        use_single_bucket=False  # We'll handle caching manually
+        use_single_bucket=True  # Use SingleBucketCache for preprocessing
     )
 
     # Preprocess and cache
-    preprocess_and_cache(dataset, Path(args.cache_dir))
+    preprocess_and_cache(dataset, Path(args.cache_dir), resume=not args.no_resume)
 
 
 if __name__ == "__main__":
