@@ -2490,6 +2490,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             
             # Get face landmarks
             results = self.face_mesh.process(frame)
+            # logger.info(f"MediaPipe results: {results}")
+            # logger.info(f"Processing frame from self.face_mesh: {self.face_mesh}, frame shape: {frame.shape}")
             
             if not results.multi_face_landmarks:
                 logger.error(f"No faces detected in frame from video: {video_path}")

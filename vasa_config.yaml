@@ -86,14 +86,14 @@ train:
   
   # Dropout probabilities for CFG - VASA-1 uses different rates for prev_ vs current
   dropout_probs:
-    # Current conditions (0.1 dropout per paper)
-    audio: 0.1                # Paper default: 0.1 for general conditions
+    # Current conditions - AUDIO MUST NEVER BE DROPPED (it's the primary driving signal)
+    audio: 0.0                # NEVER drop audio - it drives lip motion and dynamics
     gaze: 0.1                 # Paper default: 0.1
     head_distance: 0.1        # Paper default: 0.1
     emotion: 0.1              # Paper default: 0.1
-    
+
     # Previous context conditions (0.5 dropout per paper for robustness)
-    prev_audio: 0.5           # Paper: 0.5 for previous audio context
+    prev_audio: 0.0           # NEVER drop previous audio - critical for temporal coherence
     prev_theta: 0.5           # Paper: 0.5 for previous motion
     prev_rotation: 0.5        # Paper: 0.5 for previous motion
     prev_translation: 0.5     # Paper: 0.5 for previous motion
