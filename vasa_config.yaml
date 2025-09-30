@@ -213,6 +213,14 @@ loss:
   cross_id_num_frames: 3             # Number of frames to use for identity comparison
   cross_id_normalize: true           # Normalize frames before identity extraction
 
+  # EMO (Volumetric Avatar) Matching Loss - ensures VASA matches high-quality EMO output
+  use_emo_matching: true              # Enable EMO matching loss
+  lambda_emo_match: 8.0               # VERY HIGH weight - primary quality target
+  emo_match_type: 'combined'          # 'l1', 'l2', 'lpips', or 'combined'
+  emo_cache_dir: 'cache_emo'          # Directory for cached EMO outputs
+  emo_keyframes_per_window: 5         # Number of keyframes to compare per window
+  emo_match_start_epoch: 0            # Start EMO matching from epoch 0 for immediate quality
+
   # Warping field loss weights
   lambda_warp: 2.0                   # Main warp reconstruction loss weight
   lambda_warp_smooth: 0.01           # Spatial smoothness regularization for warps
@@ -264,6 +272,10 @@ dataset:
   max_sequence_samples: 1000 # Maximum samples per epoch
   use_identity_image: true    # Use high-quality identity image instead of video frame
   identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image
+  # EMO generation settings
+  generate_emo_frames: true   # Generate EMO frames for quality comparison
+  emo_identity_path: "nemo/data/IMG_1.png"  # Same identity image for EMO generation
+  emo_keyframes_per_window: 5  # Generate 5 EMO frames per window for comparison
   use_single_bucket: true     # Use single-bucket caching for all windows
   augmentation:
     enabled: false            # NO AUGMENTATION for overfitting
@@ -274,7 +286,7 @@ dataset:
 
 # Model checkpoint paths
 paths:
-  checkpoint_dir: "checkpoints_overfit"
+  checkpoint_dir: "checkpoints"
   syncnet_path: "pretrained/syncnet.pth"
   emotion_model: "pretrained/emonet.pth"
   volumetric_model: "nemo/logs/Retrain_with_17_V1_New_rand_MM_SEC_4_drop_02_stm_10_CV_05_1_1/checkpoints/328_model.pth"
@@ -322,7 +334,7 @@ logging:
 
   # Validation
   validation:
-    enabled: true            # Set to false to disable validation completely
+    enabled: false            # Set to false to disable validation completely
     frequency: 10            # Validate every N epochs (was 5, now 10 for less overhead)
     num_samples: 4           # Fewer samples for speed (was 10, now 4)
     max_batches: 2           # Process at most N batches during validation (new)

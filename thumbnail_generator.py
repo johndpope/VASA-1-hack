@@ -163,6 +163,161 @@ def debug_warps(
                 print(f"  Target {k}: {v:.4f}")
             print("Note: Predicted variation should roughly match target for accurate motion.")
             
+def create_four_panel_thumbnail(
+    identity_frame: Optional[torch.Tensor] = None,
+    target_frame: Optional[torch.Tensor] = None,
+    emo_frame: Optional[torch.Tensor] = None,
+    vasa_frame: Optional[torch.Tensor] = None,
+    motion_params: Optional[Dict[str, torch.Tensor]] = None,
+    size: Tuple[int, int] = (1024, 256),  # Wider for 4 panels
+    add_overlay: bool = True,
+    compute_loss: bool = True
+) -> Tuple[np.ndarray, Optional[float]]:
+    """
+    Create a four-panel thumbnail: Identity | Target | EMO Generated | VASA Generated.
+
+    Args:
+        identity_frame: Identity/source frame [C, H, W] or [H, W, C]
+        target_frame: Target/ground truth frame
+        emo_frame: EMO model (volumetric_avatar) generated frame
+        vasa_frame: VASA model generated frame
+        motion_params: Dict with motion parameters for overlay
+        size: Output thumbnail size (width, height)
+        add_overlay: Whether to add debug visualization overlay
+        compute_loss: Whether to compute EMO-VASA similarity loss
+
+    Returns:
+        Tuple of (thumbnail array, emo_vasa_loss if computed else None)
+    """
+
+    # Helper function to process frame
+    def process_frame(frame):
+        if frame is None:
+            return np.zeros((256, 256, 3), dtype=np.float32)
+
+        if isinstance(frame, torch.Tensor):
+            if frame.dim() == 4:  # [B, C, H, W]
+                frame = frame[0]
+            if frame.dim() == 3 and frame.shape[0] == 3:  # [C, H, W]
+                frame = frame.permute(1, 2, 0)
+            frame = frame.detach().cpu().numpy()
+
+        # Normalize to [0, 1] if needed
+        if frame.max() > 1.0:
+            frame = frame / 255.0
+        if frame.min() < 0:
+            frame = (frame + 1) / 2  # Convert from [-1, 1] to [0, 1]
+
+        return frame
+
+    # Process all frames
+    identity_np = process_frame(identity_frame)
+    target_np = process_frame(target_frame)
+    emo_np = process_frame(emo_frame)
+    vasa_np = process_frame(vasa_frame)
+
+    # Compute EMO-VASA similarity loss if both are available
+    emo_vasa_loss = None
+    if compute_loss and emo_frame is not None and vasa_frame is not None:
+        # Compute L1 + perceptual similarity
+        l1_loss = np.abs(emo_np - vasa_np).mean()
+        emo_vasa_loss = float(l1_loss)
+
+    # Create figure with 4 subplots
+    fig_scale = size[0] / 512  # Base scale on target width
+    fig, axes = plt.subplots(1, 4, figsize=(16 * fig_scale, 4 * fig_scale))
+
+    # Show Identity
+    axes[0].imshow(identity_np)
+    axes[0].set_title("Identity (Source)", fontsize=10 * fig_scale, weight='bold', color='blue')
+    axes[0].axis('off')
+
+    # Show Target
+    axes[1].imshow(target_np)
+    frame_idx = motion_params.get('_frame_idx', -1) if motion_params else -1
+    title = f"Target (t={frame_idx})" if frame_idx >= 0 else "Target Frame"
+    axes[1].set_title(title, fontsize=10 * fig_scale, weight='bold', color='green')
+    axes[1].axis('off')
+
+    # Show EMO Generated
+    axes[2].imshow(emo_np)
+    axes[2].set_title("EMO Generated", fontsize=10 * fig_scale, weight='bold', color='purple')
+    axes[2].axis('off')
+
+    # Show VASA Generated
+    axes[3].imshow(vasa_np)
+    vasa_title = "VASA Generated"
+    if emo_vasa_loss is not None:
+        vasa_title += f" (L1={emo_vasa_loss:.4f})"
+    axes[3].set_title(vasa_title, fontsize=10 * fig_scale, weight='bold', color='red')
+    axes[3].axis('off')
+
+    # Add motion overlay on VASA frame
+    if add_overlay and motion_params is not None:
+        ax = axes[3]
+
+        # Calculate motion indicators
+        indicators = []
+
+        # Add EMO-VASA loss if computed
+        if emo_vasa_loss is not None:
+            indicators.append(f"EMO Loss: {emo_vasa_loss:.4f}")
+
+        # Add frame index if available
+        if '_frame_idx' in motion_params:
+            indicators.append(f"Frame: {motion_params['_frame_idx']}")
+
+        # Add motion stats
+        if 'theta' in motion_params:
+            theta = motion_params['theta']
+            if isinstance(theta, torch.Tensor):
+                if theta.dim() > 1 and theta.shape[0] > 1:
+                    theta_diff = (theta[1:] - theta[:-1]).abs().mean().item()
+                    indicators.append(f"Motion: {theta_diff:.4f}")
+
+        # Add expression stats
+        if 'expression_embed' in motion_params:
+            expr = motion_params['expression_embed']
+            if isinstance(expr, torch.Tensor):
+                expr_std = expr.std().item()
+                indicators.append(f"Expr σ: {expr_std:.3f}")
+
+        # Add text overlay
+        font_scale = max(1.0, size[0] / 512)
+        text_y = 0.98
+        for indicator in indicators[:4]:  # Allow 4 indicators for more info
+            ax.text(0.02, text_y, indicator, transform=ax.transAxes,
+                   fontsize=7 * font_scale, color='white',
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.5),
+                   verticalalignment='top')
+            text_y -= 0.06
+
+    plt.tight_layout()
+
+    # Convert to numpy array using buffer approach (compatible with newer matplotlib)
+    fig.canvas.draw()
+    try:
+        # Try newer API first
+        buf = fig.canvas.buffer_rgba()
+        thumbnail = np.asarray(buf)
+        # Convert RGBA to RGB
+        thumbnail = thumbnail[:, :, :3]
+    except AttributeError:
+        # Fallback for older matplotlib
+        thumbnail = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        thumbnail = thumbnail.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    plt.close(fig)
+
+    # Resize if needed
+    if thumbnail.shape[:2][::-1] != size:
+        from PIL import Image
+        img = Image.fromarray(thumbnail)
+        img = img.resize(size, Image.LANCZOS)
+        thumbnail = np.array(img)
+
+    return thumbnail, emo_vasa_loss
+
+
 def create_three_panel_thumbnail(
     identity_frame: Optional[torch.Tensor] = None,
     target_frame: Optional[torch.Tensor] = None,
@@ -831,6 +986,7 @@ def generate_window_thumbnail(
     generated_frames: Optional[torch.Tensor] = None,
     target_frames: Optional[torch.Tensor] = None,
     identity_frame: Optional[torch.Tensor] = None,
+    emo_generated_frames: Optional[torch.Tensor] = None,  # NEW: EMO model generated frames
     motion_outputs: Optional[Dict] = None,
     window: Optional[Dict] = None,
     motion_data: Optional[Dict] = None,
@@ -838,12 +994,13 @@ def generate_window_thumbnail(
     size: Tuple[int, int] = (512, 512)
 ) -> np.ndarray:
     """
-    Generate thumbnail from generated and target frames with identity reference.
+    Generate thumbnail from generated and target frames with identity reference and EMO comparison.
 
     Args:
-        generated_frames: Generated frames from volumetric avatar [B, T, C, H, W]
+        generated_frames: Generated frames from VASA model [B, T, C, H, W]
         target_frames: Target/ground truth frames [B, T, C, H, W]
         identity_frame: Identity/source frame used for generation [C, H, W] or [B, C, H, W]
+        emo_generated_frames: EMO model (volumetric_avatar) generated frames for comparison [B, T, C, H, W]
         motion_outputs: Motion outputs for overlay stats
         window: (Optional, for backward compatibility) Window data dictionary
         motion_data: (Optional, for backward compatibility) Motion data from prepare_motion_data
@@ -851,7 +1008,7 @@ def generate_window_thumbnail(
         size: Target thumbnail size
 
     Returns:
-        Thumbnail as numpy array showing Identity | Target | Predicted
+        Thumbnail as numpy array showing Identity | Target | EMO Generated | VASA Generated
     """
     import random
     
@@ -953,8 +1110,35 @@ def generate_window_thumbnail(
         else:
             selected_identity = identity_frame
 
-    # Create 3-panel thumbnail: Identity | Target | Predicted
-    if selected_generated is not None or selected_target is not None or selected_identity is not None:
+    # Extract EMO generated frame if provided
+    selected_emo = None
+    if emo_generated_frames is not None and isinstance(emo_generated_frames, torch.Tensor):
+        if emo_generated_frames.numel() > 0:
+            # Handle shape [B, T, C, H, W] or [T, C, H, W]
+            if emo_generated_frames.dim() == 5:
+                selected_emo = emo_generated_frames[0, selected_idx] if selected_idx < emo_generated_frames.shape[1] else emo_generated_frames[0, 0]
+            elif emo_generated_frames.dim() == 4:
+                selected_emo = emo_generated_frames[selected_idx] if selected_idx < emo_generated_frames.shape[0] else emo_generated_frames[0]
+
+    # Use 4-panel if EMO frame is available, otherwise 3-panel
+    if selected_emo is not None:
+        # Create 4-panel thumbnail: Identity | Target | EMO | VASA
+        thumbnail, emo_vasa_loss = create_four_panel_thumbnail(
+            identity_frame=selected_identity,
+            target_frame=selected_target,
+            emo_frame=selected_emo,
+            vasa_frame=selected_generated,
+            motion_params=random_motion_params,
+            size=(1024, 256)  # Wider for 4 panels
+        )
+
+        # Log EMO-VASA loss if available
+        if emo_vasa_loss is not None and random_motion_params is not None:
+            random_motion_params['emo_vasa_loss'] = emo_vasa_loss
+
+        return thumbnail
+    elif selected_generated is not None or selected_target is not None or selected_identity is not None:
+        # Create 3-panel thumbnail: Identity | Target | Predicted
         return create_three_panel_thumbnail(
             identity_frame=selected_identity,
             target_frame=selected_target,

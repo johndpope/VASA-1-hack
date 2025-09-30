@@ -519,6 +519,10 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         device: str = 'cuda',
         cache_dir: Optional[str] = 'cache',
         use_single_bucket: bool = True,  # New parameter for single-bucket caching
+        generate_emo_frames: bool = False,  # NEW: Whether to generate EMO frames
+        emo_identity_path: str = "nemo/data/IMG_1.png",  # NEW: Identity image for EMO
+        emo_keyframes_per_window: int = 5,  # NEW: Number of EMO keyframes to generate
+        va_bridge = None,  # NEW: Volumetric avatar bridge for EMO generation
     ):
         VASADatasetMixin.__init__(self)
         
@@ -538,6 +542,29 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
         # Initialize LipStateAnalyzer for lip metrics computation
         self.lip_analyzer = LipStateAnalyzer()
+
+        # EMO generation setup
+        self.generate_emo_frames = generate_emo_frames
+        self.emo_keyframes_per_window = emo_keyframes_per_window
+        self.va_bridge = va_bridge
+        self.emo_identity_image = None
+
+        if generate_emo_frames:
+            # Load identity image for EMO generation
+            if os.path.exists(emo_identity_path):
+                from PIL import Image
+                import torchvision.transforms as transforms
+
+                img = Image.open(emo_identity_path).convert('RGB')
+                transform = transforms.Compose([
+                    transforms.Resize((512, 512)),
+                    transforms.ToTensor(),
+                ])
+                self.emo_identity_image = transform(img).unsqueeze(0).to(device)
+                logger.info(f"Loaded EMO identity image from {emo_identity_path}")
+            else:
+                logger.warning(f"EMO identity image not found at {emo_identity_path}")
+                self.generate_emo_frames = False
 
         # Set cache directory
         self.cache_dir = Path(cache_dir) if cache_dir else Path(video_folder) / "cache"
@@ -2799,6 +2826,72 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     elif self.cache_type == 'built_in':
                         # For built-in cache, use the original save method
                         self._save_window_to_cache(video_path, window['window_idx'], window_data)
+
+                    # Generate EMO frames if enabled
+                    if self.generate_emo_frames and self.va_bridge is not None and self.emo_identity_image is not None:
+                        try:
+                            with torch.no_grad():
+                                # Clear VA bridge cache to ensure fresh embeddings for EMO identity
+                                if hasattr(self.va_bridge, 'clear_cache'):
+                                    self.va_bridge.clear_cache()
+
+                                # Select keyframe indices
+                                T = window_data['theta'].shape[0]
+                                keyframe_indices = np.linspace(0, T-1, self.emo_keyframes_per_window, dtype=int)
+
+                                emo_frames = []
+                                for frame_idx in keyframe_indices:
+                                    # Extract motion for this frame and ensure all on same device
+                                    frame_motion = {
+                                        'theta': window_data['theta'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device),  # [1, 1, 3, 4]
+                                        'expression_embed': window_data['expression_embed'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device),  # [1, 1, 128]
+                                        'uv_warps': window_data['uv_warps'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device) if 'uv_warps' in window_data else None,  # [1, 1, 16, 64, 64, 3]
+                                    }
+
+                                    # Check if we have uv_warps (required for EMO generation)
+                                    if frame_motion['uv_warps'] is None:
+                                        logger.debug(f"Skipping EMO frame {frame_idx}: uv_warps not available")
+                                        emo_frames.append(torch.zeros(3, 512, 512, device=self.device))
+                                        continue
+
+                                    # Generate EMO frame using va_bridge
+                                    # Output will be [1, 1, C, H, W]
+                                    emo_identity = self.emo_identity_image.to(self.device)
+
+                                    # DEBUG: Save identity image once to verify it's correct
+                                    if frame_idx == 0 and idx % 100 == 0:
+                                        import torchvision
+                                        torchvision.utils.save_image(emo_identity[0], f'debug_emo_identity_window_{idx}.png')
+                                        logger.info(f"Saved debug EMO identity image for window {idx}")
+
+                                    emo_output = self.va_bridge.generate_frames_from_motion(
+                                        motion_outputs=frame_motion,
+                                        source_img=emo_identity,
+                                        use_black_background=True  # Use black background to ensure clean EMO render
+                                    )
+
+                                    if emo_output is not None:
+                                        # Extract the single frame [1, 1, C, H, W] -> [C, H, W]
+                                        frame = emo_output[0, 0]
+                                        emo_frames.append(frame)
+                                    else:
+                                        # Add blank frame if generation failed
+                                        emo_frames.append(torch.zeros(3, 512, 512, device=self.device))
+
+                                # Stack EMO frames [num_keyframes, C, H, W]
+                                if len(emo_frames) == 0:
+                                    raise RuntimeError(f"EMO generation is enabled but produced no frames for window {idx}")
+
+                                window_data['emo_frames'] = torch.stack(emo_frames, dim=0)
+                                window_data['emo_keyframe_indices'] = torch.tensor(keyframe_indices, dtype=torch.long)
+                                logger.info(f"✅ Generated {len(emo_frames)} EMO frames for window {idx}")
+
+                        except Exception as e:
+                            logger.error(f"❌ FAILED to generate EMO frames for window {idx}: {e}")
+                            import traceback
+                            logger.error(traceback.format_exc())
+                            # EMO frames are REQUIRED - re-raise the exception
+                            raise RuntimeError(f"EMO frame generation is mandatory but failed: {e}") from e
 
                     # Return the single window data directly
                     return window_data

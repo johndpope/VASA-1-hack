@@ -950,8 +950,12 @@ class VASATrainer:
             
             # Validation phase - check if we should validate this epoch
             val_stats = None
-            if self.val_loader and self.config.get('validation', {}).get('enabled', True):
-                val_frequency = self.config.get('validation', {}).get('frequency', 5)
+            # Check both logging.validation.enabled and top-level validation.enabled for backward compatibility
+            val_enabled = self.config.get('logging', {}).get('validation', {}).get('enabled',
+                          self.config.get('validation', {}).get('enabled', True))
+            if self.val_loader and val_enabled:
+                val_frequency = self.config.get('logging', {}).get('validation', {}).get('frequency',
+                               self.config.get('validation', {}).get('frequency', 5))
                 # Use total_epochs or num_epochs, with fallback to 100
                 total_epochs = self.config.get('total_epochs', self.config.get('num_epochs', 100))
                 if epoch % val_frequency == 0 or epoch == total_epochs - 1:
@@ -1574,12 +1578,88 @@ class VASATrainer:
                                     elif source_img is not None and source_img.numel() > 0:
                                         identity_for_thumbnail = source_img[0] if source_img.dim() > 3 else source_img
 
+                                    # Get EMO frame from dataset if available
+                                    single_frame_emo = None
+                                    try:
+                                        # Check if window has pre-generated EMO frames
+                                        if 'emo_frames' in window and 'emo_keyframe_indices' in window:
+                                            emo_frames = window['emo_frames']  # Could be [B, num_keyframes, C, H, W] or [num_keyframes, C, H, W]
+                                            emo_indices = window['emo_keyframe_indices']
+                                            logger.info(f"✅ Found EMO frames in window, shape: {emo_frames.shape}, indices shape: {emo_indices.shape}")
+
+                                            # Handle batched EMO frames - extract for current window
+                                            if emo_frames.dim() == 5:  # [B, num_keyframes, C, H, W]
+                                                emo_frames = emo_frames[window_idx]  # [num_keyframes, C, H, W]
+                                            if emo_indices.dim() == 2:  # [B, num_keyframes]
+                                                emo_indices = emo_indices[window_idx]  # [num_keyframes]
+
+                                            # Find the closest EMO keyframe to our selected frame
+                                            closest_idx = 0
+                                            min_diff = abs(emo_indices[0].item() - frame_idx)
+                                            for i, emo_idx in enumerate(emo_indices):
+                                                diff = abs(emo_idx.item() - frame_idx)
+                                                if diff < min_diff:
+                                                    min_diff = diff
+                                                    closest_idx = i
+
+                                            single_frame_emo = emo_frames[closest_idx].detach().cpu()
+                                            logger.info(f"Using pre-generated EMO frame {closest_idx} (closest to frame {frame_idx})")
+                                        else:
+                                            logger.info(f"❌ No pre-generated EMO frames in window (has emo_frames: {'emo_frames' in window}, has indices: {'emo_keyframe_indices' in window})")
+
+                                        if single_frame_emo is None and hasattr(self, 'va_bridge') and self.va_bridge is not None and stored_outputs is not None:
+                                            # Fallback: generate EMO frame on-the-fly (slower)
+                                            logger.debug("No pre-generated EMO frames, generating on-the-fly...")
+                                            with torch.no_grad():
+                                                # Get motion for this specific frame
+                                                frame_motion = {}
+                                                if 'theta' in stored_outputs and stored_outputs['theta'] is not None:
+                                                    theta_tensor = stored_outputs['theta']
+                                                    if theta_tensor.dim() >= 2 and frame_idx < theta_tensor.shape[1]:
+                                                        frame_motion['theta'] = theta_tensor[:, frame_idx:frame_idx+1].to(self.device)
+
+                                                if 'expression_embed' in stored_outputs and stored_outputs['expression_embed'] is not None:
+                                                    expr_tensor = stored_outputs['expression_embed']
+                                                    if expr_tensor.dim() >= 2 and frame_idx < expr_tensor.shape[1]:
+                                                        frame_motion['expression_embed'] = expr_tensor[:, frame_idx:frame_idx+1].to(self.device)
+
+                                                # Only proceed if we have valid motion data
+                                                if frame_motion:
+                                                    # Prepare identity image
+                                                    emo_identity = identity_for_thumbnail.unsqueeze(0) if identity_for_thumbnail.dim() == 3 else identity_for_thumbnail
+                                                    emo_identity = emo_identity.to(self.device)
+
+                                                    # Generate EMO frame using volumetric avatar
+                                                    emo_output = self.va_bridge.generate_from_motion(
+                                                        identity_image=emo_identity,
+                                                        motion_params=frame_motion
+                                                    )
+
+                                                    if emo_output is not None and 'generated_frames' in emo_output:
+                                                        emo_frames = emo_output['generated_frames']
+                                                        if emo_frames.dim() >= 2:
+                                                            single_frame_emo = emo_frames[0, 0].detach().cpu() if emo_frames.shape[1] > 0 else emo_frames[0].detach().cpu()
+                                                            logger.debug(f"Generated EMO frame on-the-fly, shape: {single_frame_emo.shape}")
+                                    except Exception as e:
+                                        logger.debug(f"Could not get EMO frame for thumbnail: {e}")
+                                        # Continue without EMO frame
+
+                                    # Prepare EMO frames tensor if available
+                                    emo_frames_for_thumbnail = None
+                                    if single_frame_emo is not None:
+                                        # Add batch and time dimensions: [B=1, T=1, C, H, W]
+                                        emo_frames_for_thumbnail = single_frame_emo.unsqueeze(0).unsqueeze(0)
+                                        logger.info(f"✅ Prepared EMO frame for 4-panel thumbnail, shape: {emo_frames_for_thumbnail.shape}")
+                                    else:
+                                        logger.warning(f"⚠️  No EMO frame available - will use 3-panel thumbnail")
+
                                     thumbnail = generate_window_thumbnail(
-                                        generated_frames=single_frame_generated,  # Just one frame
-                                        target_frames=single_frame_target,        # Just one frame
+                                        generated_frames=single_frame_generated,  # VASA generated frame
+                                        target_frames=single_frame_target,        # Ground truth frame
                                         identity_frame=identity_for_thumbnail,    # Identity/source frame
-                                        motion_outputs=stored_outputs,            # For motion stats overlay (using stored)
-                                        size=(768, 256)  # Wide format for 3-panel view (Identity | Target | Predicted)
+                                        emo_generated_frames=emo_frames_for_thumbnail,  # EMO generated frame (4-panel if available)
+                                        motion_outputs=stored_outputs,            # For motion stats overlay
+                                        size=(1024, 256) if emo_frames_for_thumbnail is not None else (768, 256)  # Wider if 4-panel
                                     )
 
                                     # Log to wandb with more descriptive caption
@@ -3304,6 +3384,13 @@ if __name__ == "__main__":
     gc.collect()
     torch.cuda.empty_cache()
 
+    # Create VA bridge for EMO generation if enabled
+    va_bridge_for_dataset = None
+    if config.dataset.get('generate_emo_frames', False):
+        logger.info("Creating VA bridge for EMO frame generation in dataset...")
+        # VASAVolumetricAvatarBridge just needs the loaded volumetric_avatar model
+        va_bridge_for_dataset = VASAVolumetricAvatarBridge(volumetric_avatar)
+
     # Create dataset with volumetric model
     use_single_bucket = config.dataset.get('use_single_bucket', False)  # Get from config
     full_dataset = VASAIntegratedDataset(
@@ -3320,7 +3407,12 @@ if __name__ == "__main__":
         preextract_audio=True,
         random_seed=42,
         cache_dir=config.paths.get('cache_dir', 'cache'),  # Use config cache dir
-        use_single_bucket=use_single_bucket  # Pass single-bucket flag
+        use_single_bucket=use_single_bucket,  # Pass single-bucket flag
+        # EMO generation parameters
+        generate_emo_frames=config.dataset.get('generate_emo_frames', False),
+        emo_identity_path=config.dataset.get('emo_identity_path', 'nemo/data/IMG_1.png'),
+        emo_keyframes_per_window=config.dataset.get('emo_keyframes_per_window', 5),
+        va_bridge=va_bridge_for_dataset
     )
 
     # Check if single-bucket cache exists

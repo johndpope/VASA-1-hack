@@ -365,10 +365,11 @@ class SingleBucketCache:
                                     )
 
                         elif isinstance(value, torch.Tensor):
-                            # Store tensor data
+                            # Store tensor data - move to CPU first if on CUDA
+                            tensor_data = value.cpu().numpy() if value.is_cuda else value.numpy()
                             dataset = window_group.create_dataset(
                                 key,
-                                data=value.numpy(),
+                                data=tensor_data,
                                 compression='gzip',
                                 compression_opts=1
                             )
