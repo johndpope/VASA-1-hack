@@ -2382,7 +2382,7 @@ class VASALossModule:
                 frame_np = frame.numpy()
 
                 # Extract landmarks and blink state using dataset's method
-                landmarks = self._landmark_extractor._extract_face_landmarks(frame_np)
+                landmarks = self._landmark_extractor._extract_face_landmarks(self._landmark_extractor, frame_np, "")
                 if landmarks is not None:
                     for key in landmark_keys:
                         if key in landmarks:
