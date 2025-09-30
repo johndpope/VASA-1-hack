@@ -2106,8 +2106,11 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         return landmarks_68
     
             
-    def _extract_face_landmarks(self, frame: np.ndarray, video_path: str) -> Optional[Dict[str, np.ndarray]]:
-        """Extract facial landmarks using MediaPipe."""
+    def _extract_face_landmarks(self, frame: np.ndarray, video_path: str = "") -> Optional[Dict[str, np.ndarray]]:
+        """
+        Extract facial landmarks using MediaPipe.
+        This is the SHARED helper used by both dataset and loss computation.
+        """
         try:
             # Ensure frame is in RGB format and uint8 [0,255]
             if frame.dtype == np.float32:
@@ -2115,7 +2118,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     frame = (frame * 255).clip(0, 255).astype(np.uint8)
                 else:
                     frame = frame.clip(0, 255).astype(np.uint8)
-                    
+
             # Handle different color channel arrangements
             if len(frame.shape) == 2:  # Grayscale
                 frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
@@ -2124,21 +2127,21 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
                 elif frame.shape[2] == 3:  # Assume BGR if not explicitly RGB
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    
+
             # Get image dimensions
             height, width = frame.shape[:2]
-            
+
             # Get face landmarks
             results = self.face_mesh.process(frame)
-            
+
             if not results.multi_face_landmarks:
-                logger.error(f"No faces detected in frame from video: {video_path}")
-                # return None
-                raise Exception("No faces detected")
+                if video_path:
+                    logger.error(f"No faces detected in frame from video: {video_path}")
+                return None
 
             # Get first face landmarks
             face_landmarks = results.multi_face_landmarks[0]
-            
+
             # Convert landmarks to numpy array
             landmarks = np.array([
                 [lm.x * width, lm.y * height, lm.z * width]
@@ -2153,12 +2156,12 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 'jaw': [61, 185, 40, 39, 37, 0, 267, 269, 270, 409],  # 10 points
                 'nose': [1, 2, 98, 327]  # 4 points
             }
-            
+
             # Extract landmark groups
             extracted_landmarks = {}
             for key, indices in landmark_indices.items():
                 extracted_landmarks[key] = np.array([landmarks[i] for i in indices])
-                
+
             # Validate shapes
             expected_shapes = {
                 'lips': (20, 3),
@@ -2167,7 +2170,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 'jaw': (10, 3),
                 'nose': (4, 3)
             }
-            
+
             # Verify and pad if necessary
             for key, expected_shape in expected_shapes.items():
                 current_shape = extracted_landmarks[key].shape
@@ -2180,37 +2183,37 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     # Truncate if we have too many points
                     else:
                         extracted_landmarks[key] = extracted_landmarks[key][:expected_shape[0]]
-            
+
             # Add blink detection
             def get_eye_aspect_ratio(eye_points: np.ndarray) -> float:
                 if len(eye_points) < 6:  # Need at least 6 points for EAR
                     return 0.3  # Default open value
-                
+
                 # Compute the euclidean distances
                 A = np.linalg.norm(eye_points[1] - eye_points[5])
                 B = np.linalg.norm(eye_points[2] - eye_points[4])
                 C = np.linalg.norm(eye_points[0] - eye_points[3])
-                
+
                 # Compute the eye aspect ratio
                 ear = (A + B) / (2.0 * C) if C > 0 else 0.3
                 return ear
-                    
+
             # Get EAR for both eyes
             left_ear = get_eye_aspect_ratio(extracted_landmarks['left_eye'])
             right_ear = get_eye_aspect_ratio(extracted_landmarks['right_eye'])
-            
+
             # Determine blink state
             EAR_THRESHOLD = 0.2
             left_openness = min(max(left_ear / 0.3, 0), 1)  # Normalize to [0,1]
             right_openness = min(max(right_ear / 0.3, 0), 1)
-            
+
             # Add blink state
             extracted_landmarks['blink_state'] = np.array([
                 0 if (left_ear > EAR_THRESHOLD and right_ear > EAR_THRESHOLD) else 2,  # Phase
                 left_openness,   # Left eye openness
                 right_openness   # Right eye openness
             ])
-        
+
             return extracted_landmarks
 
         except Exception as e:

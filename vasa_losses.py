@@ -14,6 +14,7 @@ import torchvision.transforms as transforms
 from torchvision.utils import save_image
 import matplotlib.pyplot as plt
 from collections import defaultdict
+import cv2
 import sys
 if 'nemo' not in sys.path:
     sys.path.insert(0, 'nemo')
@@ -628,7 +629,12 @@ class VASALossModule:
 
             if should_compute_control:
                 logger.debug("Computing control losses...")
-                control_losses = self._compute_control_losses(outputs, conditions, current_epoch)
+                control_losses = self._compute_control_losses(
+                    generated_frames=generated_frames,
+                    conditions=conditions,
+                    epoch=current_epoch,
+                    pred_motion=outputs  # Keep for backward compatibility with gaze/distance
+                )
                 losses.update(control_losses)
                 logger.debug("Control losses:")
                 for k, v in control_losses.items():
@@ -2279,28 +2285,222 @@ class VASALossModule:
         except Exception as e:
             logger.error(f"Error in sequence visualization: {str(e)}")
             logger.error(traceback.format_exc())
-            
-   
+
+    def _extract_features_from_frames(
+        self,
+        generated_frames: torch.Tensor,
+        conditions: Dict[str, torch.Tensor],
+        device: torch.device
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Extract all features from generated frames for control loss computation.
+
+        Extracts:
+        - Landmarks (lips, eyes, jaw, nose) via MediaPipe
+        - Blink states via Eye Aspect Ratio (EAR)
+        - Emotions via HSEmotion recognizer
+
+        Args:
+            generated_frames: [B, T, C, H, W] generated video frames
+            conditions: Dictionary of conditioning signals (to check what to extract)
+            device: Device for tensor operations
+
+        Returns:
+            Dictionary with extracted features:
+                - 'landmarks': dict of {key: tensor[T_sampled, N_points, 3]}
+                - 'blink_states': tensor[T_sampled, 3]
+                - 'emotions': tensor[T_sampled, emotion_dim]
+        """
+        extracted = {}
+
+        try:
+            # Initialize MediaPipe if needed
+            if not hasattr(self, 'face_mesh'):
+                import mediapipe as mp
+                mp_face_mesh = mp.solutions.face_mesh
+                self.face_mesh = mp_face_mesh.FaceMesh(
+                    static_image_mode=False,
+                    max_num_faces=1,
+                    refine_landmarks=True,
+                    min_detection_confidence=0.5,
+                    min_tracking_confidence=0.5
+                )
+
+            # Create landmark extractor wrapper if needed
+            if not hasattr(self, '_landmark_extractor'):
+                from vasa_dataset import VASAIntegratedDataset
+                class LandmarkExtractor:
+                    def __init__(self, face_mesh):
+                        self.face_mesh = face_mesh
+                    _extract_face_landmarks = VASAIntegratedDataset._extract_face_landmarks
+                self._landmark_extractor = LandmarkExtractor(self.face_mesh)
+
+            # Initialize emotion recognizer if needed
+            if not hasattr(self, '_emotion_recognizer') and 'emotion' in conditions:
+                try:
+                    from hsemotion_onnx.facial_emotions import HSEmotionRecognizer
+                    self._emotion_recognizer = HSEmotionRecognizer(model_name='enet_b0_8_best_vgaf')
+                    logger.info("Initialized emotion recognizer for loss computation")
+                except Exception as e:
+                    logger.warning(f"Could not initialize emotion recognizer: {e}")
+                    self._emotion_recognizer = None
+
+            # Initialize L2CS gaze estimator if needed
+            if not hasattr(self, '_l2cs_pipeline') and 'gaze' in conditions:
+                try:
+                    from l2cs import Pipeline
+                    self._l2cs_pipeline = Pipeline(
+                        weights='models/L2CSNet_gaze360.pkl',
+                        device='cpu'  # Run on CPU to avoid GPU memory issues
+                    )
+                    logger.info("Initialized L2CS gaze estimator for loss computation")
+                except Exception as e:
+                    logger.warning(f"Could not initialize L2CS gaze estimator: {e}")
+                    self._l2cs_pipeline = None
+
+            # Sample frames for extraction
+            B, T = generated_frames.shape[:2]
+            num_samples = min(5, T)
+            sample_indices = torch.linspace(0, T-1, num_samples, dtype=torch.long)
+
+            landmark_keys = ['lips', 'right_eye', 'left_eye', 'jaw', 'nose']
+            pred_landmarks = {k: [] for k in landmark_keys}
+            pred_blink_states = []
+            pred_emotions = []
+            pred_gazes = []  # For gaze estimation from frames
+
+            logger.debug(f"Extracting features from {num_samples} frames at indices: {sample_indices.tolist()}")
+
+            # Extract features from each sampled frame
+            for t_idx in sample_indices:
+                # Get frame [B, C, H, W] - take first batch item
+                frame = generated_frames[0, t_idx].detach().cpu()
+
+                # Convert to numpy [H, W, C] in range [0, 255]
+                if frame.shape[0] == 3:  # [C, H, W]
+                    frame = frame.permute(1, 2, 0)
+                frame_np = frame.numpy()
+
+                # Extract landmarks and blink state using dataset's method
+                landmarks = self._landmark_extractor._extract_face_landmarks(frame_np)
+                if landmarks is not None:
+                    for key in landmark_keys:
+                        if key in landmarks:
+                            pred_landmarks[key].append(landmarks[key])
+                    if 'blink_state' in landmarks:
+                        pred_blink_states.append(landmarks['blink_state'])
+
+                # Extract emotion if recognizer available
+                if self._emotion_recognizer is not None and 'emotion' in conditions:
+                    try:
+                        frame_uint8 = (frame_np * 255).astype(np.uint8) if frame_np.dtype != np.uint8 else frame_np
+                        emotion_logits = self._emotion_recognizer.predict_emotions(frame_uint8, logits=True)
+                        pred_emotions.append(emotion_logits)
+                    except Exception as e:
+                        logger.warning(f"Could not extract emotion from frame {t_idx}: {e}")
+
+                # Extract gaze if L2CS pipeline available
+                if self._l2cs_pipeline is not None and 'gaze' in conditions:
+                    try:
+                        frame_uint8 = (frame_np * 255).astype(np.uint8) if frame_np.dtype != np.uint8 else frame_np
+                        # Ensure BGR format for L2CS
+                        if len(frame_uint8.shape) == 2:
+                            frame_bgr = cv2.cvtColor(frame_uint8, cv2.COLOR_GRAY2BGR)
+                        elif frame_uint8.shape[2] == 4:
+                            frame_bgr = cv2.cvtColor(frame_uint8, cv2.COLOR_RGBA2BGR)
+                        else:
+                            frame_bgr = frame_uint8
+
+                        # Get gaze predictions
+                        results = self._l2cs_pipeline.step(frame_bgr)
+                        if len(results.pitch) > 0:
+                            # Convert to degrees
+                            pitch = float(results.pitch[0] * 180 / np.pi)
+                            yaw = float(results.yaw[0] * 180 / np.pi)
+                            pred_gazes.append([pitch, yaw])
+                        else:
+                            # No face detected, use zeros
+                            pred_gazes.append([0.0, 0.0])
+                    except Exception as e:
+                        logger.warning(f"Could not extract gaze from frame {t_idx}: {e}")
+                        pred_gazes.append([0.0, 0.0])
+
+            # Convert to tensors
+            if pred_landmarks['lips']:
+                landmarks_dict = {}
+                for key in landmark_keys:
+                    if pred_landmarks[key]:
+                        landmarks_dict[key] = torch.tensor(
+                            np.stack(pred_landmarks[key]),
+                            device=device,
+                            dtype=torch.float32
+                        ).unsqueeze(0)  # [1, T_sampled, N_points, 3]
+                extracted['landmarks'] = landmarks_dict
+                extracted['sample_indices'] = sample_indices
+                logger.debug(f"Extracted landmarks for: {list(landmarks_dict.keys())}")
+
+            if pred_blink_states:
+                extracted['blink_states'] = torch.tensor(
+                    np.stack(pred_blink_states),
+                    device=device,
+                    dtype=torch.float32
+                ).unsqueeze(0)  # [1, T_sampled, 3]
+                logger.debug(f"Extracted {len(pred_blink_states)} blink states")
+
+            if pred_emotions:
+                extracted['emotions'] = torch.tensor(
+                    np.stack(pred_emotions),
+                    device=device,
+                    dtype=torch.float32
+                ).unsqueeze(0)  # [1, T_sampled, emotion_dim]
+                logger.debug(f"Extracted {len(pred_emotions)} emotion predictions")
+
+            if pred_gazes:
+                extracted['gazes'] = torch.tensor(
+                    pred_gazes,
+                    device=device,
+                    dtype=torch.float32
+                ).unsqueeze(0)  # [1, T_sampled, 2] (pitch, yaw)
+                logger.debug(f"Extracted {len(pred_gazes)} gaze predictions")
+
+        except Exception as e:
+            logger.warning(f"Error extracting features from frames: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+
+        return extracted
+
     def _compute_control_losses(
         self,
-        pred_motion: Dict[str, torch.Tensor],
+        generated_frames: Optional[torch.Tensor],
         conditions: Dict[str, torch.Tensor],
-        epoch: int
+        epoch: int,
+        pred_motion: Optional[Dict[str, torch.Tensor]] = None
     ) -> Dict[str, torch.Tensor]:
-        """Compute control signal losses with improved signal checking."""
+        """
+        Compute control signal losses from generated frames.
+
+        Args:
+            generated_frames: Generated video frames [B, T, C, H, W]
+            conditions: Dictionary of conditioning signals
+            epoch: Current training epoch
+            pred_motion: Motion parameters (for backward compatibility with gaze/distance extraction)
+
+        Returns:
+            Dictionary of control losses
+        """
         try:
             logger.debug("\n=== Computing Control Losses ===")
             logger.debug(f"Current epoch: {epoch}, Control start epoch: {self.config.train.control_start_epoch}")
-            
+
             # Initialize loss dict and get device
-            device = pred_motion['theta'].device
+            device = generated_frames.device if generated_frames is not None else pred_motion['theta'].device
             losses = {}
             total_loss = torch.tensor(0.0, device=device)
             
             # Log available control signals
             logger.debug("\nChecking available control signals:")
-            control_signals = ['gaze', 'head_distance', 'emotion', 'speed_bucket']
-            logger.debug("\nChecking available control signals:")
+            control_signals = ['gaze', 'head_distance', 'emotion', 'speed_bucket', 'lips', 'blink_state']
             for signal in control_signals:
                 if signal in conditions and conditions[signal] is not None:
                     logger.debug(f"  Found {signal}: shape={conditions[signal].shape}")
@@ -2309,46 +2509,58 @@ class VASALossModule:
 
             logger.debug(f"\nUsing device: {device}")
 
-            # 1. Gaze Loss
+            # STEP 1: Extract features from generated frames
+            # This includes landmarks (lips, eyes, jaw, nose), blink states, and emotions
+            extracted_features = {}
+
+            if generated_frames is not None:
+                logger.debug("\n=== Extracting features from generated frames ===")
+                extracted_features = self._extract_features_from_frames(
+                    generated_frames=generated_frames,
+                    conditions=conditions,
+                    device=device
+                )
+                logger.debug(f"Extracted features: {list(extracted_features.keys())}")
+
+            # STEP 2: Compute control losses from extracted features
+            # 1. Gaze Loss - from extracted features from generated frames only
             logger.debug("\nComputing Gaze Loss:")
-            if 'gaze' in conditions and conditions['gaze'] is not None:
-                pred_gaze = self._extract_gaze_from_motion(pred_motion)
-                if pred_gaze is not None:
+            if 'gaze' in conditions and conditions['gaze'] is not None and 'gazes' in extracted_features:
+                try:
+                    pred_gaze = extracted_features['gazes']  # [1, T_sampled, 2]
+                    sample_indices = extracted_features['sample_indices']
+                    target_gaze = conditions['gaze'][:, sample_indices].to(device).float()  # [B, T_sampled, 2]
+
                     logger.debug(f"  Predicted gaze shape: {pred_gaze.shape}")
-                    target_gaze = conditions['gaze'].to(device).float()
                     logger.debug(f"  Target gaze shape: {target_gaze.shape}")
-                    logger.debug(f"  Target gaze range: [{target_gaze.min():.3f}, {target_gaze.max():.3f}]")
-                    
-                    # Ensure gaze has sequence dimension
-                    if len(target_gaze.shape) == 2:  # [B, 2]
-                        target_gaze = target_gaze.unsqueeze(1).expand(-1, pred_gaze.shape[1], -1)
-                        logger.debug(f"  Expanded target gaze shape: {target_gaze.shape}")
-                    
+
+                    # Convert degrees to radians for cosine similarity
+                    pred_gaze_rad = pred_gaze * (np.pi / 180.0)
+                    target_gaze_rad = target_gaze * (np.pi / 180.0)
+
                     # Compute gaze loss with NaN protection
-                    diff = pred_gaze - target_gaze
-                    # Clamp difference to prevent extreme values in cos
+                    diff = pred_gaze_rad - target_gaze_rad
                     diff = torch.clamp(diff, -3.14, 3.14)
                     cos_sim = torch.cos(diff)
-                    # Check for NaN before mean
+
                     if torch.isnan(cos_sim).any() or torch.isinf(cos_sim).any():
                         logger.warning("NaN/Inf in gaze cosine similarity, using zero loss")
                         gaze_loss = torch.tensor(0.0, device=device)
                     else:
                         gaze_loss = (1 - cos_sim).mean()
-                    
-                    # Final NaN check
+
                     if torch.isnan(gaze_loss) or torch.isinf(gaze_loss):
                         logger.warning("NaN/Inf in final gaze loss, using zero")
                         gaze_loss = torch.tensor(0.0, device=device)
-                    
+
                     losses['control_gaze'] = gaze_loss * self.lambda_gaze_direction
                     total_loss = total_loss + losses['control_gaze']
-                    logger.debug(f"  Gaze loss: {losses['control_gaze'].item():.6f}")
-                else:
-                    logger.debug("  Failed to extract gaze - using zero loss")
+                    logger.debug(f"  Gaze loss from generated frames: {losses['control_gaze'].item():.6f}")
+                except Exception as e:
+                    logger.warning(f"Error computing gaze loss from extracted features: {e}")
                     losses['control_gaze'] = torch.tensor(0.0, device=device)
             else:
-                logger.debug("  No gaze signal found")
+                logger.debug("  No gaze signal or extracted features")
                 losses['control_gaze'] = torch.tensor(0.0, device=device)
 
             # 2. Head Distance Loss
@@ -2423,42 +2635,91 @@ class VASALossModule:
                 losses['speed_accuracy'] = torch.tensor(0.0, device=self.device)
 
 
-            # 4. Blink Loss 
-            logger.debug("\nComputing Blink Loss:")
-            if 'blink_state' in conditions and conditions['blink_state'] is not None:
+            # STEP 3: Compute losses from extracted features
+            # 4. Landmark Losses (lips, eyes, jaw, nose) - from extracted features
+            logger.debug("\nComputing Landmark Losses:")
+            landmark_keys = ['lips', 'right_eye', 'left_eye', 'jaw', 'nose']
+            landmark_conditions = {k: v for k, v in conditions.items() if k in landmark_keys and v is not None}
+
+            if landmark_conditions and 'landmarks' in extracted_features:
                 try:
+                    pred_landmarks_dict = extracted_features['landmarks']
+                    sample_indices = extracted_features['sample_indices']
+
+                    # Get corresponding target landmarks
+                    target_landmarks_dict = {}
+                    for key in landmark_keys:
+                        if key in landmark_conditions:
+                            # Sample same frames from targets
+                            target = landmark_conditions[key]  # [B, T, N, 3]
+                            target_landmarks_dict[key] = target[:, sample_indices]
+
+                    # Compute landmark losses
+                    landmark_losses = self._compute_landmark_losses(pred_landmarks_dict, target_landmarks_dict)
+                    losses.update(landmark_losses)
+
+                    # Add landmark losses to total control loss
+                    if 'facial_motion_total' in landmark_losses:
+                        total_loss = total_loss + landmark_losses['facial_motion_total']
+                        logger.debug(f"  Landmark losses computed from extracted features")
+
+                except Exception as e:
+                    logger.warning(f"Could not compute landmark losses from generated frames: {e}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+            else:
+                logger.debug("  No landmark conditions or extracted landmarks")
+
+            # 5. Blink Loss - from extracted features
+            logger.debug("\nComputing Blink Loss:")
+            if 'blink_states' in extracted_features and 'blink_state' in conditions and conditions['blink_state'] is not None:
+                try:
+                    pred_blink_tensor = extracted_features['blink_states']
+                    sample_indices = extracted_features['sample_indices']
+
+                    # Sample target blink states
+                    target_blink = conditions['blink_state'][:, sample_indices]  # [B, T_sampled, 3]
+
+                    # Compute blink loss
                     blink_loss, blink_metrics = self._compute_blink_loss(
-                        pred_motion,
-                        conditions['blink_state'].to(device),
+                        {'blink_state': pred_blink_tensor},  # Wrap in dict like pred_motion
+                        target_blink,
                         lambda_blink=self.lambda_blink,
                         device=device
                     )
                     losses.update(blink_metrics)
-                    total_loss = total_loss + blink_loss
                     losses['control_blink'] = blink_loss
-                    logger.debug(f"  Blink loss: {blink_loss.item():.6f}")
+                    total_loss = total_loss + blink_loss
+                    logger.debug(f"  Blink loss from generated frames: {blink_loss.item():.6f}")
                 except Exception as e:
-                    logger.error(f"Error computing blink loss: {str(e)}")
-                    logger.error(traceback.format_exc())
+                    logger.warning(f"Could not compute blink loss from extracted features: {e}")
                     losses['control_blink'] = torch.tensor(0.0, device=device)
             else:
-                logger.debug("  No blink_state signal found")
+                logger.debug("  No blink states or conditions")
                 losses['control_blink'] = torch.tensor(0.0, device=device)
-     
 
+            # 6. Emotion Loss - from extracted features (overrides earlier computation from motion)
+            logger.debug("\nComputing Emotion Loss from generated frames:")
+            if 'emotions' in extracted_features and 'emotion' in conditions and conditions['emotion'] is not None:
+                try:
+                    pred_emotion_tensor = extracted_features['emotions']
+                    sample_indices = extracted_features['sample_indices']
+
+                    # Sample target emotions
+                    target_emotion = conditions['emotion'][:, sample_indices]  # [B, T_sampled, emotion_dim]
+
+                    # Compute emotion loss (MSE between logits)
+                    emotion_loss = F.mse_loss(pred_emotion_tensor, target_emotion) * self.lambda_emotion
+                    losses['control_emotion'] = emotion_loss
+                    total_loss = total_loss + emotion_loss
+                    logger.debug(f"  Emotion loss from generated frames: {emotion_loss.item():.6f}")
+                except Exception as e:
+                    logger.warning(f"Could not compute emotion loss from extracted features: {e}")
+                    if 'control_emotion' not in losses:
+                        losses['control_emotion'] = torch.tensor(0.0, device=device)
+
+            # Set final control total
             losses['control_total'] = total_loss
-
-
-            # Add landmark losses if we have landmark conditions
-            landmark_conditions = {k: v for k, v in conditions.items() if 'landmarks' in k}
-            if landmark_conditions:
-                landmark_losses = self._compute_landmark_losses(pred_motion, landmark_conditions)
-                losses.update(landmark_losses)
-                
-                # Add landmark losses to total control loss
-                if 'facial_motion_total' in landmark_losses:
-                    losses['control_total'] = losses['control_total'] + landmark_losses['facial_motion_total']
-            
 
             # Log all losses, ensuring they're tensors
             logger.debug("\nControl Loss Summary:")
@@ -2476,37 +2737,7 @@ class VASALossModule:
             logger.error(traceback.format_exc())
             return self._get_zero_losses(device=self.device)
             
-    def _compute_motion_speed(self, motion: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Compute motion speed logits from motion parameters."""
-        B = motion['theta'].shape[0]
-        T = motion['theta'].shape[1]
-        device = motion['theta'].device
-        
-        # Get consecutive frame differences
-        theta_diff = motion['theta'][:, 1:] - motion['theta'][:, :-1]
-        speed = torch.norm(theta_diff.view(B, T-1, -1), dim=-1)  # [B, T-1]
-        
-        # Add zero for first frame
-        speed = torch.cat([
-            torch.zeros(B, 1, device=device),
-            speed
-        ], dim=1)  # [B, T]
-        
-        # Normalize to [-1, 1] range
-        speed = torch.tanh(speed)
-        
-        # Convert to logits using bucket centers and radius
-        centers = torch.tensor([-1.0, -0.5, -0.2, -0.1, 0.0, 0.1, 0.2, 0.5, 1.0], device=device)
-        radius = 0.1
-        
-        # Calculate distances to bucket centers
-        speed = speed.unsqueeze(-1)  # [B, T, 1]
-        centers = centers.view(1, 1, -1)  # [1, 1, num_buckets]
-        
-        # Convert to logits
-        logits = -((speed - centers) / radius) ** 2
-        
-        return logits  # [B, T, num_buckets]
+   
 
     def _get_zero_losses(self, device: Optional[torch.device] = None) -> Dict[str, torch.Tensor]:
         """Return dictionary of zero losses."""
@@ -2598,21 +2829,7 @@ class VASALossModule:
         
         return emotion
 
-    def _compute_motion_speed(self, motion: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Compute motion speed from consecutive frames."""
-        # Compute pose difference between consecutive frames
-        pose_diff = torch.norm(
-            motion['theta'][:, 1:] - motion['theta'][:, :-1],
-            dim=(-1, -2)
-        )
-        
-        # Add dummy dimension for first frame
-        speed = torch.cat([
-            torch.zeros_like(pose_diff[:, :1]),
-            pose_diff
-        ], dim=1)
-        
-        return speed
+
 
     def _compute_angular_loss(
         self,

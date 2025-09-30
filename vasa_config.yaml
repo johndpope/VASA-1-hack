@@ -182,8 +182,8 @@ loss:
   # Other losses
   lambda_nonlip: 0.1          # Weight for non-lip facial landmarks
   lambda_speed: 0.1
-  lambda_control: 0.0         # Overall control weight
-  lambda_lip: 0.0
+  lambda_control: 1.0         # Overall control weight (was 0.0, now 1.0 to enable all control losses)
+
   lambda_cfg: 0.5
   lambda_perceptual: 0.5      # Increased perceptual loss for better quality
   lambda_temporal: 0.01       # GREATLY REDUCED from 0.8 to allow more variance
