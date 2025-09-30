@@ -238,6 +238,13 @@ class VASAVolumetricAvatarBridge:
                 # Get refined mask for compositing (as in create_video_face_swap.py)
                 gen_mask, _, _, _ = self.va.face_idt.forward(generated_img)
                 gen_mask = (gen_mask > 0.65).float()
+
+                # Debug mask quality
+                mask_coverage = gen_mask.mean().item()
+                if mask_coverage < 0.01:
+                    logger.warning(f"⚠️ Frame {t}/{T}: gen_mask nearly EMPTY (coverage={mask_coverage:.4f}) - decoder output may be invalid")
+                    logger.debug(f"  generated_img stats: min={generated_img.min():.3f}, max={generated_img.max():.3f}, mean={generated_img.mean():.3f}")
+
                 for _ in range(3):  # Smooth mask edges
                     gen_mask = F.avg_pool2d(gen_mask, 3, stride=1, padding=1)
 

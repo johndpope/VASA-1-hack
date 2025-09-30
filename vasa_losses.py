@@ -2330,9 +2330,21 @@ class VASALossModule:
             return extracted
 
         try:
+            # Log incoming generated_frames stats
+            B, T = generated_frames.shape[:2]
+            frames_min = generated_frames.min().item()
+            frames_max = generated_frames.max().item()
+            frames_mean = generated_frames.mean().item()
+            frames_std = generated_frames.std().item()
+
+            logger.info(f"📥 Input generated_frames: shape={generated_frames.shape}, min={frames_min:.3f}, max={frames_max:.3f}, mean={frames_mean:.3f}, std={frames_std:.3f}")
+
+            if frames_std < 0.01:
+                logger.error(f"🚨 Generated frames have VERY LOW variance ({frames_std:.5f}) - likely all same value!")
+            if abs(frames_mean) < 0.01 and frames_max < 0.1:
+                logger.error(f"🚨 Generated frames appear EMPTY/BLACK - all values near zero!")
 
             # Sample frames for extraction
-            B, T = generated_frames.shape[:2]
             num_samples = min(5, T)
             sample_indices = torch.linspace(0, T-1, num_samples, dtype=torch.long)
 
@@ -2344,7 +2356,7 @@ class VASALossModule:
 
             logger.debug(f"Extracting features from {num_samples} frames at indices: {sample_indices.tolist()}")
 
-            # Save generated frames for debugging
+            # Save generated frames for debugging with detailed statistics
             debug_dir = "debug_generated_frames"
             import os
             os.makedirs(debug_dir, exist_ok=True)
@@ -2352,12 +2364,33 @@ class VASALossModule:
                 frame_debug = generated_frames[0, t_idx].detach().cpu()
                 if frame_debug.shape[0] == 3:  # [C, H, W]
                     from torchvision.utils import save_image
-                    # Check range and normalize if needed
-                    logger.debug(f"Frame {i} range: [{frame_debug.min():.3f}, {frame_debug.max():.3f}]")
+
+                    # Detailed frame statistics
+                    frame_min = frame_debug.min().item()
+                    frame_max = frame_debug.max().item()
+                    frame_mean = frame_debug.mean().item()
+                    frame_std = frame_debug.std().item()
+
+                    # Check if frame is nearly black/empty (very low variance or all near zero)
+                    is_black = frame_std < 0.01 or (frame_max - frame_min) < 0.05
+                    is_nearly_zero = abs(frame_mean) < 0.01
+
+                    logger.info(f"📊 Frame {i} (t={t_idx}) stats: min={frame_min:.3f}, max={frame_max:.3f}, mean={frame_mean:.3f}, std={frame_std:.3f}")
+                    if is_black:
+                        logger.warning(f"⚠️ Frame {i} appears BLACK (low variance: {frame_std:.4f})")
+                    if is_nearly_zero:
+                        logger.warning(f"⚠️ Frame {i} appears EMPTY (near-zero mean: {frame_mean:.4f})")
+
                     # If frame is in [-1, 1] range, convert to [0, 1]
-                    if frame_debug.min() < 0:
+                    if frame_min < 0:
                         frame_debug = (frame_debug + 1.0) / 2.0
-                    save_image(frame_debug, f"{debug_dir}/frame_{i}_idx{t_idx}.png")
+
+                    save_path = f"{debug_dir}/frame_{i}_idx{t_idx}.png"
+                    save_image(frame_debug, save_path)
+
+                    # Log file size to correlate with quality
+                    file_size = os.path.getsize(save_path) / 1024  # KB
+                    logger.info(f"💾 Saved {save_path} ({file_size:.1f} KB)")
 
             # Track which indices successfully extracted features
             successful_indices = []
@@ -2399,6 +2432,7 @@ class VASALossModule:
 
                     if valid_frame:
                         successful_indices.append(i)
+                        logger.info(f"✅ Successfully processed frame {t_idx} - face detected and features extracted")
 
                         for key in landmark_keys:
                             if key in landmarks:
@@ -2441,7 +2475,7 @@ class VASALossModule:
                     else:
                         logger.debug(f"Frame {t_idx} has invalid landmark arrays, skipping")
                 else:
-                    logger.debug(f"No face/landmarks detected in frame {t_idx}, skipping")
+                    logger.warning(f"❌ No face/landmarks detected in frame {t_idx}, skipping")
 
             # Convert to tensors only if we have successful extractions
             if pred_landmarks['lips'] and successful_indices:
@@ -2466,9 +2500,10 @@ class VASALossModule:
                     extracted['landmarks'] = landmarks_dict
                     # Store only the successful sample indices for target sampling
                     extracted['sample_indices'] = sample_indices[successful_indices]
+                    logger.info(f"✅ Feature extraction summary: {len(successful_indices)}/{len(sample_indices)} frames with valid faces")
                     logger.debug(f"Extracted landmarks for: {list(landmarks_dict.keys())} from {len(successful_indices)}/{len(sample_indices)} frames")
                 else:
-                    logger.debug(f"No landmarks could be stacked due to shape inconsistencies")
+                    logger.warning(f"❌ No landmarks could be stacked due to shape inconsistencies")
 
             if pred_blink_states and len(pred_blink_states) == len(successful_indices):
                 try:
@@ -2581,7 +2616,7 @@ class VASALossModule:
 
             # Only extract from frames after epoch 5 when quality should be better
             # Early training uses motion parameters only
-            use_frame_extraction = epoch >= 5 and generated_frames is not None
+            use_frame_extraction = epoch >= 5 and generated_frames is not None and dataset is not None
 
             if use_frame_extraction:
                 logger.debug("\n=== Extracting features from generated frames ===")
@@ -2594,15 +2629,20 @@ class VASALossModule:
                     )
                     logger.debug(f"Extracted features: {list(extracted_features.keys())}")
 
-                    # If extraction failed completely, fall back to motion parameters
-                    if not extracted_features:
-                        logger.debug("No features extracted from frames, will use motion parameters")
-                        use_frame_extraction = False
+                    # If extraction failed completely (no faces detected), skip control losses entirely
+                    # to prevent unstable training from bad feature extractions
+                    if not extracted_features or 'landmarks' not in extracted_features:
+                        logger.warning("⚠️ No faces detected in generated frames - SKIPPING control losses for this window to prevent instability")
+                        return self._get_zero_losses()
                 except Exception as e:
-                    logger.warning(f"Frame extraction failed: {e}, falling back to motion parameters")
-                    use_frame_extraction = False
+                    logger.warning(f"⚠️ Frame extraction failed: {e} - SKIPPING control losses for this window")
+                    return self._get_zero_losses()
             else:
-                logger.debug(f"Skipping frame extraction (epoch {epoch} < 5 or no generated frames)")
+                logger.debug(f"Skipping frame extraction (epoch {epoch} < 5, no dataset, or no generated frames)")
+                # Before epoch 5, return zero control losses - we don't have reliable features yet
+                if epoch < 5:
+                    logger.debug("Early training epoch - returning zero control losses")
+                    return self._get_zero_losses()
 
             # STEP 2: Compute control losses from extracted features
             # 1. Gaze Loss - from extracted features from generated frames only
