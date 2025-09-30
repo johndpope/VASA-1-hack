@@ -1271,12 +1271,16 @@ class VASATrainer:
                                                 )
                                                 generated_frames = result['frames'].detach()
                                             else:
-                                                generated_frames = self.va_bridge.generate_frames_from_motion(
+                                                generated_frames, gen_stats = self.va_bridge.generate_frames_from_motion(
                                                     motion_outputs=sparse_outputs,
                                                     source_img=source_img,
                                                     use_black_background=True
                                                 )
                                                 generated_frames = generated_frames.detach()
+                                                # Store generation stats for metrics
+                                                if not hasattr(self, '_gen_stats'):
+                                                    self._gen_stats = []
+                                                self._gen_stats.append(gen_stats)
                                             
                                             # Also make target frames sparse to match
                                             sparse_target_frames = torch.stack([target_frames[:, 0], target_frames[:, -1]], dim=1)
@@ -1294,11 +1298,15 @@ class VASATrainer:
                                                 )
                                                 generated_frames = result['frames'].detach()
                                             else:
-                                                generated_frames = self.va_bridge.generate_frames_from_motion(
+                                                generated_frames, gen_stats = self.va_bridge.generate_frames_from_motion(
                                                     motion_outputs=outputs,
                                                     source_img=source_img,
                                                     use_black_background=True
                                                 )
+                                                # Store generation stats for metrics
+                                                if not hasattr(self, '_gen_stats'):
+                                                    self._gen_stats = []
+                                                self._gen_stats.append(gen_stats)
                                                 generated_frames = generated_frames.detach()
                                         
                                     frame_type = "sparse (2 frames)" if use_sparse_frames else "full"
@@ -1351,6 +1359,23 @@ class VASATrainer:
                             if metrics:
                                 for k, v in metrics.items():
                                     batch_metrics[f"metric_{k}"].append(v)
+
+                            # Add generation stats if available and check quality threshold
+                            if hasattr(self, '_gen_stats') and self._gen_stats:
+                                # Average across all generations in this batch
+                                avg_valid_ratio = sum(s['valid_masks_ratio'] for s in self._gen_stats) / len(self._gen_stats)
+                                batch_metrics['frame_generation/valid_masks_ratio'].append(avg_valid_ratio)
+
+                                # SKIP WINDOW if frame generation quality is too poor (< 50% valid frames)
+                                if avg_valid_ratio < 0.5:
+                                    logger.warning(f"⚠️ SKIPPING WINDOW {window_idx}: Frame generation quality too poor ({avg_valid_ratio:.1%} valid frames < 50% threshold)")
+                                    logger.warning(f"  This prevents training on collapsed/invalid predictions that cause NaN gradients")
+                                    self._gen_stats = []
+                                    self.optimizer.zero_grad()
+                                    continue  # Skip to next window
+
+                                # Clear after logging
+                                self._gen_stats = []
 
                             # Debug warps periodically to detect collapse
                             if self.global_step % 100 == 0 and window_idx == 0:  # Log every 100 steps for first window
@@ -1557,11 +1582,12 @@ class VASATrainer:
                                                             single_motion[key] = stored_outputs[key] if not isinstance(stored_outputs[key], torch.Tensor) else stored_outputs[key].to(device)
                                                 
                                                 # Generate single frame only using bridge
-                                                single_frame_generated = self.va_bridge.generate_frames_from_motion(
+                                                single_frame_generated, _ = self.va_bridge.generate_frames_from_motion(
                                                     motion_outputs=single_motion,
                                                     source_img=source_img,
                                                     use_black_background=True  # Use black background for thumbnails
-                                                ).detach()
+                                                )
+                                                single_frame_generated = single_frame_generated.detach()
                                                 
                                                 # Clear memory immediately
                                                 del single_motion
@@ -1892,7 +1918,10 @@ class VASATrainer:
                                 self.model.parameters(),
                                 self.config.train.max_grad_norm
                             )
-                        
+
+                        # ADDITIONAL: Clip gradient values to prevent extreme spikes
+                        torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=1.0)
+
                         # Log gradient norm for monitoring
                         if grad_norm is not None and wandb.run is not None:
                             wandb.log({

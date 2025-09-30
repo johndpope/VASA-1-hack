@@ -156,7 +156,7 @@ class VASAVolumetricAvatarBridge:
         source_img: torch.Tensor,
         use_black_background: bool = True,
         background_image: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Generate frames exactly like create_video_face_swap.py using VASA-predicted warps.
 
@@ -286,6 +286,9 @@ class VASAVolumetricAvatarBridge:
                         if empty_mask_count == 3:
                             logger.warning(f"  ... (suppressing further empty mask warnings for this window)")
 
+                # Dilate mask before smoothing to expand face region (helps with detection)
+                gen_mask = F.max_pool2d(gen_mask, kernel_size=5, stride=1, padding=2)
+
                 for _ in range(3):  # Smooth mask edges
                     gen_mask = F.avg_pool2d(gen_mask, 3, stride=1, padding=1)
 
@@ -309,11 +312,22 @@ class VASAVolumetricAvatarBridge:
         # Stack all batch items [B, T, C, H, W]
         generated_frames = torch.stack(generated_frames, dim=0)
 
+        # Calculate valid masks ratio
+        total_frames = B * T
+        valid_frames = total_frames - empty_mask_count
+        valid_masks_ratio = valid_frames / total_frames if total_frames > 0 else 0.0
+
         # Log summary of mask failures
         if empty_mask_count > 0:
-            valid_frames = B * T - empty_mask_count
-            logger.info(f"📊 Frame generation summary: {valid_frames}/{B*T} frames with valid face masks ({empty_mask_count} failed)")
+            logger.info(f"📊 Frame generation summary: {valid_frames}/{total_frames} frames with valid face masks ({empty_mask_count} failed, ratio={valid_masks_ratio:.2%})")
             if empty_mask_count > T * 0.8:  # More than 80% failed
-                logger.warning(f"⚠️ HIGH FAILURE RATE: {empty_mask_count}/{B*T} frames have empty masks - motion prediction quality is poor")
+                logger.warning(f"⚠️ HIGH FAILURE RATE: {empty_mask_count}/{total_frames} frames have empty masks - motion prediction quality is poor")
 
-        return generated_frames
+        # Return frames and generation stats
+        generation_stats = {
+            'valid_masks_ratio': valid_masks_ratio,
+            'empty_mask_count': empty_mask_count,
+            'total_frames': total_frames
+        }
+
+        return generated_frames, generation_stats

@@ -234,9 +234,9 @@ class WorkerState:
             mp_face_mesh = mp.solutions.face_mesh
             self._face_mesh = mp_face_mesh.FaceMesh(
                 static_image_mode=True,
-                max_num_faces=1,
+                max_num_faces=2,  # Increased from 1 to 2 to handle partial faces
                 refine_landmarks=True,
-                min_detection_confidence=0.5
+                min_detection_confidence=0.3  # Reduced from 0.5 to 0.3 for more sensitive detection
             )
         return self._face_mesh
 
@@ -2869,7 +2869,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                                         torchvision.utils.save_image(emo_identity[0], f'debug_emo_identity_window_{idx}.png')
                                         logger.info(f"Saved debug EMO identity image for window {idx}")
 
-                                    emo_output = self.va_bridge.generate_frames_from_motion(
+                                    emo_output, _ = self.va_bridge.generate_frames_from_motion(
                                         motion_outputs=frame_motion,
                                         source_img=emo_identity,
                                         use_black_background=True  # Use black background to ensure clean EMO render

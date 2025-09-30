@@ -508,9 +508,17 @@ class VASALossModule:
                 logger.info(f"  Predicted std: {pred_expr_std:.6f}, Target std: {target_expr_std:.6f}")
                 logger.info(f"  Pred-Target diff: {expr_diff:.6f}")
 
+                # Add to metrics for wandb logging
+                metrics['expression_std/predicted'] = pred_expr_std
+                metrics['expression_std/target'] = target_expr_std
+                metrics['expression_std/diff'] = expr_diff
+
                 if pred_expr_std < 1e-4:
                     logger.error(f"🚨 PREDICTION COLLAPSE: expression_embed has near-zero variance ({pred_expr_std:.8f})!")
                     logger.error(f"  Model is outputting constant values - gradients may be vanishing!")
+                    metrics['diagnostics/expression_collapse'] = 1.0
+                else:
+                    metrics['diagnostics/expression_collapse'] = 0.0
 
             logger.debug("Reconstruction losses:")
             for k, v in recon_losses.items():
