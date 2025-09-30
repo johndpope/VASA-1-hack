@@ -1335,7 +1335,8 @@ class VASATrainer:
                                 step=self.global_step,
                                 generated_frames=generated_frames,
                                 target_frames=target_frames,
-                                source_identity=source_identity_for_loss  # Pass high-quality identity
+                                source_identity=source_identity_for_loss,  # Pass high-quality identity
+                                dataset=self.train_loader.dataset  # Pass dataset for feature extraction
                             )
                             
                             # Clean up generated frames immediately after loss computation
