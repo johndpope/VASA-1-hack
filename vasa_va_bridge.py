@@ -188,6 +188,30 @@ class VASAVolumetricAvatarBridge:
         identity_embed_dict = source_data['embed_dict']
 
         generated_frames = []
+        empty_mask_count = 0  # Track empty masks to reduce log spam
+
+        # Diagnostic: Check if motion parameters are collapsed/identical across frames
+        if T > 1:
+            theta_variance = motion_outputs['theta'].var(dim=1).mean().item()
+            expr_variance = motion_outputs['expression_embed'].var(dim=1).mean().item()
+            uv_variance = motion_outputs['uv_warps'].var(dim=1).mean().item()
+
+            # Check if uv_warps are near identity (all zeros would mean no warping)
+            uv_magnitude = motion_outputs['uv_warps'].abs().mean().item()
+
+            logger.info(f"🔍 Motion parameter variance check:")
+            logger.info(f"  theta variance across time: {theta_variance:.6f}")
+            logger.info(f"  expression_embed variance across time: {expr_variance:.6f}")
+            logger.info(f"  uv_warps variance across time: {uv_variance:.6f}")
+            logger.info(f"  uv_warps magnitude (mean abs): {uv_magnitude:.6f}")
+
+            if theta_variance < 1e-6 and expr_variance < 1e-6:
+                logger.error(f"🚨 MOTION COLLAPSE DETECTED: All frames have IDENTICAL motion parameters!")
+                logger.error(f"  This explains why decoder produces identical outputs.")
+
+            if uv_magnitude < 1e-4:
+                logger.error(f"🚨 UV WARPS NEAR-ZERO: uv_warps are nearly identity (magnitude={uv_magnitude:.8f})!")
+                logger.error(f"  Warping will have no effect - canonical volume won't change across frames!")
 
         for b in range(B):
             batch_frames = []
@@ -208,10 +232,17 @@ class VASAVolumetricAvatarBridge:
                 target_rotation_warp = grid.bmm(target_theta[:, :3].transpose(1, 2)).view(-1, d, s, s, 3)
 
                 # Apply warps exactly like create_video_face_swap.py - nested grid_sample calls
-                aligned_target_volume = self.va.grid_sample(
-                    self.va.grid_sample(canonical_volume_b, target_uv_warp),
-                    target_rotation_warp
-                )
+                uv_warped = self.va.grid_sample(canonical_volume_b, target_uv_warp)
+                aligned_target_volume = self.va.grid_sample(uv_warped, target_rotation_warp)
+
+                # Debug: Check if warping is actually changing the volume
+                if t == 0:
+                    self._first_warped_volume_mean = aligned_target_volume.mean().item()
+                elif t < 3 and empty_mask_count <= 3:  # Only log for first few frames
+                    current_mean = aligned_target_volume.mean().item()
+                    warp_change = abs(current_mean - self._first_warped_volume_mean)
+                    if warp_change < 1e-6:
+                        logger.warning(f"⚠️ Frame {t}: Warped volume UNCHANGED (diff={warp_change:.8f}) - warps may be identity!")
 
                 # Prepare for decoder
                 target_latent_feats = aligned_target_volume.view(1, c * d, s, s)
@@ -235,15 +266,25 @@ class VASAVolumetricAvatarBridge:
                 if generated_img.min() >= 0 and generated_img.max() <= 1.1:
                     generated_img = generated_img * 2 - 1
 
+                # Debug decoder output quality BEFORE mask check
+                img_std = generated_img.std().item()
+                img_mean = generated_img.mean().item()
+
                 # Get refined mask for compositing (as in create_video_face_swap.py)
                 gen_mask, _, _, _ = self.va.face_idt.forward(generated_img)
                 gen_mask = (gen_mask > 0.65).float()
 
-                # Debug mask quality
+                # Debug mask quality (only log first 3 failures to reduce spam)
                 mask_coverage = gen_mask.mean().item()
                 if mask_coverage < 0.01:
-                    logger.warning(f"⚠️ Frame {t}/{T}: gen_mask nearly EMPTY (coverage={mask_coverage:.4f}) - decoder output may be invalid")
-                    logger.debug(f"  generated_img stats: min={generated_img.min():.3f}, max={generated_img.max():.3f}, mean={generated_img.mean():.3f}")
+                    empty_mask_count += 1
+                    if empty_mask_count <= 3:
+                        logger.warning(f"⚠️ Frame {t}/{T}: gen_mask nearly EMPTY (coverage={mask_coverage:.4f})")
+                        logger.warning(f"  🔍 Decoder output: mean={img_mean:.3f}, std={img_std:.3f}, range=[{generated_img.min():.3f}, {generated_img.max():.3f}]")
+                        if img_std < 0.01:
+                            logger.error(f"  🚨 Decoder produced CONSTANT image (std={img_std:.5f}) - motion params likely invalid!")
+                        if empty_mask_count == 3:
+                            logger.warning(f"  ... (suppressing further empty mask warnings for this window)")
 
                 for _ in range(3):  # Smooth mask edges
                     gen_mask = F.avg_pool2d(gen_mask, 3, stride=1, padding=1)
@@ -267,5 +308,12 @@ class VASAVolumetricAvatarBridge:
 
         # Stack all batch items [B, T, C, H, W]
         generated_frames = torch.stack(generated_frames, dim=0)
+
+        # Log summary of mask failures
+        if empty_mask_count > 0:
+            valid_frames = B * T - empty_mask_count
+            logger.info(f"📊 Frame generation summary: {valid_frames}/{B*T} frames with valid face masks ({empty_mask_count} failed)")
+            if empty_mask_count > T * 0.8:  # More than 80% failed
+                logger.warning(f"⚠️ HIGH FAILURE RATE: {empty_mask_count}/{B*T} frames have empty masks - motion prediction quality is poor")
 
         return generated_frames

@@ -493,6 +493,25 @@ class VASALossModule:
             logger.debug("\nComputing reconstruction losses:")
             recon_losses = self._compute_reconstruction_losses(outputs, targets, noise, step)
             losses.update(recon_losses)
+
+            # Log reconstruction losses at INFO level to track training progress
+            total_recon_loss = sum(v.item() for v in recon_losses.values() if isinstance(v, torch.Tensor))
+            logger.info(f"📊 Total reconstruction loss: {total_recon_loss:.4f}")
+
+            # Diagnostic: Check if predictions are collapsing to same value
+            if 'expression_embed' in outputs and 'expression_embed' in targets:
+                pred_expr_std = outputs['expression_embed'].std().item()
+                target_expr_std = targets['expression_embed'].std().item()
+                expr_diff = (outputs['expression_embed'] - targets['expression_embed']).abs().mean().item()
+
+                logger.info(f"🔍 Expression diagnostics:")
+                logger.info(f"  Predicted std: {pred_expr_std:.6f}, Target std: {target_expr_std:.6f}")
+                logger.info(f"  Pred-Target diff: {expr_diff:.6f}")
+
+                if pred_expr_std < 1e-4:
+                    logger.error(f"🚨 PREDICTION COLLAPSE: expression_embed has near-zero variance ({pred_expr_std:.8f})!")
+                    logger.error(f"  Model is outputting constant values - gradients may be vanishing!")
+
             logger.debug("Reconstruction losses:")
             for k, v in recon_losses.items():
                 if isinstance(v, torch.Tensor):
@@ -1493,6 +1512,19 @@ class VASALossModule:
 
             # L1 loss for uv warps (sparsity and robustness to prevent collapse)
             losses['uv_warp_l1'] = F.l1_loss(pred['uv_warps'], target['uv_warps']) * self.lambda_warp_l1
+
+            # MAGNITUDE ENCOURAGEMENT: Prevent warps from collapsing to near-zero
+            # Compare predicted magnitude to target magnitude to ensure non-trivial deformations
+            pred_magnitude = pred['uv_warps'].abs().mean()
+            target_magnitude = target['uv_warps'].abs().mean()
+            magnitude_loss = F.mse_loss(pred_magnitude, target_magnitude) * lambda_warp * 0.5
+
+            losses['uv_warp_magnitude'] = magnitude_loss
+
+            # Log magnitude statistics to track collapse
+            logger.debug(f"UV warp magnitudes - Pred: {pred_magnitude.item():.6f}, Target: {target_magnitude.item():.6f}")
+            if pred_magnitude < 0.1 and target_magnitude > 0.3:
+                logger.warning(f"⚠️ UV warp magnitude collapse: pred={pred_magnitude.item():.4f} << target={target_magnitude.item():.4f}")
 
             # L1 on velocity (frame-to-frame differences) for temporal consistency
             if pred['uv_warps'].shape[1] > 1:
