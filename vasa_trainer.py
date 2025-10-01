@@ -1683,7 +1683,7 @@ class VASATrainer:
                                         emo_frames_for_thumbnail = single_frame_emo.unsqueeze(0).unsqueeze(0)
                                         logger.info(f"✅ Prepared EMO frame for 4-panel thumbnail, shape: {emo_frames_for_thumbnail.shape}")
                                     else:
-                                        logger.warning(f"⚠️  No EMO frame available - will use 3-panel thumbnail")
+                                        logger.debug(f"No EMO frame available - will use 3-panel thumbnail")
 
                                     thumbnail = generate_window_thumbnail(
                                         generated_frames=single_frame_generated,  # VASA generated frame

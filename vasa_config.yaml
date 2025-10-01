@@ -61,7 +61,7 @@ train:
   # when to add conditional signals
   control_start_epoch: 0      # Start control immediately for overfitting
 
-  lr: 5e-4 # Reduced to 5e-4 for gradient stability (was 1e-3)
+  lr: 1e-4 # REDUCED to 1e-4 to prevent UV warp oscillation (was 5e-4)
   motion_proj_lr: 0.1 # Reduced motion projection LR multiplier
   expression_lr: 0.1   # Reduced expression LR multiplier 
 
@@ -85,7 +85,7 @@ train:
 
   beta1: 0.9
   beta2: 0.999
-  weight_decay: 1e-5  # Reduced from 0.01 to allow more variance
+  weight_decay: 1e-4  # INCREASED from 1e-5 for stronger regularization to prevent overfitting
   max_grad_norm: 0.1  # Very aggressive gradient clipping to prevent explosions (was 0.5)
   save_freq: 5                # Save very frequently to enable recovery from OOM
   
@@ -232,7 +232,7 @@ loss:
   lambda_warp_smooth: 0.01           # Spatial smoothness regularization for warps
   lambda_warp_temporal: 0.1          # Temporal consistency for warps
   lambda_source_theta: 0.5           # Source theta warp loss weight
-  lambda_warp_magnitude: 5.0         # UV warp magnitude matching (prevents collapse to zero)
+  lambda_warp_magnitude: 15.0        # INCREASED from 5.0 to strongly prevent UV warp collapse
   
   # Frame generation for disentanglement losses
   use_sparse_frames: false    # If true, only generate first and last frame (saves 90% memory)

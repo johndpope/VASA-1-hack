@@ -265,8 +265,8 @@ def main():
     logger.info("Creating dataset...")
 
     # Import volumetric avatar bridge for EMO generation
-    from vasa_va_bridge import VolumetricAvatarBridge
-    va_bridge = VolumetricAvatarBridge(emo_model)
+    from vasa_va_bridge import VASAVolumetricAvatarBridge
+    va_bridge = VASAVolumetricAvatarBridge(emo_model)
 
     dataset = VASAIntegratedDataset(
         video_folder=args.video_folder,

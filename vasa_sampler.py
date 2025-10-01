@@ -290,7 +290,9 @@ def create_window_sequence_collate_fn(context_size: int = 10):
         for key in keys_to_stack:
             if key in processed_windows[0]:
                 try:
-                    batched[key] = torch.stack([w[key] for w in processed_windows])
+                    # Move all tensors to CPU before stacking to avoid device mismatch
+                    tensors_to_stack = [w[key].cpu() if isinstance(w[key], torch.Tensor) and w[key].is_cuda else w[key] for w in processed_windows]
+                    batched[key] = torch.stack(tensors_to_stack)
                 except Exception as e:
                     logger.warning(f"Could not stack {key}: {e}")
 
