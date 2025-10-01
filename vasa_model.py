@@ -19,6 +19,39 @@ if 'nemo' not in sys.path:
 from logger import logger
 from blink_condition_handler import BlinkConditionHandler
 
+
+class DynamicTanh(nn.Module):
+    """
+    Dynamic Tanh (DyT) - A learnable normalization alternative from Meta FAIR (March 2025).
+
+    DyT(x) = γ * tanh(α * x) + β
+
+    Benefits over LayerNorm:
+    - Preserves variance better (no mean/std computation)
+    - Learnable activation range via α
+    - Natural bounding via tanh saturation
+    - ~5-10% faster (no statistics gathering)
+    - Better for audio-motion synchronization in diffusion models
+
+    Args:
+        dim: Feature dimension (same as LayerNorm's normalized_shape)
+        init_alpha: Initial value for α (default 1.0, use 0.1 if over-saturation occurs)
+    """
+    def __init__(self, dim: int, init_alpha: float = 1.0):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.tensor(init_alpha))  # Learnable scalar for input scaling
+        self.gamma = nn.Parameter(torch.ones(dim))           # Per-feature scale (like LayerNorm)
+        self.beta = nn.Parameter(torch.zeros(dim))           # Per-feature shift (like LayerNorm)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply DyT: γ * tanh(α * x) + β
+
+        Shape: Works with any shape ending in [..., dim], just like LayerNorm
+        """
+        return self.gamma * torch.tanh(self.alpha * x) + self.beta
+
+
 class VASAPositionalEmbedding(nn.Module):
     """
     Positional embeddings for VASA sequence generation with negative positions for context.
@@ -106,8 +139,8 @@ class EfficientConditionEmbedding(nn.Module):
         self.distance_proj = nn.Linear(1, 1)
         self.emotion_proj = nn.Linear(2, 2)
 
-        # Removed audio_norm to preserve variance (JoyVASA approach)
-        self.control_norm = nn.LayerNorm(config.projections.control_norm_dim)
+        # Using DynamicTanh instead of LayerNorm to preserve variance (JoyVASA approach + DyT benefits)
+        self.control_norm = DynamicTanh(config.projections.control_norm_dim)
 
         self.blink_embed = nn.Sequential(
             nn.Linear(config.projections.blink.input_dim, config.projections.blink.hidden_dim),
@@ -120,7 +153,7 @@ class EfficientConditionEmbedding(nn.Module):
         total_features = config.projections.audio.output_dim + 5 + config.projections.blink.output_dim
         self.final_proj = nn.Linear(total_features, model_dim)
 
-        self.final_norm = nn.LayerNorm(model_dim)
+        self.final_norm = DynamicTanh(model_dim)
 
     def load_channel_config(self, config_path: str) -> OmegaConf:
         try:
@@ -302,36 +335,53 @@ class EfficientConditionEmbedding(nn.Module):
 
 
 class AudioCrossDecoderLayer(nn.TransformerDecoderLayer):
+    """
+    Custom decoder layer with additional audio cross-attention.
+
+    Overrides internal LayerNorms (norm1, norm2, norm3) from parent with DynamicTanh
+    for full DyT integration, improving variance preservation and stability.
+    """
     def __init__(self, d_model, nhead, **kwargs):
         super().__init__(d_model, nhead, **kwargs)
+        
+        # Override parent's internal norms with DynamicTanh
+        self.norm1 = DynamicTanh(d_model)  # For self-attention
+        self.norm2 = DynamicTanh(d_model)  # For cross-attention (to memory)
+        self.norm3 = DynamicTanh(d_model)  # For feed-forward
+        
+        # Custom audio cross-attention components
         self.audio_cross_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True)
-        self.audio_norm = nn.LayerNorm(d_model)
-        self.dropout2 = nn.Dropout(kwargs.get('dropout', 0.1))  # Add dropout layer
+        self.audio_norm = DynamicTanh(d_model)  # DyT for audio path
+        self.dropout2 = nn.Dropout(kwargs.get('dropout', 0.1))
     
-    def forward(self, tgt, memory, tgt_mask=None, memory_mask=None, 
+    def forward(self, tgt, memory, tgt_mask=None, memory_mask=None,
                 tgt_key_padding_mask=None, memory_key_padding_mask=None,
                 audio_memory=None):
-        # Call parent's forward with all expected arguments
+        # ASSERTION: audio_memory is REQUIRED and must be a Tensor
+        assert audio_memory is not None, \
+            "audio_memory is required for AudioCrossDecoderLayer, got None"
+        assert isinstance(audio_memory, torch.Tensor), \
+            f"audio_memory must be a Tensor, got {type(audio_memory)}"
+
+        # Call parent's forward (now using DyT internally)
         tgt = super().forward(
-            tgt, memory, 
+            tgt, memory,
             tgt_mask=tgt_mask,
             memory_mask=memory_mask,
             tgt_key_padding_mask=tgt_key_padding_mask,
             memory_key_padding_mask=memory_key_padding_mask
         )
-        
-        # Additional audio cross-attention
-        if audio_memory is not None:
-            tgt2, _ = self.audio_cross_attn(
-                tgt, audio_memory, audio_memory,
-                key_padding_mask=None  # You could add audio padding mask if needed
-            )
-            tgt = tgt + self.dropout2(tgt2)
-            tgt = self.audio_norm(tgt)
-        
-        return tgt
-    
 
+        # Additional audio cross-attention (REQUIRED)
+        tgt2, _ = self.audio_cross_attn(
+            tgt, audio_memory, audio_memory,
+            key_padding_mask=None
+        )
+        tgt = tgt + self.dropout2(tgt2)
+        tgt = self.audio_norm(tgt)
+
+        return tgt
+        
 
 class MotionTransformer(nn.Module):
     """Decoder-based Transformer for motion generation matching H5 cache structure.
@@ -427,9 +477,9 @@ class MotionTransformer(nn.Module):
             )
             for _ in range(num_layers)
         ])
-        
-        # Final layer norm
-        self.decoder_norm = nn.LayerNorm(self.d_model)
+
+        # Final layer norm replaced with DynamicTanh for better stability
+        self.decoder_norm = DynamicTanh(self.d_model)
 
 
 
@@ -630,21 +680,23 @@ class MotionTransformer(nn.Module):
         # out = self.decoder(tgt=tgt, memory=cond_emb)  # [B, C+T or T, d_model]
         out = tgt
         for layer in self.decoder_layers:
-                    # Extract audio memory from conditions if available
-                    audio_memory = None
-                    audio_memory = self.cond_emb(
-                        {'audio_features': conditions['audio_features']}
-                    )
-                    if C > 0:
-                        audio_memory = audio_memory[:, C:]  # Remove context frames
-                    
-                    out = layer(
-                        out, 
-                        cond_emb,
-                        audio_memory=audio_memory
-                    )
-                
-                    out = self.decoder_norm(out)
+            # Extract audio memory from conditions (REQUIRED)
+            assert 'audio_features' in conditions, \
+                "audio_features must be in conditions for AudioCrossDecoderLayer"
+
+            audio_memory = self.cond_emb(
+                {'audio_features': conditions['audio_features']}
+            )
+            if C > 0:
+                audio_memory = audio_memory[:, C:]  # Remove context frames
+
+            out = layer(
+                out,
+                cond_emb,
+                audio_memory=audio_memory
+            )
+
+        out = self.decoder_norm(out)
 
         # Extract only current T frames if we had context
         if C > 0:

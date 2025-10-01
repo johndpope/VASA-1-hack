@@ -79,8 +79,8 @@ train:
   # - This processes more windows per step but maintains temporal continuity
   batch_size: 16               # Batch size for training
 
-  windows_per_batch: 4          # Reduced from 14 to 4 for better sequence diversity
-  gradient_accumulation_steps: 4  # Increase effective batch size to break plateau
+  windows_per_batch: 8          # INCREASED from 4 to 8 to use more VRAM (was 4)
+  gradient_accumulation_steps: 2  # REDUCED from 4 to maintain effective batch size
   num_epochs: 1000            # Reduced for quick testing
 
   beta1: 0.9
