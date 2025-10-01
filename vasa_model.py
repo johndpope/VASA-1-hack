@@ -380,12 +380,14 @@ class AudioCrossDecoderLayer(nn.Module):
                 tgt_key_padding_mask=None, memory_key_padding_mask=None,
                 audio_memory=None, is_causal=True):
         """
+        Pre-norm transformer decoder layer (norm BEFORE attention/FFN for better gradient flow).
+
         Args:
             tgt: Target sequence [B, T, d_model]
             memory: Condition embeddings [B, T, d_model]
-            audio_memory: Audio features [B, T, d_model]
+            audio_memory: Audio features [B, T, d_model] (cached, not recomputed)
             is_causal: Use causal masking for self-attention (default: True)
-            tgt_mask: Attention mask (required if is_causal=True for nn.MultiheadAttention)
+            tgt_mask: Attention mask (auto-generated if None and is_causal=True)
         """
         # ASSERTION: audio_memory is REQUIRED
         assert audio_memory is not None, \
@@ -393,49 +395,48 @@ class AudioCrossDecoderLayer(nn.Module):
         assert isinstance(audio_memory, torch.Tensor), \
             f"audio_memory must be a Tensor, got {type(audio_memory)}"
 
-        # 1. Causal self-attention
-        # For Flash Attention optimization with is_causal=True, we still need to provide tgt_mask
-        # The is_causal hint allows PyTorch to use optimized Flash Attention kernels
+        # Generate causal mask once if needed
         if is_causal and tgt_mask is None:
-            # Generate causal mask if not provided
             seq_len = tgt.size(1)
             tgt_mask = nn.Transformer.generate_square_subsequent_mask(
                 seq_len, device=tgt.device, dtype=tgt.dtype
             )
 
+        # 1. PRE-NORM: Causal self-attention
+        # Norm BEFORE attention (pre-norm) for better gradient flow
+        tgt_normed = self.norm1(tgt)
         tgt2, _ = self.self_attn(
-            tgt, tgt, tgt,
+            tgt_normed, tgt_normed, tgt_normed,
             attn_mask=tgt_mask,
             key_padding_mask=tgt_key_padding_mask,
             need_weights=False,
-            is_causal=is_causal  # Flash Attention optimization hint
+            is_causal=is_causal  # Flash Attention optimization
         )
-        tgt = tgt + self.dropout1(tgt2)
-        tgt = self.norm1(tgt)
+        tgt = tgt + self.dropout1(tgt2)  # Residual connection
 
-        # 2. Cross-attention to condition memory
+        # 2. PRE-NORM: Cross-attention to condition memory
+        tgt_normed = self.norm2(tgt)
         tgt2, _ = self.cross_attn(
-            tgt, memory, memory,
+            tgt_normed, memory, memory,
             attn_mask=memory_mask,
             key_padding_mask=memory_key_padding_mask,
             need_weights=False
         )
         tgt = tgt + self.dropout2(tgt2)
-        tgt = self.norm2(tgt)
 
-        # 3. Audio cross-attention (VASA-specific)
+        # 3. PRE-NORM: Audio cross-attention (VASA-specific)
+        tgt_normed = self.norm3(tgt)
         tgt2, _ = self.audio_cross_attn(
-            tgt, audio_memory, audio_memory,
+            tgt_normed, audio_memory, audio_memory,
             key_padding_mask=None,
             need_weights=False
         )
         tgt = tgt + self.dropout3(tgt2)
-        tgt = self.norm3(tgt)
 
-        # 4. Feed-forward network
-        tgt2 = self.linear2(self.dropout_ffn(self.activation(self.linear1(tgt))))
+        # 4. PRE-NORM: Feed-forward network
+        tgt_normed = self.norm4(tgt)
+        tgt2 = self.linear2(self.dropout_ffn(self.activation(self.linear1(tgt_normed))))
         tgt = tgt + self.dropout4(tgt2)
-        tgt = self.norm4(tgt)
 
         return tgt
         
@@ -734,28 +735,26 @@ class MotionTransformer(nn.Module):
         # Apply transformer decoder
         # tgt: query (motion embeddings)
         # memory: key/value (condition embeddings)
-        # out = self.decoder(tgt=tgt, memory=cond_emb)  # [B, C+T or T, d_model]
 
-        # Use Flash Attention optimized causal masking (is_causal=True)
-        # This ensures frame t can only attend to frames 0..t-1 (not future frames)
-        # No explicit mask tensor needed - Flash Attention handles it internally
+        # OPTIMIZATION: Compute audio_memory ONCE and cache for all layers
+        # Prevents redundant self.cond_emb() calls in the loop
+        assert 'audio_features' in conditions, \
+            "audio_features must be in conditions for AudioCrossDecoderLayer"
+
+        audio_memory = self.cond_emb({'audio_features': conditions['audio_features']})
+        if C > 0:
+            audio_memory = audio_memory[:, C:]  # Remove context frames, keep only current T
+
+        # Apply Flash Attention optimized causal masking (is_causal=True)
+        # Ensures frame t can only attend to frames 0..t-1 (not future frames)
         out = tgt
         for layer in self.decoder_layers:
-            # Extract audio memory from conditions (REQUIRED)
-            assert 'audio_features' in conditions, \
-                "audio_features must be in conditions for AudioCrossDecoderLayer"
-
-            audio_memory = self.cond_emb(
-                {'audio_features': conditions['audio_features']}
-            )
-            if C > 0:
-                audio_memory = audio_memory[:, C:]  # Remove context frames
-
+            # Pass cached audio_memory (not recomputed)
             out = layer(
                 out,
                 cond_emb,
-                audio_memory=audio_memory,
-                is_causal=True  # Flash Attention optimized causal masking
+                audio_memory=audio_memory,  # Cached - no recomputation
+                is_causal=True  # Flash Attention optimization
             )
 
         out = self.decoder_norm(out)
