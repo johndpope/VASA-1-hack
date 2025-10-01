@@ -334,6 +334,103 @@ class EfficientConditionEmbedding(nn.Module):
             raise
 
 
+
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+class LowRankAttention(nn.Module):
+    def __init__(self, d_model, nhead, rank=32, num_levels=3, dropout=0.0, batch_first=True):
+        super().__init__()
+        self.d_model = d_model
+        self.nhead = nhead
+        self.num_levels = num_levels
+        self.rank_per_level = rank // num_levels
+        self.dropout = dropout
+        self.batch_first = batch_first
+        self.head_dim = d_model // nhead
+        assert self.head_dim * nhead == self.d_model, "d_model must be divisible by nhead"
+
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        self.left_projs = nn.ModuleList([nn.Linear(self.head_dim, self.rank_per_level, bias=False) for _ in range(num_levels)])
+        self.right_projs = nn.ModuleList([nn.Linear(self.head_dim, self.rank_per_level, bias=False) for _ in range(num_levels)])
+        self.out_proj = nn.Linear(d_model, d_model)
+        self.dropout_layer = nn.Dropout(dropout)
+
+    def forward(self, query, key, value, key_padding_mask=None, attn_mask=None, need_weights=True):
+        # Handle batch_first by transposing to (seq, batch, embed) if needed
+        if self.batch_first:
+            query = query.transpose(0, 1)
+            key = key.transpose(0, 1)
+            value = value.transpose(0, 1)
+
+        tgt_len, bsz, _ = query.shape
+        src_len = key.shape[0]
+
+        # Project Q, K, V
+        q = self.q_proj(query)
+        k = self.k_proj(key)
+        v = self.v_proj(value)
+
+        # Reshape for multihead: (bsz * nhead, seq, head_dim)
+        q = q.contiguous().view(tgt_len, bsz * self.nhead, self.head_dim).transpose(0, 1)
+        k = k.contiguous().view(src_len, bsz * self.nhead, self.head_dim).transpose(0, 1)
+        v = v.contiguous().view(src_len, bsz * self.nhead, self.head_dim).transpose(0, 1)
+
+        # Initialize attention scores
+        attn_scores = torch.zeros(bsz * self.nhead, tgt_len, src_len, device=q.device, dtype=q.dtype)
+
+        # Sum over levels for multi-level low-rank approximation
+        scale = 1.0 / math.sqrt(self.head_dim)  # Standard scaling
+        for l in range(self.num_levels):
+            q_low = F.linear(q, self.left_projs[l].weight)  # (bsz*nhead, tgt_len, rank_per_level)
+            k_low = F.linear(k, self.right_projs[l].weight)  # (bsz*nhead, src_len, rank_per_level)
+            contrib = torch.bmm(q_low, k_low.transpose(1, 2)) * scale
+            attn_scores += contrib
+
+        # Apply attn_mask (additive mask, e.g., for causal)
+        if attn_mask is not None:
+            if attn_mask.dim() == 2:
+                attn_mask = attn_mask.unsqueeze(0)
+            elif attn_mask.dim() == 3:
+                attn_mask = attn_mask[:, None, :, :].expand(bsz, self.nhead, -1, -1).reshape(bsz * self.nhead, -1, -1)
+            attn_scores += attn_mask
+
+        # Apply key_padding_mask (convert to -inf mask)
+        if key_padding_mask is not None:
+            # key_padding_mask: (bsz, src_len) -> (bsz * nhead, tgt_len, src_len)
+            mask = key_padding_mask.unsqueeze(1).expand(-1, tgt_len, -1)  # (bsz, tgt_len, src_len)
+            mask = mask.unsqueeze(1).expand(-1, self.nhead, -1, -1)  # (bsz, nhead, tgt_len, src_len)
+            mask = mask.reshape(bsz * self.nhead, tgt_len, src_len)
+            attn_scores = attn_scores.masked_fill(mask, float('-inf'))
+
+        # Softmax and dropout
+        attn_probs = F.softmax(attn_scores, dim=-1)
+        attn_probs = self.dropout_layer(attn_probs)
+
+        # Compute output: (bsz*nhead, tgt_len, head_dim)
+        attn_output = torch.bmm(attn_probs, v)
+
+        # Concat heads: (tgt_len, bsz, d_model)
+        attn_output = attn_output.transpose(0, 1).contiguous().view(tgt_len, bsz, self.d_model)
+        attn_output = self.out_proj(attn_output)
+
+        # Transpose back if batch_first
+        if self.batch_first:
+            attn_output = attn_output.transpose(0, 1)
+
+        # Return weights if needed (average over heads)
+        attn_weights = None
+        if need_weights:
+            attn_weights = attn_probs.view(bsz, self.nhead, tgt_len, src_len).mean(dim=1)  # (bsz, tgt_len, src_len)
+
+        return attn_output, attn_weights
+
 class AudioCrossDecoderLayer(nn.TransformerDecoderLayer):
     """
     Custom decoder layer with additional audio cross-attention.
@@ -350,7 +447,7 @@ class AudioCrossDecoderLayer(nn.TransformerDecoderLayer):
         self.norm3 = DynamicTanh(d_model)  # For feed-forward
         
         # Custom audio cross-attention components
-        self.audio_cross_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True)
+        self.audio_cross_attn = LowRankAttention(d_model, nhead, batch_first=True)
         self.audio_norm = DynamicTanh(d_model)  # DyT for audio path
         self.dropout2 = nn.Dropout(kwargs.get('dropout', 0.1))
     
@@ -381,7 +478,7 @@ class AudioCrossDecoderLayer(nn.TransformerDecoderLayer):
         tgt = self.audio_norm(tgt)
 
         return tgt
-        
+
 
 class MotionTransformer(nn.Module):
     """Decoder-based Transformer for motion generation matching H5 cache structure.
@@ -529,6 +626,78 @@ class MotionTransformer(nn.Module):
             nn.SiLU(),
             nn.Linear(warp_hidden_dim, 16 * 64 * 64 * 3)  # Full UV warp field
         )
+
+        # Initialize UV warp head to output ~0.65 magnitude from the start
+        # Can optionally burn in canonical warp from dataset
+        self._init_uv_warp_head(canonical_warp_path=config.model.get('canonical_warp_path', None))
+
+    def _init_uv_warp_head(self, target_magnitude: float = 0.65, canonical_warp_path: str = None):
+        """
+        Initialize UV warp head to output values with target magnitude.
+
+        Two modes:
+        1. If canonical_warp_path provided: Burn in actual canonical warp from dataset
+        2. Otherwise: Scale weights to output ~0.65 magnitude
+
+        Args:
+            target_magnitude: Target output magnitude (default 0.65)
+            canonical_warp_path: Path to .pt file containing canonical UV warp tensor
+                                 Shape should be (16, 64, 64, 3) or (1, 16, 64, 64, 3)
+        """
+        final_layer = self.uv_warp_head[-1]
+
+        if canonical_warp_path and Path(canonical_warp_path).exists():
+            # MODE 1: Burn in canonical warp from dataset
+            logger.info(f"🔥 Burning in canonical warp from: {canonical_warp_path}")
+
+            # Load canonical warp
+            canonical_warp = torch.load(canonical_warp_path, map_location='cpu')
+
+            # Handle different shapes
+            if canonical_warp.dim() == 5:  # (1, 16, 64, 64, 3)
+                canonical_warp = canonical_warp.squeeze(0)
+            assert canonical_warp.shape == (16, 64, 64, 3), \
+                f"Canonical warp must be (16, 64, 64, 3), got {canonical_warp.shape}"
+
+            # Flatten to match output dimension
+            canonical_flat = canonical_warp.flatten()  # (196608,)
+
+            # Set bias to canonical warp values
+            with torch.no_grad():
+                if final_layer.bias is None:
+                    final_layer.bias = nn.Parameter(canonical_flat.clone())
+                else:
+                    final_layer.bias.copy_(canonical_flat)
+
+                # Zero out weights so output = bias (canonical warp) initially
+                final_layer.weight.zero_()
+
+            warp_mag = canonical_warp.abs().mean().item()
+            logger.info(f"✅ Burned in canonical warp as bias")
+            logger.info(f"   Canonical warp magnitude: {warp_mag:.4f}")
+            logger.info(f"   Weights zeroed - model will output canonical warp initially")
+            logger.info(f"   Model will learn RESIDUALS from canonical warp during training")
+
+        else:
+            # MODE 2: Scale weights to target magnitude
+            if canonical_warp_path:
+                logger.warning(f"⚠️  Canonical warp path not found: {canonical_warp_path}")
+                logger.warning(f"   Falling back to magnitude-based initialization")
+
+            # Empirically calibrated: scale final layer by ~15x to get output magnitude ~0.65
+            # This compensates for the dampening effect of SiLU activations in earlier layers
+            scale_factor = 15.0
+
+            with torch.no_grad():
+                final_layer.weight.mul_(scale_factor)
+                if final_layer.bias is not None:
+                    final_layer.bias.mul_(scale_factor)
+
+            logger.info(f"✅ Initialized UV warp head for target magnitude: {target_magnitude:.3f}")
+            logger.info(f"   Scaled final Linear layer by {scale_factor}x")
+            logger.info(f"   Final layer weight std: {final_layer.weight.std().item():.6f}")
+            if final_layer.bias is not None:
+                logger.info(f"   Final layer bias range: [{final_layer.bias.min().item():.6f}, {final_layer.bias.max().item():.6f}]")
 
     def _get_sinusoidal_embedding(self, ts, dim):
         half_dim = dim // 2

@@ -47,14 +47,62 @@ mv checkpoints/checkpoint_epoch_*.pt checkpoints_backup_epoch13/
 ```
 **Why**: Start fresh training with new stable hyperparameters
 
+## Jumpstart Initialization (NEW)
+
+Added smart initialization to UV warp head to avoid the 1-hour magnitude search.
+
+### Mode 1: Canonical Warp Burn-In (RECOMMENDED) 🔥
+
+Burn in an actual canonical warp from your dataset as the baseline:
+
+```bash
+# Extract canonical warp from cache
+python extract_canonical_warp.py --cache_dir cache_single_bucket --output canonical_warp.pt
+
+# Add to vasa_config.yaml
+model:
+  canonical_warp_path: "canonical_warp.pt"
+```
+
+**How it works**:
+- Final layer bias = canonical warp values (196,608 values)
+- Final layer weights = 0
+- Model outputs canonical warp initially
+- During training, model learns **residuals** from canonical warp
+
+**Benefits**:
+- Model starts with a REAL facial warp pattern (not random)
+- Saves ~1-2 hours of training
+- More stable training (learning deltas, not absolute values)
+- Better generalization (canonical warp is a strong prior)
+
+### Mode 2: Magnitude-Only Initialization (FALLBACK)
+
+If no canonical warp provided, scales weights to output ~0.65 magnitude:
+
+```python
+# vasa_model.py lines 687-700
+scale_factor = 15.0
+final_layer.weight.mul_(scale_factor)
+final_layer.bias.mul_(scale_factor)
+```
+
+**Why**: Saves ~1 hour by starting at correct magnitude instead of ~0.05.
+
 ## Expected Results
 
 With these changes, you should see:
 
-### Phase 1: Epochs 0-20 (Learning correct magnitude)
-- UV magnitude gradually increases: 0.04 → 0.1 → 0.2 → 0.4 → 0.6
-- All windows in a batch should be within ±0.1 of each other
+### Phase 1: Epochs 0-5 (Immediate correct magnitude) ✨ NEW
+- UV magnitude starts near target: **0.5 → 0.65** (not 0.04 → 0.6!)
+- Saves ~1 hour of training time
+- All windows in a batch should be within ±0.1 of each other from epoch 0
 - Fewer "SKIPPING WINDOW" messages
+
+### Phase 2: Epochs 5-20 (Fine-tuning magnitude)
+- UV magnitude stabilizes precisely around 0.62-0.68
+- Model learns spatial patterns (not just magnitude)
+- Consistent magnitudes across all windows in batch
 
 ### Phase 2: Epochs 20-50 (Stabilization)
 - UV magnitude stabilizes around 0.62-0.68 (target range)

@@ -15,6 +15,7 @@ model:
   use_prev_motion: true        # Whether to use previous motion context
   max_motion_length: 1000      # Maximum motion sequence length
   use_relative_position: true  # Use relative position encoding
+  canonical_warp_path: "canonical_warp.pt"
 
 # Diffusion parameters - SIMPLIFIED
 diffusion:
