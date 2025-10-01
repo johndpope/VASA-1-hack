@@ -80,7 +80,7 @@ train:
   # - This processes more windows per step but maintains temporal continuity
   batch_size: 16               # Batch size for training
 
-  windows_per_batch: 1          # Reduced from 14 to 4 for better sequence diversity
+  windows_per_batch: 2          # Reduced from 14 to 4 for better sequence diversity
   gradient_accumulation_steps: 4  # Increase effective batch size to break plateau
   num_epochs: 200            # Reduced for quick testing
 
@@ -218,7 +218,7 @@ loss:
   emo_cache_dir: 'cache_emo'          # Directory for cached EMO outputs
   emo_keyframes_per_window: 5         # Number of keyframes to compare per window
   emo_match_start_epoch: 0            # Start EMO matching from epoch 0 for immediate quality
-  emo_min_valid_frames: 0.5           # Skip EMO matching when <50% frames are valid (0.5 = 50%)
+  emo_min_valid_frames: 0.1           # LOWERED for overfitting: Skip EMO matching when <10% frames are valid (was 0.5)
 
   # Disentanglement loss configuration
   disentangle_num_pairs: 3           # Number of frame pairs to sample for l_consist
@@ -275,7 +275,7 @@ dataset:
   preextract_audio: true
   cache_audio: true
   hop_length: 10
-  max_videos: 50              # REDUCED from 1000 to 50 - use only the best quality videos
+  max_videos: 1              # REDUCED from 1000 to 50 - use only the best quality videos
   min_sequence_length: 50    # Minimum sequence length (match window_size)
   max_sequence_samples: 1000 # Maximum samples per epoch
   use_identity_image: true    # Use high-quality identity image instead of video frame

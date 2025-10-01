@@ -14,6 +14,7 @@ class VideoEvent(Enum):
     LANDMARK_DETECTION_FAILED = "landmark_detection_failed"
     PROCESSING_ERROR = "processing_error"
     NO_VALID_WINDOWS = "no_valid_windows"
+    BAD_UV_WARPS = "bad_uv_warps"  # UV warps collapsed or too small
 
 @dataclass
 class VideoEventData:

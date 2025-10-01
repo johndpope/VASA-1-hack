@@ -263,6 +263,11 @@ def main():
 
     # Create dataset with single-bucket mode
     logger.info("Creating dataset...")
+
+    # Import volumetric avatar bridge for EMO generation
+    from vasa_va_bridge import VolumetricAvatarBridge
+    va_bridge = VolumetricAvatarBridge(emo_model)
+
     dataset = VASAIntegratedDataset(
         video_folder=args.video_folder,
         emo_model=emo_model,
@@ -270,7 +275,11 @@ def main():
         stride=args.stride,
         max_videos=args.max_videos,
         cache_dir=args.cache_dir,
-        use_single_bucket=True  # Use SingleBucketCache for preprocessing
+        use_single_bucket=True,  # Use SingleBucketCache for preprocessing
+        generate_emo_frames=True,  # Enable EMO frame generation
+        emo_identity_path="nemo/data/IMG_1.png",  # Identity image
+        emo_keyframes_per_window=5,  # 5 keyframes per window
+        va_bridge=va_bridge  # Pass the bridge
     )
 
     # Preprocess and cache

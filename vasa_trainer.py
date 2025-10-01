@@ -1310,8 +1310,9 @@ class VASATrainer:
                                                 self._gen_stats.append(gen_stats)
 
                                                 # EARLY EXIT: Skip window if frame quality is too poor
-                                                if gen_stats['valid_masks_ratio'] < 0.5:
-                                                    logger.warning(f"⚠️ SKIPPING WINDOW {window_idx}: Frame generation quality too poor ({gen_stats['valid_masks_ratio']:.1%} valid frames < 50% threshold)")
+                                                min_valid_ratio = getattr(self.config.loss, 'emo_min_valid_frames', 0.5)
+                                                if gen_stats['valid_masks_ratio'] < min_valid_ratio:
+                                                    logger.warning(f"⚠️ SKIPPING WINDOW {window_idx}: Frame generation quality too poor ({gen_stats['valid_masks_ratio']:.1%} valid frames < {min_valid_ratio:.0%} threshold)")
                                                     logger.warning(f"  Skipping BEFORE loss computation to avoid wasted computation and gradient issues")
                                                     self._gen_stats = []
                                                     del generated_frames
@@ -1636,7 +1637,7 @@ class VASATrainer:
                                             single_frame_emo = emo_frames[closest_idx].detach().cpu()
                                             logger.info(f"Using pre-generated EMO frame {closest_idx} (closest to frame {frame_idx})")
                                         else:
-                                            logger.info(f"❌ No pre-generated EMO frames in window (has emo_frames: {'emo_frames' in window}, has indices: {'emo_keyframe_indices' in window})")
+                                            logger.debug(f"No pre-generated EMO frames in window (has emo_frames: {'emo_frames' in window}, has indices: {'emo_keyframe_indices' in window})")
 
                                         if single_frame_emo is None and hasattr(self, 'va_bridge') and self.va_bridge is not None and stored_outputs is not None:
                                             # Fallback: generate EMO frame on-the-fly (slower)

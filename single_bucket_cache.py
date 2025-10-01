@@ -488,3 +488,150 @@ class SingleBucketCache:
 
         except Exception as e:
             return False, [f"Error reading cache: {str(e)}"]
+
+    def invalidate_video(self, video_path: str) -> int:
+        """
+        Remove all windows from a specific video from the cache.
+
+        Args:
+            video_path: Path to the video to invalidate
+
+        Returns:
+            Number of windows removed
+        """
+        if not self.has_cache():
+            logger.warning("No cache to invalidate")
+            return 0
+
+        try:
+            # Load all windows
+            all_windows = []
+            removed_count = 0
+
+            with h5py.File(self.cache_path, 'r') as f:
+                num_windows = f.attrs.get('num_windows', 0)
+
+                for i in range(num_windows):
+                    window = self.load_window(i)
+                    if window is None:
+                        continue
+
+                    # Check if this window belongs to the video to invalidate
+                    window_video_path = window.get('metadata', {}).get('video_path', '')
+
+                    if window_video_path == video_path:
+                        removed_count += 1
+                        logger.info(f"Removing window {i} from video {video_path}")
+                    else:
+                        all_windows.append(window)
+
+            if removed_count > 0:
+                # Resave cache without the invalidated windows
+                logger.info(f"Rebuilding cache without {removed_count} windows from {video_path}")
+
+                # Preserve original metadata
+                metadata = self.get_cache_info()
+                metadata['total_windows'] = metadata.get('total_windows', 0) - removed_count
+                metadata['successful_windows'] = len(all_windows)
+
+                self.save_all_windows(all_windows, metadata)
+                logger.info(f"✅ Invalidated {removed_count} windows from {video_path}")
+            else:
+                logger.info(f"No windows found for video {video_path}")
+
+            return removed_count
+
+        except Exception as e:
+            logger.error(f"Error invalidating video: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return 0
+
+    def validate_window_quality(self, window_idx: int) -> Tuple[bool, List[str]]:
+        """
+        Check if a specific window meets quality thresholds.
+
+        Args:
+            window_idx: Index of window to check
+
+        Returns:
+            Tuple of (is_valid, list_of_reasons)
+        """
+        window = self.load_window(window_idx)
+        if window is None:
+            return False, ["Window could not be loaded"]
+
+        issues = []
+
+        # Check 1: UV warp magnitude
+        if 'uv_warps' in window:
+            uv_warps = window['uv_warps']
+            uv_magnitude = uv_warps.abs().mean().item()
+            if uv_magnitude < 0.15:
+                issues.append(f"UV magnitude too low: {uv_magnitude:.4f} < 0.15")
+
+        # Check 2: Expression variance
+        if 'expression_embed' in window:
+            expr_std = window['expression_embed'].std().item()
+            if expr_std < 0.01:
+                issues.append(f"Expression variance too low: {expr_std:.6f} < 0.01")
+
+        # Check 3: Valid landmarks
+        if 'landmarks' in window:
+            landmarks = window['landmarks']
+            valid_frames = (landmarks.abs().sum(dim=-1).sum(dim=-1) > 0).float().mean().item()
+            if valid_frames < 0.5:
+                issues.append(f"Valid landmarks too low: {valid_frames:.1%} < 50%")
+
+        return len(issues) == 0, issues
+
+    def validate_all_quality(self) -> Dict[str, Any]:
+        """
+        Validate quality of all windows and return report.
+
+        Returns:
+            Dictionary with validation results
+        """
+        if not self.has_cache():
+            return {"error": "No cache exists"}
+
+        num_windows = self.get_num_windows()
+        bad_windows = []
+        bad_videos = set()
+
+        logger.info(f"Validating quality of {num_windows} windows...")
+
+        for i in range(num_windows):
+            is_valid, issues = self.validate_window_quality(i)
+            if not is_valid:
+                window = self.load_window(i)
+                video_path = window.get('metadata', {}).get('video_path', 'unknown')
+                bad_windows.append({
+                    'window_idx': i,
+                    'video_path': video_path,
+                    'issues': issues
+                })
+                bad_videos.add(video_path)
+
+                if len(bad_windows) <= 10:
+                    logger.warning(f"❌ Window {i} from {video_path}: {', '.join(issues)}")
+
+            if (i + 1) % 100 == 0:
+                logger.info(f"Validated {i + 1}/{num_windows} windows...")
+
+        report = {
+            'total_windows': num_windows,
+            'bad_windows': len(bad_windows),
+            'bad_videos': list(bad_videos),
+            'bad_video_count': len(bad_videos),
+            'quality_pass_rate': (num_windows - len(bad_windows)) / num_windows if num_windows > 0 else 0,
+            'details': bad_windows
+        }
+
+        logger.info(f"Quality validation complete:")
+        logger.info(f"  Total windows: {num_windows}")
+        logger.info(f"  Bad windows: {len(bad_windows)}")
+        logger.info(f"  Bad videos: {len(bad_videos)}")
+        logger.info(f"  Pass rate: {report['quality_pass_rate']:.1%}")
+
+        return report

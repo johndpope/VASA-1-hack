@@ -553,7 +553,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             # Load identity image for EMO generation
             if os.path.exists(emo_identity_path):
                 from PIL import Image
-                import torchvision.transforms as transforms
+                # Note: transforms already imported at module level (line 20)
 
                 img = Image.open(emo_identity_path).convert('RGB')
                 transform = transforms.Compose([
@@ -2890,6 +2890,33 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                                 window_data['emo_frames'] = torch.stack(emo_frames, dim=0)
                                 window_data['emo_keyframe_indices'] = torch.tensor(keyframe_indices, dtype=torch.long)
                                 logger.info(f"✅ Generated {len(emo_frames)} EMO frames for window {idx}")
+
+                                # QUALITY CHECK: Detect bad UV warps immediately after generation
+                                if 'uv_warps' in window_data:
+                                    uv_magnitude = window_data['uv_warps'].abs().mean().item()
+                                    uv_std = window_data['uv_warps'].std().item()
+
+                                    # Check for collapsed/bad UV warps
+                                    if uv_magnitude < 0.15 or uv_std < 0.01:
+                                        logger.error(f"❌ BAD UV WARPS detected for window {idx} from video {video_path}")
+                                        logger.error(f"   UV magnitude: {uv_magnitude:.6f} (threshold: 0.15)")
+                                        logger.error(f"   UV std: {uv_std:.6f} (threshold: 0.01)")
+
+                                        # Dispatch event to mark video as bad
+                                        self.tracker.dispatch(VideoEventData(
+                                            video_path=video_path,
+                                            event_type=VideoEvent.BAD_UV_WARPS,
+                                            details={
+                                                "window_idx": idx,
+                                                "uv_magnitude": uv_magnitude,
+                                                "uv_std": uv_std,
+                                                "reason": f"UV warps collapsed (magnitude={uv_magnitude:.4f}, std={uv_std:.6f})"
+                                            }
+                                        ))
+
+                                        # Return zero sample to skip this window
+                                        logger.warning(f"⚠️ Returning zero sample for window {idx} due to bad UV warps")
+                                        return self._get_zero_sample()
 
                         except Exception as e:
                             logger.error(f"❌ FAILED to generate EMO frames for window {idx}: {e}")
