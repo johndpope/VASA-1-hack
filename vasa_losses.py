@@ -547,6 +547,26 @@ class VASALossModule:
                 losses['motion_diversity'] = diversity_loss
 
                 logger.debug(f"  Expression entropy: {entropy.item():.6f}")
+
+                # 1.6 Audio-Expression Direct Coupling - Force expression to follow audio energy
+                audio_key = 'audio_features' if 'audio_features' in conditions else 'audio' if 'audio' in conditions else None
+                if audio_key is not None:
+                    audio = conditions[audio_key]  # [B, T, 768]
+                    # Compute audio energy/magnitude
+                    audio_energy = torch.norm(audio, dim=-1, keepdim=True)  # [B, T, 1]
+                    # Normalize to [0, 1]
+                    audio_energy_norm = (audio_energy - audio_energy.min()) / (audio_energy.max() - audio_energy.min() + 1e-8)
+
+                    # Compute expression magnitude
+                    expr_magnitude = torch.norm(expr, dim=-1, keepdim=True)  # [B, T, 1]
+                    # Normalize to [0, 1]
+                    expr_magnitude_norm = (expr_magnitude - expr_magnitude.min()) / (expr_magnitude.max() - expr_magnitude.min() + 1e-8)
+
+                    # MSE loss: Expression magnitude should correlate with audio energy
+                    lambda_audio_expr_coupling = getattr(self.config.loss, 'lambda_audio_expr_coupling', 5.0)
+                    audio_expr_coupling_loss = F.mse_loss(expr_magnitude_norm, audio_energy_norm) * lambda_audio_expr_coupling
+                    losses['audio_expression_coupling'] = audio_expr_coupling_loss
+                    logger.debug(f"  Audio-Expression coupling loss: {audio_expr_coupling_loss.item():.6f}")
                 logger.debug(f"  Motion diversity loss: {diversity_loss.item():.6f}")
 
                 # Also compute standard deviation as a metric
@@ -882,7 +902,10 @@ class VASALossModule:
                 logger.debug("  No frames provided for perceptual loss")
                 losses['perceptual'] = torch.tensor(0.0, device=device)
 
-            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + warp_term + diversity_term + perceptual_term + audio_lip_term
+            # Add audio-expression coupling term
+            audio_expr_term = losses.get('audio_expression_coupling', torch.tensor(0.0, device=device))
+
+            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + warp_term + diversity_term + perceptual_term + audio_lip_term + audio_expr_term
             losses['total'] = total_loss
             logger.debug(f"Total loss (with perceptual): {total_loss.item():.6f}")
 
@@ -1710,27 +1733,30 @@ class VASALossModule:
                 pred_std = pred['expression_embed'].std(dim=-1).mean()  # Std across features, mean across batch/time
                 target_std = comparison_target['expression_embed'].std(dim=-1).mean()
                 variance_loss = F.mse_loss(pred_std, target_std)
-                losses['expression_variance_loss'] = variance_loss * 0.1  # Weight it lower than main loss
+                lambda_expression_variance = getattr(self.config.loss, 'lambda_expression_variance', 5.0)
+                losses['expression_variance_loss'] = variance_loss * lambda_expression_variance
 
                 # Add temporal variation loss to encourage dynamics
                 if pred['expression_embed'].shape[1] > 1:  # If we have temporal dimension
                     pred_temporal_diff = (pred['expression_embed'][:, 1:] - pred['expression_embed'][:, :-1]).abs().mean()
                     target_temporal_diff = (comparison_target['expression_embed'][:, 1:] - comparison_target['expression_embed'][:, :-1]).abs().mean()
                     temporal_loss = F.mse_loss(pred_temporal_diff, target_temporal_diff)
-                    losses['expression_temporal_loss'] = temporal_loss * 0.05  # Small weight
+                    lambda_expression_temporal = getattr(self.config.loss, 'lambda_expression_temporal', 2.0)
+                    losses['expression_temporal_loss'] = temporal_loss * lambda_expression_temporal
 
-                # Log statistics to detect collapse
-                if step is not None and step % 100 == 0:
-                    pred_std_scalar = pred['expression_embed'].std().item()
-                    target_std_scalar = comparison_target['expression_embed'].std().item()
-                    pred_mean = pred['expression_embed'].mean().item()
-                    target_mean = comparison_target['expression_embed'].mean().item()
-                    logger.info(f"Expression stats - Pred: mean={pred_mean:.3f}, std={pred_std_scalar:.3f} | Target: mean={target_mean:.3f}, std={target_std_scalar:.3f}")
-                    logger.info(f"  Variance loss: {variance_loss.item():.6f}, Temporal loss: {temporal_loss.item() if 'temporal_loss' in locals() else 0:.6f}")
+                # Log statistics to detect collapse (every step for debugging)
+                pred_std_scalar = pred['expression_embed'].std().item()
+                target_std_scalar = comparison_target['expression_embed'].std().item()
+                pred_mean = pred['expression_embed'].mean().item()
+                target_mean = comparison_target['expression_embed'].mean().item()
 
-                    # Warn if prediction variance is collapsing
-                    if pred_std_scalar < target_std_scalar * 0.1:
-                        logger.warning(f"⚠️ Prediction variance collapse detected! pred_std={pred_std_scalar:.3f} << target_std={target_std_scalar:.3f}")
+                # Log every step
+                logger.info(f"Expression stats - Pred: mean={pred_mean:.3f}, std={pred_std_scalar:.3f} | Target: mean={target_mean:.3f}, std={target_std_scalar:.3f}")
+                logger.info(f"  Variance loss: {losses['expression_variance_loss'].item():.6f}, Temporal loss: {losses.get('expression_temporal_loss', torch.tensor(0.0)).item():.6f}")
+
+                # Warn if prediction variance is collapsing
+                if pred_std_scalar < target_std_scalar * 0.5:
+                    logger.warning(f"⚠️ Prediction variance collapse detected! pred_std={pred_std_scalar:.3f} << target_std={target_std_scalar:.3f}")
          
                 should_visualize = step is not None and step > 0 and step % self.vis_freq == 0
                 if should_visualize:
@@ -1757,7 +1783,13 @@ class VASALossModule:
                 losses.get('translation_loss', torch.tensor(0.0, device=device))
             ) * self.lambda_pose
 
-            dynamics_loss = losses['expression_loss'] * self.lambda_dynamics
+            # Aggregate all expression-related losses
+            expression_total = losses.get('expression_loss', torch.tensor(0.0, device=device))
+            expression_total += losses.get('expression_mse', torch.tensor(0.0, device=device))
+            expression_total += losses.get('expression_variance_loss', torch.tensor(0.0, device=device))
+            expression_total += losses.get('expression_temporal_loss', torch.tensor(0.0, device=device))
+
+            dynamics_loss = expression_total * self.lambda_dynamics
 
 
             # Motion smoothness loss if sequence length > 1
@@ -1898,12 +1930,18 @@ class VASALossModule:
             # Compute combined losses
             pose_loss = (
                 losses['theta_loss'] +
-                losses['rotation_loss'] + 
+                losses['rotation_loss'] +
                 losses['translation_loss'] +
                 losses['scale_loss']
             ) * self.lambda_pose
 
-            dynamics_loss = losses['expression_loss'] * self.lambda_dynamics
+            # Aggregate all expression-related losses (same as compute_reconstruction_loss)
+            expression_total = losses.get('expression_loss', torch.tensor(0.0, device=device))
+            expression_total += losses.get('expression_mse', torch.tensor(0.0, device=device))
+            expression_total += losses.get('expression_variance_loss', torch.tensor(0.0, device=device))
+            expression_total += losses.get('expression_temporal_loss', torch.tensor(0.0, device=device))
+
+            dynamics_loss = expression_total * self.lambda_dynamics
 
             # Compute motion smoothness if sequence length > 1
             motion_loss = torch.tensor(0.0, device=device)

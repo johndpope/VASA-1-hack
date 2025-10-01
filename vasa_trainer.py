@@ -801,48 +801,66 @@ class VASATrainer:
     def get_layer_wise_learning_rates(self, model: VASAModel) -> List[Dict[str, Any]]:
         """
         Get learning rate parameters with separate learning rates for each motion component.
-        
+
         Args:
             model: VASAModel instance to extract parameters from
-        
+
         Returns:
             List of parameter groups with different learning rates
         """
         # Initialize parameter groups
         param_groups = []
         motion_proj_names = ['theta', 'rotation', 'translation', 'expression']
-        
+
         # Keep track of parameters to avoid duplicates
         used_params = set()
-        
+
+        # Get expression learning rate multiplier from config
+        expression_lr_mult = getattr(self.config.train, 'expression_lr_mult', 2.0)
+
         # Create separate parameter groups for each motion projection type
         for proj_name in motion_proj_names:
             proj_params = []
-            
+
             # Find parameters for this specific projection
             for name, param in model.named_parameters():
                 if f'motion_projections.{proj_name}' in name and param not in used_params:
                     proj_params.append(param)
                     used_params.add(param)
-            
-            # Default learning rate multipliers (can be adjusted)
+
+            # Learning rate multipliers (configurable from config)
             lr_multipliers = {
-                'theta': 1.0,        # Slight boost for pose matrix
-                'rotation': 1.0,     # Moderate boost for rotational parameters
-                'translation': 1.0,  # Base learning rate
-                'expression': 1.0    # Slight higher rate for expression
+                'theta': 1.0,                      # Base rate for pose matrix
+                'rotation': 1.0,                   # Base rate for rotational parameters
+                'translation': 1.0,                # Base rate for translation
+                'expression': expression_lr_mult   # Configurable rate for expression (default: 2.0x)
             }
-            
+
             # Warn if no parameters found
             if not proj_params:
                 logger.warning(f"No parameters found for motion projection: {proj_name}")
                 continue
-            
+
             # Create parameter group
             param_groups.append({
                 'params': proj_params,
                 'lr': self.config.train.lr * lr_multipliers.get(proj_name, 1.0),
                 'name': f'motion_proj_{proj_name}',
+                'weight_decay': self.config.train.weight_decay * 0.5
+            })
+
+        # Add expression head parameters (expr_head, expression_emb) with same high LR
+        expr_head_params = []
+        for name, param in model.named_parameters():
+            if ('expr_head' in name or 'expression_emb' in name or 'expr_emb' in name) and param not in used_params:
+                expr_head_params.append(param)
+                used_params.add(param)
+
+        if expr_head_params:
+            param_groups.append({
+                'params': expr_head_params,
+                'lr': self.config.train.lr * expression_lr_mult,
+                'name': 'expression_head',
                 'weight_decay': self.config.train.weight_decay * 0.5
             })
         
@@ -3115,7 +3133,8 @@ class VASATrainer:
                 # Add new candle-like expression visualization
                 from visualize_expression import create_expression_candles, create_expression_difference_map
                 from visualize_audio_expression import create_audio_expression_visualization
-                
+                from warp_visualization import visualize_uv_warps, log_warp_statistics
+
                 # Create candle visualization for entire window
                 if outputs['expression_embed'].shape[1] > 1:  # If we have temporal dimension
                     fig_candles = create_expression_candles(
@@ -3126,6 +3145,19 @@ class VASATrainer:
                     )
                     wandb.log({"visuals/expression_candles": wandb.Image(fig_candles)}, step=step)
                     plt.close(fig_candles)
+
+                    # Add UV warp candles visualization
+                    if 'uv_warps' in outputs and 'uv_warps' in targets:
+                        try:
+                            fig_warp_candles = visualize_uv_warps(
+                                uv_warps=outputs['uv_warps'][0:1],  # First batch
+                                target_uv_warps=targets['uv_warps'][0:1],
+                                step=step,
+                                wandb_logger=wandb
+                            )
+                            plt.close(fig_warp_candles)
+                        except Exception as e:
+                            logger.warning(f"Failed to create warp visualization: {e}")
                     
                     # Create difference map
                     fig_diff = create_expression_difference_map(

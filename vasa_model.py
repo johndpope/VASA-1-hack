@@ -334,51 +334,108 @@ class EfficientConditionEmbedding(nn.Module):
             raise
 
 
-class AudioCrossDecoderLayer(nn.TransformerDecoderLayer):
+class AudioCrossDecoderLayer(nn.Module):
     """
-    Custom decoder layer with additional audio cross-attention.
+    Custom decoder layer with audio cross-attention and Flash Attention optimized causal masking.
 
-    Overrides internal LayerNorms (norm1, norm2, norm3) from parent with DynamicTanh
-    for full DyT integration, improving variance preservation and stability.
+    Uses F.scaled_dot_product_attention with is_causal=True for efficient causal self-attention.
+    Overrides LayerNorms with DynamicTanh for full DyT integration.
     """
-    def __init__(self, d_model, nhead, **kwargs):
-        super().__init__(d_model, nhead, **kwargs)
-        
-        # Override parent's internal norms with DynamicTanh
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, **kwargs):
+        super().__init__()
+
+        self.d_model = d_model
+        self.nhead = nhead
+        self.dropout = dropout
+
+        # Self-attention (causal)
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+
+        # Cross-attention to memory (conditions)
+        self.cross_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+
+        # Audio cross-attention
+        self.audio_cross_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+
+        # Feed-forward network
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout_ffn = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+        # Normalization layers (DynamicTanh for variance preservation)
         self.norm1 = DynamicTanh(d_model)  # For self-attention
         self.norm2 = DynamicTanh(d_model)  # For cross-attention (to memory)
-        self.norm3 = DynamicTanh(d_model)  # For feed-forward
-        
-        # Custom audio cross-attention components
-        self.audio_cross_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True)
-        self.audio_norm = DynamicTanh(d_model)  # DyT for audio path
-        self.dropout2 = nn.Dropout(kwargs.get('dropout', 0.1))
-    
+        self.norm3 = DynamicTanh(d_model)  # For audio cross-attention
+        self.norm4 = DynamicTanh(d_model)  # For feed-forward
+
+        # Dropout layers
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.dropout3 = nn.Dropout(dropout)
+        self.dropout4 = nn.Dropout(dropout)
+
+        self.activation = nn.GELU()
+
     def forward(self, tgt, memory, tgt_mask=None, memory_mask=None,
                 tgt_key_padding_mask=None, memory_key_padding_mask=None,
-                audio_memory=None):
-        # ASSERTION: audio_memory is REQUIRED and must be a Tensor
+                audio_memory=None, is_causal=True):
+        """
+        Args:
+            tgt: Target sequence [B, T, d_model]
+            memory: Condition embeddings [B, T, d_model]
+            audio_memory: Audio features [B, T, d_model]
+            is_causal: Use causal masking for self-attention (default: True)
+            tgt_mask: Attention mask (required if is_causal=True for nn.MultiheadAttention)
+        """
+        # ASSERTION: audio_memory is REQUIRED
         assert audio_memory is not None, \
-            "audio_memory is required for AudioCrossDecoderLayer, got None"
+            "audio_memory is required for AudioCrossDecoderLayer"
         assert isinstance(audio_memory, torch.Tensor), \
             f"audio_memory must be a Tensor, got {type(audio_memory)}"
 
-        # Call parent's forward (now using DyT internally)
-        tgt = super().forward(
-            tgt, memory,
-            tgt_mask=tgt_mask,
-            memory_mask=memory_mask,
-            tgt_key_padding_mask=tgt_key_padding_mask,
-            memory_key_padding_mask=memory_key_padding_mask
-        )
+        # 1. Causal self-attention
+        # For Flash Attention optimization with is_causal=True, we still need to provide tgt_mask
+        # The is_causal hint allows PyTorch to use optimized Flash Attention kernels
+        if is_causal and tgt_mask is None:
+            # Generate causal mask if not provided
+            seq_len = tgt.size(1)
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(
+                seq_len, device=tgt.device, dtype=tgt.dtype
+            )
 
-        # Additional audio cross-attention (REQUIRED)
-        tgt2, _ = self.audio_cross_attn(
-            tgt, audio_memory, audio_memory,
-            key_padding_mask=None
+        tgt2, _ = self.self_attn(
+            tgt, tgt, tgt,
+            attn_mask=tgt_mask,
+            key_padding_mask=tgt_key_padding_mask,
+            need_weights=False,
+            is_causal=is_causal  # Flash Attention optimization hint
+        )
+        tgt = tgt + self.dropout1(tgt2)
+        tgt = self.norm1(tgt)
+
+        # 2. Cross-attention to condition memory
+        tgt2, _ = self.cross_attn(
+            tgt, memory, memory,
+            attn_mask=memory_mask,
+            key_padding_mask=memory_key_padding_mask,
+            need_weights=False
         )
         tgt = tgt + self.dropout2(tgt2)
-        tgt = self.audio_norm(tgt)
+        tgt = self.norm2(tgt)
+
+        # 3. Audio cross-attention (VASA-specific)
+        tgt2, _ = self.audio_cross_attn(
+            tgt, audio_memory, audio_memory,
+            key_padding_mask=None,
+            need_weights=False
+        )
+        tgt = tgt + self.dropout3(tgt2)
+        tgt = self.norm3(tgt)
+
+        # 4. Feed-forward network
+        tgt2 = self.linear2(self.dropout_ffn(self.activation(self.linear1(tgt))))
+        tgt = tgt + self.dropout4(tgt2)
+        tgt = self.norm4(tgt)
 
         return tgt
         
@@ -678,6 +735,10 @@ class MotionTransformer(nn.Module):
         # tgt: query (motion embeddings)
         # memory: key/value (condition embeddings)
         # out = self.decoder(tgt=tgt, memory=cond_emb)  # [B, C+T or T, d_model]
+
+        # Use Flash Attention optimized causal masking (is_causal=True)
+        # This ensures frame t can only attend to frames 0..t-1 (not future frames)
+        # No explicit mask tensor needed - Flash Attention handles it internally
         out = tgt
         for layer in self.decoder_layers:
             # Extract audio memory from conditions (REQUIRED)
@@ -693,7 +754,8 @@ class MotionTransformer(nn.Module):
             out = layer(
                 out,
                 cond_emb,
-                audio_memory=audio_memory
+                audio_memory=audio_memory,
+                is_causal=True  # Flash Attention optimized causal masking
             )
 
         out = self.decoder_norm(out)
