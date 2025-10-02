@@ -658,7 +658,7 @@ class MotionTransformer(nn.Module):
         if prev_context is not None and C > 0:
             # Embed prev_context
             prev_theta_flat = prev_context['theta'].view(B, C, -1)
-            prev_expr = prev_context['expression']
+            prev_expr = prev_context['expression_embed']  # Standardized key
 
             prev_theta_emb = self.theta_emb(prev_theta_flat)
             prev_expr_emb = self.expr_emb(prev_expr)
@@ -961,7 +961,7 @@ class VASAModel(nn.Module):
         if prev_context is None:
             prev_context = {
                 'theta': self.start_prev_theta.repeat(B, 1, 1, 1),
-                'expression': self.start_prev_expression.repeat(B, 1, 1),
+                'expression_embed': self.start_prev_expression.repeat(B, 1, 1),  # Standardized key
                 'scale': self.start_prev_scale.repeat(B, 1, 1),
                 'rotation': self.start_prev_rotation.repeat(B, 1, 1),
                 'translation': self.start_prev_translation.repeat(B, 1, 1),
@@ -1044,7 +1044,7 @@ class VASAModel(nn.Module):
             # Initial context
             prev_context = {
                 'theta': self.start_prev_theta.repeat(B, 1, 1, 1),
-                'expression': self.start_prev_expression.repeat(B, 1, 1),
+                'expression_embed': self.start_prev_expression.repeat(B, 1, 1),  # Standardized key
                 'scale': self.start_prev_scale.repeat(B, 1, 1),
                 'rotation': self.start_prev_rotation.repeat(B, 1, 1),
                 'translation': self.start_prev_translation.repeat(B, 1, 1),
@@ -1156,7 +1156,7 @@ class VASAModel(nn.Module):
                 context_start = max(0, current_T - context_size)
                 prev_context = {
                     'theta': window_motion['theta'][:, context_start:],
-                    'expression': window_motion['expression_embed'][:, context_start:],
+                    'expression_embed': window_motion['expression_embed'][:, context_start:],  # Standardized key
                     'scale': window_motion['scale'][:, context_start:],
                     'rotation': window_motion['rotation'][:, context_start:],
                     'translation': window_motion['translation'][:, context_start:],

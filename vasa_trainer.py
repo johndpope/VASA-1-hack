@@ -26,6 +26,7 @@ from vasa_model import VASAModel
 from motion_sequence_handler import MotionSequenceHandler
 from vasa_losses import VASALossModule
 from tdd_progressive_loss import TDDProgressiveLoss
+from loss_monitor import LossRangeMonitor
 import importlib
 import sys
 if 'nemo' not in sys.path:
@@ -762,6 +763,8 @@ class VASATrainer:
         self.cfg_scheduler = CFGScheduleHandler(config)
         self.grad_monitor = GradientMonitor(model)
         self.lr_monitor = LearningRateMonitor(self.optimizer)
+        self.loss_monitor = LossRangeMonitor(enable_warnings=True, enable_critical=True)
+        logger.info("✅ Loss range monitoring enabled - will warn on unhealthy loss values")
 
         # Prepare training components
         (
@@ -1238,7 +1241,16 @@ class VASATrainer:
                             # and mathematically only 2 frames are used (first and last)
                             generated_frames = None
                             use_sparse_frames = getattr(self.config.loss, 'use_sparse_frames', False)  # Read from config, default to False
-                            if (self.config.loss.lambda_consist > 0 or self.config.loss.lambda_cross_id > 0) and target_frames is not None:
+                            enable_frame_generation = getattr(self.config.loss, 'enable_frame_generation', False)  # Read from config
+
+                            # Generate frames if:
+                            # 1. Disentanglement losses are enabled (lambda_consist > 0 or lambda_cross_id > 0)
+                            # 2. OR frame generation is explicitly enabled for visualization
+                            needs_frames = (self.config.loss.lambda_consist > 0 or
+                                          self.config.loss.lambda_cross_id > 0 or
+                                          enable_frame_generation)
+
+                            if needs_frames and target_frames is not None:
                                 try:
                                     # Get source images - use high-quality identity image if available
                                     if self.identity_image is not None:
@@ -1376,7 +1388,22 @@ class VASATrainer:
                                 source_identity=source_identity_for_loss,  # Pass high-quality identity
                                 dataset=self.train_loader.dataset  # Pass dataset for feature extraction
                             )
-                            
+
+                            # Monitor loss ranges (every 100 steps, log summary)
+                            if self.global_step % 100 == 0 and window_idx == 0:
+                                loss_status = self.loss_monitor.check_losses(
+                                    losses=losses,
+                                    step=self.global_step,
+                                    log_summary=True
+                                )
+                            else:
+                                # Check without logging summary (warnings/criticals still logged)
+                                loss_status = self.loss_monitor.check_losses(
+                                    losses=losses,
+                                    step=self.global_step,
+                                    log_summary=False
+                                )
+
                             # Clean up generated frames immediately after loss computation
                             if generated_frames is not None:
                                 del generated_frames
@@ -2119,6 +2146,17 @@ class VASATrainer:
             log_dict["lip_motion/audio_lip_correlation"] = epoch_averages.get('audio_lip_correlation', 0.0)
             log_dict["lip_motion/mouth_openness"] = epoch_averages.get('mouth_openness_direct', 0.0)
             log_dict["lip_motion/expression_loss"] = epoch_averages.get('expression_loss', 0.0)
+
+            # Log loss monitoring statistics
+            loss_stats = self.loss_monitor.get_statistics()
+            log_dict["loss_monitoring/total_warnings"] = loss_stats['total_warnings']
+            log_dict["loss_monitoring/total_criticals"] = loss_stats['total_criticals']
+            if loss_stats['warning_counts']:
+                for loss_name, count in loss_stats['warning_counts'].items():
+                    log_dict[f"loss_monitoring/warnings_{loss_name}"] = count
+            if loss_stats['critical_counts']:
+                for loss_name, count in loss_stats['critical_counts'].items():
+                    log_dict[f"loss_monitoring/criticals_{loss_name}"] = count
 
             wandb.log(log_dict, step=self.global_step)
             

@@ -90,6 +90,58 @@ python vasa_trainer.py --config vasa_config.yaml
 - Uses wav2vec2 model with linear interpolation for audio features
 - Different architecture than VASA-1 (uses LivePortrait wrapper)
 
+### Loss Function Management
+
+#### Loss Monitoring System
+The project uses `loss_monitor.py` to track loss values and warn when they're outside healthy ranges.
+
+**IMPORTANT**: When adding or removing losses in `vasa_losses.py`, you MUST update `loss_monitor.py`:
+
+1. **Adding a new loss**:
+   - Add entry to `LossRangeMonitor.LOSS_RANGES` dict in `loss_monitor.py`
+   - Define healthy range (min, max), warning threshold, and critical threshold
+   - Include description of what the loss measures
+   - Example:
+   ```python
+   'my_new_loss': {
+       'healthy': (0.001, 0.1),  # Expected range during good training
+       'warning': 0.2,            # Warn if loss exceeds this
+       'critical': 0.5,           # Critical if loss exceeds this
+       'description': 'What this loss measures and why it matters'
+   }
+   ```
+
+2. **Removing a loss**:
+   - Remove or comment out the entry in `LOSS_RANGES`
+   - Update any documentation in `LOSS_AUDIT.md` if it exists
+
+3. **Finding healthy ranges**:
+   - Run training and observe typical values in WandB
+   - Set healthy range to cover 90% of observed values
+   - Set warning threshold at ~2x healthy max
+   - Set critical threshold at ~5x healthy max
+   - For accuracy metrics (should be high), invert: healthy = (0.7, 1.0), warning = 0.5, critical = 0.3
+
+#### Recent Loss Changes
+
+**Audio-Lip Refactor (2025-10-03)**:
+- Moved audio-lip correlation from early section to control losses (after landmark extraction)
+- Now uses extracted lips from generated frames instead of dataset targets
+- Also updated mouth_openness_direct to use extracted lips
+- See `AUDIO_LIP_REFACTOR_PLAN.md` for details
+
+**Blink Loss Implementation (2025-10-03)**:
+- Implemented previously stubbed `_compute_blink_loss()` function
+- Computes eye openness loss (channels 1-2) and blink phase loss (channel 0)
+- Extracts blink states from generated frames using MediaPipe
+- See `BLINK_LOSS_IMPLEMENTATION.md` for details
+
+**Loss Cleanup (Previous)**:
+- Disabled conflicting losses (L1 vs L2, redundant smoothness losses)
+- Reduced conflicting weights (audio_expr_coupling, audio_lip)
+- Added real-time monitoring with warnings/critical alerts
+- See `LOSS_CLEANUP_SUMMARY.md` and `LOSS_AUDIT.md` for details
+
 
 
 In the context of the VASA-1 paper and its reference to the MegaPortraits codebase (which builds on 3D-aided facial reenactment frameworks like those in [19], likely referring to Drobyshev et al.'s MegaPortraits work), rigid and non-rigid 3D warping are key steps in decomposing a facial image into a canonical (neutral, standardized) 3D appearance volume \( V^{app} \). This process enables disentangled representations for high-fidelity face reenactment, where appearance, identity, pose, and dynamics are separated for tasks like generating nuanced facial animations from a single source image.

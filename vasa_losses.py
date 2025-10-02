@@ -248,21 +248,67 @@ class VASALossModule:
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Compute loss to ensure generated motion follows blink patterns.
-        
+
         Args:
-            pred_motion: Dictionary containing predicted motion parameters
+            pred_motion: Dictionary containing predicted motion parameters OR
+                         extracted blink states [B, T, 3] from generated frames
             target_blinks: Target blink states [B, T, 3] tensor where:
                 - Channel 0: Blink phase (0=open, 1=closing, 2=closed, 3=opening)
                 - Channel 1: Left eye openness (0-1)
                 - Channel 2: Right eye openness (0-1)
             lambda_blink: Weight for blink loss
             device: Computation device
-            
+
         Returns:
             Tuple of (total_loss, metrics_dict)
         """
-        # Blink loss disabled - model doesn't output individual eye landmarks
-        return torch.tensor(0.0, device=device), {}
+        metrics = {}
+
+        # Extract predicted blink states
+        if 'blink_state' in pred_motion:
+            pred_blinks = pred_motion['blink_state']  # [B, T, 3]
+        else:
+            # No blink states available
+            return torch.tensor(0.0, device=device), {}
+
+        # Ensure shapes match
+        if pred_blinks.shape != target_blinks.shape:
+            logger.warning(f"Blink shape mismatch: pred={pred_blinks.shape}, target={target_blinks.shape}")
+            return torch.tensor(0.0, device=device), {}
+
+        # Move to device
+        pred_blinks = pred_blinks.to(device).float()
+        target_blinks = target_blinks.to(device).float()
+
+        # 1. Eye openness loss (channels 1-2: continuous values 0-1)
+        pred_openness = pred_blinks[:, :, 1:]  # [B, T, 2] (left, right eye openness)
+        target_openness = target_blinks[:, :, 1:]
+
+        openness_loss = F.mse_loss(pred_openness, target_openness)
+        metrics['blink_openness_loss'] = openness_loss
+
+        # 2. Blink phase loss (channel 0: categorical 0-3)
+        # Treat as regression for simplicity (could use cross-entropy but phases are ordered)
+        pred_phase = pred_blinks[:, :, 0]  # [B, T]
+        target_phase = target_blinks[:, :, 0]
+
+        phase_loss = F.mse_loss(pred_phase, target_phase)
+        metrics['blink_phase_loss'] = phase_loss
+
+        # 3. Combined loss
+        total_loss = (openness_loss + phase_loss) * lambda_blink
+
+        # 4. Compute accuracy metrics
+        with torch.no_grad():
+            # Phase accuracy (within 0.5 of correct phase)
+            phase_correct = (torch.abs(pred_phase - target_phase) < 0.5).float().mean()
+            metrics['blink_phase_accuracy'] = phase_correct
+
+            # Openness MAE
+            openness_mae = torch.abs(pred_openness - target_openness).mean()
+            metrics['blink_openness_mae'] = openness_mae
+
+        return total_loss, metrics
     
     
 
@@ -373,15 +419,16 @@ class VASALossModule:
 
 
 
-    def compute_audio_lip_correlation(self, pred_motion, audio_features, lip_metrics):
+    def compute_audio_lip_correlation(self, pred_motion, audio_features, lip_metrics, generated_frames=None):
         """
         Compute audio-lip correlation loss to enforce synchronization between
         audio energy and lip motion.
 
         Args:
-            pred_motion: Predicted motion parameters (not used in basic version)
+            pred_motion: Predicted motion parameters (kept for compatibility)
             audio_features: Audio features [B, T, D] from wav2vec2
-            lip_metrics: Dictionary containing lip motion metrics from dataset
+            lip_metrics: Dictionary containing lip motion metrics from dataset (fallback)
+            generated_frames: Generated frames [B, T, C, H, W] to extract lips from (preferred)
 
         Returns:
             Audio-lip correlation loss scaled by lambda_audio_lip
@@ -816,51 +863,12 @@ class VASALossModule:
             logger.debug(f"  Diversity term: {diversity_term.item():.6f}")
             
             # Compute audio-lip correlation loss
+            # DISABLED: Old audio-lip correlation using dataset lip_metrics
+            # Moved to control losses section after line 2757 to use extracted landmarks from generated frames
+            # This ensures we correlate audio with ACTUAL generated lips, not dataset targets
             audio_lip_term = torch.tensor(0.0, device=device)
-            # Check for both 'audio' and 'audio_features' keys since different parts use different names
-            audio_key = 'audio_features' if 'audio_features' in conditions else 'audio' if 'audio' in conditions else None
-
-            logger.debug(targets.keys())
-            
-            if audio_key and 'lip_metrics' in targets:
-                logger.debug("\n=== Starting Audio-Lip Correlation Loss ===")
-                logger.debug(f"Conditions keys: {conditions.keys()}")
-                logger.debug(f"Targets keys: {targets.keys()}")
-                logger.debug(f"Using audio key: {audio_key}")
-                logger.debug(f"Audio shape in conditions: {conditions[audio_key].shape}")
-                logger.debug(f"Lip metrics type: {type(targets.get('lip_metrics', 'Not present'))}")
-
-                audio_lip_loss = self.compute_audio_lip_correlation(
-                    outputs,
-                    conditions[audio_key],
-                    targets['lip_metrics']
-                )
-                audio_lip_term = audio_lip_loss
-                losses['audio_lip_correlation'] = audio_lip_term
-                logger.debug(f"Final audio-lip correlation loss term: {audio_lip_term.item():.6f}")
-                logger.debug("=== Finished Audio-Lip Correlation Loss ===\n")
-
-                # Add direct mouth openness supervision
-                if 'openness' in targets['lip_metrics']:
-                    target_openness = targets['lip_metrics']['openness']  # [B, T]
-                    # Normalize openness to [0, 1] range
-                    openness_norm = (target_openness - target_openness.min()) / (target_openness.max() - target_openness.min() + 1e-6)
-
-                    # The audio energy should correlate with mouth openness
-                    audio_energy = torch.norm(conditions[audio_key], dim=-1)  # [B, T]
-                    audio_norm = (audio_energy - audio_energy.min()) / (audio_energy.max() - audio_energy.min() + 1e-6)
-
-                    # Direct supervision: mouth should be open when audio is strong
-                    mouth_openness_loss = F.mse_loss(openness_norm, audio_norm) * 10.0  # Strong weight
-                    losses['mouth_openness_direct'] = mouth_openness_loss
-                    logger.debug(f"Mouth openness direct loss: {mouth_openness_loss.item():.6f}")
-            else:
-                missing_keys = []
-                if not audio_key:
-                    missing_keys.append('audio/audio_features in conditions')
-                if 'lip_metrics' not in targets:
-                    missing_keys.append('lip_metrics in targets')
-                logger.debug(f"Skipping audio-lip correlation loss. Missing: {', '.join(missing_keys)}")
+            losses['audio_lip_correlation'] = audio_lip_term  # Will be computed later in control losses
+            losses['mouth_openness_direct'] = torch.tensor(0.0, device=device)  # Will be computed later
 
             # Compute LPIPS perceptual loss (VASA paper Section 3.3)
             perceptual_term = torch.tensor(0.0, device=device)
@@ -2466,12 +2474,41 @@ class VASALossModule:
                     if frame_min < 0:
                         frame_debug = (frame_debug + 1.0) / 2.0
 
+                    # Remove green screen background (chroma key)
+                    # Convert to numpy for processing [C, H, W] -> [H, W, C]
+                    frame_np = frame_debug.permute(1, 2, 0).numpy()
+
+                    # Convert to uint8 for OpenCV
+                    import cv2
+                    frame_bgr = (frame_np * 255).clip(0, 255).astype(np.uint8)
+                    frame_bgr = cv2.cvtColor(frame_bgr, cv2.COLOR_RGB2BGR)
+                    frame_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+
+                    # Green color range in HSV for chroma keying
+                    lower_green = np.array([35, 40, 40])   # Lower bound for green
+                    upper_green = np.array([85, 255, 255]) # Upper bound for green
+
+                    # Create mask for green pixels
+                    green_mask = cv2.inRange(frame_hsv, lower_green, upper_green)
+
+                    # Create alpha channel (255 where not green, 0 where green)
+                    alpha = 255 - green_mask
+
+                    # Convert back to RGB
+                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+
+                    # Add alpha channel [H, W, 4]
+                    frame_rgba = np.dstack([frame_rgb, alpha])
+
+                    # Convert back to tensor [4, H, W] and normalize to [0, 1]
+                    frame_debug = torch.from_numpy(frame_rgba).permute(2, 0, 1).float() / 255.0
+
                     save_path = f"{debug_dir}/frame_{i}_idx{t_idx}.png"
                     save_image(frame_debug, save_path)
 
                     # Log file size to correlate with quality
                     file_size = os.path.getsize(save_path) / 1024  # KB
-                    logger.info(f"💾 Saved {save_path} ({file_size:.1f} KB)")
+                    logger.info(f"💾 Saved {save_path} ({file_size:.1f} KB) with alpha channel")
 
             # Track which indices successfully extracted features
             successful_indices = []
@@ -2766,7 +2803,62 @@ class VASALossModule:
                 logger.debug("  No gaze signal or extracted features")
                 losses['control_gaze'] = torch.tensor(0.0, device=device)
 
-            # 2. Head Distance Loss
+            # 2. Audio-Lip Correlation Loss - from extracted landmarks in generated frames
+            logger.debug("\nComputing Audio-Lip Correlation Loss:")
+            audio_lip_term = torch.tensor(0.0, device=device)
+
+            audio_key = 'audio_features' if 'audio_features' in conditions else 'audio' if 'audio' in conditions else None
+
+            if audio_key and 'landmarks' in extracted_features and 'lips' in extracted_features['landmarks']:
+                try:
+                    # Extract lip landmarks from generated frames
+                    pred_lips = extracted_features['landmarks']['lips']  # [1, T_sampled, N_points, 3]
+                    sample_indices = extracted_features['sample_indices']
+
+                    logger.debug(f"  Extracted lip landmarks shape: {pred_lips.shape}")
+
+                    # Compute lip openness from extracted landmarks
+                    # lips shape: [1, T, 20, 3] where 20 points, upper half = upper lip, lower half = lower lip
+                    upper_lips = pred_lips[:, :, :pred_lips.shape[2]//2, 1]  # Upper lip y-coords
+                    lower_lips = pred_lips[:, :, pred_lips.shape[2]//2:, 1]  # Lower lip y-coords
+                    lip_openness = (lower_lips.mean(dim=-1) - upper_lips.mean(dim=-1)).abs()  # [1, T_sampled]
+
+                    # Get corresponding audio features
+                    audio_features = conditions[audio_key][:, sample_indices].to(device).float()  # [B, T_sampled, D]
+                    audio_energy = torch.norm(audio_features, dim=-1)  # [B, T_sampled]
+
+                    logger.debug(f"  Lip openness range: [{lip_openness.min():.4f}, {lip_openness.max():.4f}]")
+                    logger.debug(f"  Audio energy range: [{audio_energy.min():.4f}, {audio_energy.max():.4f}]")
+
+                    # Normalize both signals
+                    lip_openness_norm = (lip_openness - lip_openness.min()) / (lip_openness.max() - lip_openness.min() + 1e-8)
+                    audio_energy_norm = (audio_energy - audio_energy.min()) / (audio_energy.max() - audio_energy.min() + 1e-8)
+
+                    # MSE loss between normalized signals
+                    audio_lip_loss = F.mse_loss(lip_openness_norm, audio_energy_norm)
+                    audio_lip_term = audio_lip_loss * self.lambda_audio_lip
+
+                    losses['audio_lip_correlation'] = audio_lip_term
+                    total_loss = total_loss + audio_lip_term
+                    logger.debug(f"  Audio-lip correlation loss: {audio_lip_term.item():.6f}")
+
+                    # 2b. Direct mouth openness supervision (using extracted lips)
+                    # Direct supervision: mouth should be open when audio is strong
+                    mouth_openness_loss = F.mse_loss(lip_openness_norm, audio_energy_norm) * 10.0  # Strong weight
+                    losses['mouth_openness_direct'] = mouth_openness_loss
+                    total_loss = total_loss + mouth_openness_loss
+                    logger.debug(f"  Mouth openness direct loss: {mouth_openness_loss.item():.6f}")
+
+                except Exception as e:
+                    logger.warning(f"Could not compute audio-lip correlation from extracted features: {e}")
+                    losses['audio_lip_correlation'] = torch.tensor(0.0, device=device)
+                    losses['mouth_openness_direct'] = torch.tensor(0.0, device=device)
+            else:
+                logger.debug("  Skipping audio-lip correlation (no audio or no extracted lips)")
+                losses['audio_lip_correlation'] = torch.tensor(0.0, device=device)
+                losses['mouth_openness_direct'] = torch.tensor(0.0, device=device)
+
+            # 3. Head Distance Loss
             logger.debug("\nComputing Head Distance Loss:")
             if 'head_distance' in conditions and conditions['head_distance'] is not None:
                 pred_distance = self._extract_distance_from_motion(pred_motion)

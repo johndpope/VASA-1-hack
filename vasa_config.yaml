@@ -214,21 +214,21 @@ loss:
 
   # NEW VASA-1 inspired losses
   use_score_matching: true    # Use VASA-1 style clean signal prediction (not noise)
-  lambda_consist: 0.5         # Pairwise transfer loss for disentanglement (re-enabled for consistency)
-  lambda_cross_id: 0.0        # Cross-identity similarity loss (re-enabled for identity preservation)
+  lambda_consist: 0.5         # Pairwise transfer loss for disentanglement (needed for multi-identity)
+  lambda_cross_id: 0.0        # Cross-identity similarity loss (can enable later if needed)
   lambda_velocity: 0.0        # DISABLED - was punishing expression variance (was 1e-5)
   lambda_smoothness: 0.0      # DISABLED - was punishing expression dynamics (was 0.01)
-  lambda_audio_lip: 5.0       # Audio-lip correlation loss - REDUCED from 10.0 to 5.0 to reduce static pull
+  lambda_audio_lip: 3.0       # REDUCED from 5.0 to 3.0 - balance with lip landmark loss (2.0)
 
   # Expression-specific losses (CRITICAL FOR PREVENTING COLLAPSE)
-  lambda_expression_l1: 0.1   # REDUCED from 2.5 to 0.1 - L1 norm encourages sparsity→zeros→collapse
-  lambda_expression_variance: 5.0   # NEW - Force pred_std to match target_std (prevents collapse)
-  lambda_expression_temporal: 2.0   # NEW - Force temporal frame-to-frame variation
-  lambda_audio_expr_coupling: 5.0   # NEW - Force expression magnitude to correlate with audio energy
+  lambda_expression_l1: 0.0   # DISABLED - conflicts with L2, too weak (was 0.1)
+  lambda_expression_variance: 5.0   # Force pred_std to match target_std (prevents collapse)
+  lambda_expression_temporal: 2.0   # Force temporal frame-to-frame variation
+  lambda_audio_expr_coupling: 2.0   # REDUCED from 5.0 to 2.0 - let expression reconstruction dominate
 
-  # Warp regularization
-  lambda_warp_l1: 0.1         # L1 loss on UV warps for sparsity/robustness
-  lambda_warp_tv: 0.1         # Total Variation (TV-L1) for spatial smoothness
+  # Warp regularization (CLEANED UP - removed conflicts)
+  lambda_warp_l1: 0.0         # DISABLED - conflicts with magnitude loss (was 0.1)
+  lambda_warp_tv: 0.05        # REDUCED from 0.1 - spatial smoothness only
 
   # Disentanglement loss configuration
   disentangle_num_pairs: 3           # Number of frame pairs to sample for l_consist
@@ -249,13 +249,14 @@ loss:
 
   # Warping field loss weights
   lambda_warp: 2.0                   # Main warp reconstruction loss weight
-  lambda_warp_smooth: 0.01           # Spatial smoothness regularization for warps
-  lambda_warp_temporal: 0.1          # Temporal consistency for warps
+  lambda_warp_smooth: 0.0            # DISABLED - redundant with TV loss (was 0.01)
+  lambda_warp_temporal: 0.1          # Temporal consistency for warps (can disable for single video)
   lambda_source_theta: 0.5           # Source theta warp loss weight
   lambda_warp_magnitude: 15.0        # INCREASED from 5.0 to strongly prevent UV warp collapse
   
-  # Frame generation for disentanglement losses
+  # Frame generation for disentanglement losses and visualization
   use_sparse_frames: false    # If true, only generate first and last frame (saves 90% memory)
+  enable_frame_generation: true  # Generate frames for visualization even if disentanglement losses are disabled
   
   warmup_epochs: 0            # No warmup for overfitting
   

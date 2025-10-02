@@ -30,6 +30,40 @@ from PIL import Image
 
 to_512 = lambda x: x.resize((512, 512), Image.LANCZOS)
 
+def temporal_smooth(tensor, kernel_size=5, sigma=1.5):
+    """Apply 1D Gaussian smoothing across time dimension to reduce jankiness.
+
+    Args:
+        tensor: Input tensor of shape [B, T, ...] to smooth across time
+        kernel_size: Size of Gaussian kernel (default: 5 frames)
+        sigma: Standard deviation of Gaussian (default: 1.5)
+
+    Returns:
+        Smoothed tensor of same shape as input
+
+    Note:
+        - Only smooths temporal dimension (dim=1)
+        - Preserves expression dynamics while smoothing pose parameters
+        - Uses replicate padding to avoid edge artifacts
+    """
+    x = torch.arange(kernel_size, dtype=tensor.dtype, device=tensor.device) - kernel_size // 2
+    kernel = torch.exp(-x**2 / (2 * sigma**2))
+    kernel = kernel / kernel.sum()
+
+    B, T, *dims = tensor.shape
+    tensor_flat = tensor.reshape(B, T, -1).permute(0, 2, 1)  # [B, features, T]
+
+    # Pad temporal dimension with replicate mode to preserve edges
+    padding = kernel_size // 2
+    tensor_padded = F.pad(tensor_flat, (padding, padding), mode='replicate')
+
+    # Apply 1D convolution along time dimension
+    kernel = kernel.unsqueeze(0).unsqueeze(0)  # [1, 1, kernel_size]
+    smoothed = F.conv1d(tensor_padded, kernel.repeat(tensor_flat.shape[1], 1, 1),
+                       groups=tensor_flat.shape[1])
+
+    return smoothed.permute(0, 2, 1).reshape(B, T, *dims)
+
 class VASAInference:
     def __init__(
         self,
@@ -317,19 +351,36 @@ class VASAInference:
         self,
         input_video: str,
         output_path: str,
-        fps: float = 25.0
+        fps: float = 25.0,
+        target_image: str = None
     ):
-        """Generate animated sequence from input video with background preservation."""
+        """Generate animated sequence from input video with background preservation.
+
+        Args:
+            input_video: Path to input video (audio will be extracted)
+            output_path: Path to save output video
+            fps: Frame rate for output video
+            target_image: Path to target identity image (if None, uses first frame from video)
+        """
         try:
             with torch.no_grad():  # No gradients needed for inference
-                # Extract source image and audio
-                source_image_path, audio_path = self.extract_video_assets(
+                # Extract audio from video (always needed)
+                _, audio_path = self.extract_video_assets(
                     input_video,
                     self.asset_dir
                 )
-                
-                # Load source image
-                
+
+                # Load source image - use target_image if provided, otherwise extract from video
+                if target_image is not None:
+                    logger.info(f"Using target image: {target_image}")
+                    source_image_path = target_image
+                else:
+                    logger.info("No target image provided, extracting first frame from video")
+                    source_image_path, _ = self.extract_video_assets(
+                        input_video,
+                        self.asset_dir
+                    )
+
                 source_img = Image.open(source_image_path).convert('RGB')
                 source_img = to_512(source_img)
 
@@ -577,16 +628,24 @@ class VASAInference:
                     initial_pose=motion_data,
                     initial_dynamics=motion_data['expression_embed'],
                     conditions=cond_signals,
-                    eta=0.0,  # Deterministic generation
+                    eta=0.5,  # FIXED: Match training config (was 0.0 causing deterministic, janky outputs)
                     num_steps=50,
                     cfg_scales={
                         'audio': 0.5,      # From config
-                        'gaze': 1.0,       # From config  
+                        'gaze': 1.0,       # From config
                         'head_distance': 0.8,
                         'emotion': 0.5
                     }
                 )
-                
+
+                # SMOOTHNESS FIX: Apply temporal Gaussian smoothing to pose parameters
+                # Only smooth theta/rotation/translation (NOT expression - keep expression dynamics perfect)
+                logger.info("Applying temporal smoothing to pose parameters...")
+                motion_sequence['theta'] = temporal_smooth(motion_sequence['theta'], kernel_size=5, sigma=1.5)
+                motion_sequence['rotation'] = temporal_smooth(motion_sequence['rotation'], kernel_size=5, sigma=1.5)
+                motion_sequence['translation'] = temporal_smooth(motion_sequence['translation'], kernel_size=5, sigma=1.5)
+                # Note: NOT smoothing expression_embed to preserve perfect expression dynamics
+
                 logger.info(f"Generated sequence shape: {motion_sequence['expression_embed'].shape}")
                 
                 # Debug: Check motion parameter variation
@@ -1521,7 +1580,7 @@ if __name__ == "__main__":
                         help='Path to config file (default: vasa_config.yaml)')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='Path to checkpoint file (default: auto-detect from config)')
-    parser.add_argument('--input', type=str, default='./junk/7.mp4',
+    parser.add_argument('--input', type=str, default='./videovideoeI2V8Bd5X9s-scene6_scene1.mp4',
                         help='Input video path')
     parser.add_argument('--output', type=str, default=None,
                         help='Output video path (default: auto-generate)')
@@ -1531,7 +1590,7 @@ if __name__ == "__main__":
                         help='Use neutral expression')
     parser.add_argument('--visualize', action='store_true',
                         help='Generate visualization outputs instead of video')
-    parser.add_argument('--target-image', type=str, default='./data/IMG_4.png',
+    parser.add_argument('--target_image', type=str, default='./data/IMG_4.png',
                         help='Target image for visualization (default: ./data/A.png)')
     parser.add_argument('--vis-dir', type=str, default='vis_output',
                         help='Output directory for visualizations (default: vis_output)')
@@ -1595,10 +1654,12 @@ if __name__ == "__main__":
     else:
         # Generate video
         logger.info(f"Output video: {args.output}")
+        logger.info(f"Target image: {args.target_image}")
         inferencer.generate_from_video(
             input_video=args.input,
             output_path=args.output,
             fps=args.fps,
+            target_image=args.target_image  # Pass target image parameter
         )
 
     # inferencer.visualize_inference_outputs(
