@@ -142,6 +142,12 @@ The project uses `loss_monitor.py` to track loss values and warn when they're ou
 - Added real-time monitoring with warnings/critical alerts
 - See `LOSS_CLEANUP_SUMMARY.md` and `LOSS_AUDIT.md` for details
 
+**Temporal Stabilization (2025-10-03)**:
+- Added Gaussian smoothing to motion parameters before frame generation
+- Fixes severe geometric distortions (warping, shearing, tilting) in generated frames
+- Applied automatically for sequences with 4+ frames (sigma=1.0 default)
+- See `TEMPORAL_STABILIZATION.md` for details
+
 
 
 In the context of the VASA-1 paper and its reference to the MegaPortraits codebase (which builds on 3D-aided facial reenactment frameworks like those in [19], likely referring to Drobyshev et al.'s MegaPortraits work), rigid and non-rigid 3D warping are key steps in decomposing a facial image into a canonical (neutral, standardized) 3D appearance volume \( V^{app} \). This process enables disentangled representations for high-fidelity face reenactment, where appearance, identity, pose, and dynamics are separated for tasks like generating nuanced facial animations from a single source image.

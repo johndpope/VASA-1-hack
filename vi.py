@@ -1590,7 +1590,7 @@ if __name__ == "__main__":
                         help='Use neutral expression')
     parser.add_argument('--visualize', action='store_true',
                         help='Generate visualization outputs instead of video')
-    parser.add_argument('--target_image', type=str, default='./data/IMG_4.png',
+    parser.add_argument('--target_image', type=str, default='./data/IMG_1.png',
                         help='Target image for visualization (default: ./data/A.png)')
     parser.add_argument('--vis-dir', type=str, default='vis_output',
                         help='Output directory for visualizations (default: vis_output)')

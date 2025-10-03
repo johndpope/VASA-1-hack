@@ -1,18 +1,4 @@
-# VASA Full Training Configuration
-# UPDATED: 2025-10-01 - Expression collapse fixes applied
-#
-# Key changes for expression variance (fixes identical expression outputs):
-#   ✅ lambda_dynamics: 10.0 (was 1.0) - Force strong expression matching
-#   ✅ lambda_temporal: 0.0 (was 0.01) - Disable smoothness penalty that crushes variance
-#   ✅ lambda_velocity: 0.0 (was 1e-5) - Allow frame-to-frame expression changes
-#   ✅ lambda_smoothness: 0.0 (was 0.01) - Allow expression dynamics/acceleration
-#   ✅ lambda_expression_l1: 0.1 (was 2.5) - Reduce L1 sparsity that causes zeros
-#   ✅ lambda_expression_variance: 5.0 (NEW) - Force pred_std to match target_std
-#   ✅ lambda_expression_temporal: 2.0 (NEW) - Force temporal variation between frames
-#   ✅ use_emo_matching: false (was true) - EMO keyframes are static, causing collapse
-#   ✅ Audio-expression coupling loss added in vasa_losses.py (line 551-568)
-#
-# Result: Expression std increased from ~0.00001 (collapsed) → 0.47-0.63 (matching target)
+# VASA Overfit Configuration - For fast convergence testing
 defaults:
   - _self_
 
@@ -52,6 +38,7 @@ motion:
   context_size: 10
   # Add these:
 
+
   warmup_steps: 500          # Extended warmup for VASA-1 alignment
   scheduler:
     type: "cosine"            # Learning rate scheduler type
@@ -75,10 +62,10 @@ train:
   # when to add conditional signals
   control_start_epoch: 0      # Start control immediately for overfitting
 
-  lr: 1e-4 # REDUCED to 1e-4 to prevent UV warp oscillation (was 5e-4)
+  lr: 5e-4 # Base learning rate for overfitting
   motion_proj_lr: 0.1 # DEPRECATED - see get_layer_wise_learning_rates in vasa_trainer.py
   expression_lr: 0.1   # DEPRECATED - use expression_lr_mult instead
-  expression_lr_mult: 2.0  # Expression learning rate multiplier (2.0x = 2e-4 for faster expression learning) 
+  expression_lr_mult: 2.0  # Expression learning rate multiplier (2.0x = 1e-3 for faster expression learning) 
 
   turn_off_noise: false # no noise signal / no drop out
   learning_rates:
@@ -96,7 +83,7 @@ train:
 
   windows_per_batch: 8          # INCREASED from 4 to 8 to use more VRAM (was 4)
   gradient_accumulation_steps: 2  # REDUCED from 4 to maintain effective batch size
-  num_epochs: 1000            # Reduced for quick testing
+  num_epochs: 10000            # Reduced for quick testing
 
   beta1: 0.9
   beta2: 0.999
@@ -150,7 +137,7 @@ loss:
   use_synchformer: false  # Use Synchformer instead of SyncNet for sync loss
   use_verification: false     # Disabled for faster training
   lambda_verification: 0
-  
+
   # =============================================================================
   # TRAINING STAGE PROGRESSION TABLE
   # =============================================================================
@@ -179,34 +166,34 @@ loss:
 
   # Foundation losses (always active)
   lambda_reconstruction: 2.0   # Increased for better reconstruction
-  lambda_dynamics: 10.0        # INCREASED from 1.0 to 10.0 - Force strong expression matching (fixes collapse)
+  lambda_dynamics: 10.0        # INCREASED to 10.0 to force expression matching
   lambda_pose: 5.0  # Increased from 1.0 to enforce better head pose learning
 
   # Progressive losses (unlock based on thresholds)
   # Stage 2: Blinking (unlocks at epoch 5 if reconstruction < 0.1)
   lambda_blink: 0.1           # Will ramp to 2.0
-  
-  # Stage 3: Eye Gaze (unlocks at epoch 15 if blink < 0.15)  
+
+  # Stage 3: Eye Gaze (unlocks at epoch 15 if blink < 0.15)
   lambda_gaze_direction: 0.1  # Will ramp to 1.5
-  
+
   # Stage 4: Head Pose (unlocks at epoch 25 if gaze < 0.2)
   lambda_head_distance: 0.1   # Will ramp to 1.0
-  
+
   # Stage 5: Emotion (unlocks at epoch 35 if head pose < 0.25)
   lambda_emotion: 0.0        # Will ramp to 0.8 - https://github.com/johndpope/VASA-1-hack/issues/57
-  
+
   # Stage 6: Lip Sync (unlocks at epoch 45 if emotion < 0.3)
   lambda_lips: 2.0            # INCREASED from 0.1 to force better mouth movement
   lambda_sync: 0.0            # SyncNet for evaluation only, audio conditioning handles training
-
+  
   # Other losses
   lambda_nonlip: 0.1          # Weight for non-lip facial landmarks
   lambda_speed: 0.1
   lambda_control: 1.0         # Overall control weight (was 0.0, now 1.0 to enable all control losses)
-
+  lambda_lip: 0.0
   lambda_cfg: 0.5
   lambda_perceptual: 0.5      # Increased perceptual loss for better quality
-  lambda_temporal: 0.0        # DISABLED - temporal smoothness prevents expression variation (was 0.01)
+  lambda_temporal: 0.0        # DISABLED - temporal smoothness prevents expression variation
   use_consistency: true       # Enable VASA consistency loss
   use_identity: true          # Enable face identity preservation
   lambda_consistency: 0.0     # Weight for consistency loss
@@ -214,21 +201,30 @@ loss:
 
   # NEW VASA-1 inspired losses
   use_score_matching: true    # Use VASA-1 style clean signal prediction (not noise)
-  lambda_consist: 0.5         # Pairwise transfer loss for disentanglement (needed for multi-identity)
-  lambda_cross_id: 0.0        # Cross-identity similarity loss (can enable later if needed)
-  lambda_velocity: 0.0        # DISABLED - was punishing expression variance (was 1e-5)
-  lambda_smoothness: 0.0      # DISABLED - was punishing expression dynamics (was 0.01)
+  lambda_consist: 0.0         # DISABLED - expensive, not needed for single-identity overfitting (was 0.5)
+  lambda_cross_id: 0.0        # Cross-identity similarity loss (not needed for overfitting)
+  lambda_velocity: 0.0        # DISABLED to allow maximum expression variance
+  lambda_smoothness: 0.0      # DISABLED to allow maximum expression variance
   lambda_audio_lip: 3.0       # REDUCED from 5.0 to 3.0 - balance with lip landmark loss (2.0)
 
   # Expression-specific losses (CRITICAL FOR PREVENTING COLLAPSE)
   lambda_expression_l1: 0.0   # DISABLED - conflicts with L2, too weak (was 0.1)
-  lambda_expression_variance: 5.0   # Force pred_std to match target_std (prevents collapse)
-  lambda_expression_temporal: 2.0   # Force temporal frame-to-frame variation
-  lambda_audio_expr_coupling: 2.0   # REDUCED from 5.0 to 2.0 - let expression reconstruction dominate
+  lambda_expression_variance: 5.0  # Force prediction variance to match target variance
+  lambda_expression_temporal: 2.0  # Force temporal variation in expressions
+  lambda_audio_expr_coupling: 2.0  # REDUCED from 5.0 to 2.0 - let expression reconstruction dominate
 
   # Warp regularization (CLEANED UP - removed conflicts)
   lambda_warp_l1: 0.0         # DISABLED - conflicts with magnitude loss (was 0.1)
-  lambda_warp_tv: 0.05        # REDUCED from 0.1 - spatial smoothness only
+  lambda_warp_tv: 0.05        # REDUCED from 0.1 - spatial smoothness only (removed redundant warp_smooth)
+
+  # EMO (Volumetric Avatar) Matching Loss - ensures VASA matches high-quality EMO output
+  use_emo_matching: false             # DISABLED - EMO keyframes are static, causing expression collapse
+  lambda_emo_match: 0.0               # DISABLED to prevent static pull
+  emo_match_type: 'combined'          # 'l1', 'l2', 'lpips', or 'combined'
+  emo_cache_dir: 'cache_emo'          # Directory for cached EMO outputs
+  emo_keyframes_per_window: 5         # Number of keyframes to compare per window
+  emo_match_start_epoch: 0            # Start EMO matching from epoch 0 for immediate quality
+  emo_min_valid_frames: 0.1           # LOWERED for overfitting: Skip EMO matching when <10% frames are valid (was 0.5)
 
   # Disentanglement loss configuration
   disentangle_num_pairs: 3           # Number of frame pairs to sample for l_consist
@@ -238,21 +234,12 @@ loss:
   cross_id_num_frames: 3             # Number of frames to use for identity comparison
   cross_id_normalize: true           # Normalize frames before identity extraction
 
-  # EMO (Volumetric Avatar) Matching Loss - ensures VASA matches high-quality EMO output
-  use_emo_matching: false             # DISABLED - EMO keyframes are static, causing expression collapse
-  lambda_emo_match: 0.0               # DISABLED - was forcing static outputs (was 2.0)
-  emo_match_type: 'combined'          # 'l1', 'l2', 'lpips', or 'combined'
-  emo_cache_dir: 'cache_emo'          # Directory for cached EMO outputs
-  emo_keyframes_per_window: 5         # Number of keyframes to compare per window
-  emo_match_start_epoch: 0            # Start EMO matching from epoch 0 for immediate quality
-  emo_min_valid_frames: 0.5           # Skip EMO matching when <50% frames are valid (0.5 = 50%)
-
   # Warping field loss weights
   lambda_warp: 2.0                   # Main warp reconstruction loss weight
   lambda_warp_smooth: 0.0            # DISABLED - redundant with TV loss (was 0.01)
-  lambda_warp_temporal: 0.1          # Temporal consistency for warps (can disable for single video)
+  lambda_warp_temporal: 0.0          # DISABLED - redundant for overfitting, target is smooth (was 0.1)
   lambda_source_theta: 0.5           # Source theta warp loss weight
-  lambda_warp_magnitude: 15.0        # INCREASED from 5.0 to strongly prevent UV warp collapse
+  lambda_warp_magnitude: 5.0         # UV warp magnitude matching (prevents collapse to zero)
   
   # Frame generation for disentanglement losses and visualization
   use_sparse_frames: false    # If true, only generate first and last frame (saves 90% memory)
