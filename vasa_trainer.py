@@ -748,7 +748,13 @@ class VASATrainer:
             else:
                 logger.warning(f"Identity image path not found: {identity_path}")
                 logger.warning("Falling back to using video frames for identity")
-        
+
+        # Get use_derived_warps flag from model config
+        self.use_derived_warps = getattr(config.model, 'use_derived_warps', False)
+        if self.use_derived_warps:
+            logger.info("✅ Using derived warps: will compute identity-conditioned warps on-the-fly")
+        else:
+            logger.info("Using pre-computed warps from dataset")
 
         # Initialize MotionSequenceHandler
         self.motion_handler = MotionSequenceHandler(
@@ -1224,12 +1230,48 @@ class VASATrainer:
                                     logger.error(f"audio_features missing after dropout! Keys: {list(control_signals.keys())}")
                                     raise ValueError("audio_features removed by dropout - this should never happen!")
 
+                            # Compute identity embedding from identity image for derived warps
+                            idt_embed = None
+                            if self.use_derived_warps:
+                                # Get source image for identity embedding
+                                if self.identity_image is not None:
+                                    identity_frame = self.identity_image.to(self.accelerator.device)  # [1, C, H, W]
+                                else:
+                                    # Use first frame from window
+                                    target_frames_temp = window.get('frames', None)
+                                    if target_frames_temp is not None:
+                                        identity_frame = target_frames_temp[0:1, 0]  # [1, C, H, W]
+                                    else:
+                                        logger.error("[IDT_EMBED] No identity image or frames available!")
+                                        identity_frame = None
+
+                                if identity_frame is not None:
+                                    with torch.no_grad():
+                                        # Get face mask
+                                        identity_mask, _, _, _ = self.model.volumetric_avatar.face_idt.forward(identity_frame)
+                                        identity_mask = (identity_mask > 0.6).float()
+                                        identity_mask = torch.nn.functional.avg_pool2d(identity_mask, 3, stride=1, padding=1)
+
+                                        # Mask source image
+                                        masked_identity = identity_frame * identity_mask
+
+                                        # Extract identity embedding (returns 4D spatial feature map)
+                                        idt_embed_spatial = self.model.volumetric_avatar.idt_embedder_nw(masked_identity)  # [B, C, H, W]
+
+                                        # Convert spatial feature map to feature vector via global average pooling
+                                        # This matches what nemo expects: [B, idt_dim]
+                                        idt_embed = torch.nn.functional.adaptive_avg_pool2d(idt_embed_spatial, (1, 1)).squeeze(-1).squeeze(-1)  # [B, C]
+                                        logger.debug(f"[IDT_EMBED] ✅ Computed idt_embed from identity image: {idt_embed.shape}")
+                                else:
+                                    logger.error("[IDT_EMBED] ❌ Could not get identity frame!")
+
                             # Forward pass with CFG during inference
                             outputs = self.model(
                                 motion_data=noised_motion,  # Use noised motion
                                 noise_level=t,              # Pass timestep
                                 conditions=control_signals,
-                                noise=noise                 # Pass noise for loss computation
+                                noise=noise,                # Pass noise for loss computation
+                                idt_embed=idt_embed         # Pass identity for derived warps
                             )
                             
                             # Get actual frames from the window data for disentanglement loss
