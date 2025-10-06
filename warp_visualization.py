@@ -37,7 +37,7 @@ def visualize_uv_warps(uv_warps: torch.Tensor, target_uv_warps: torch.Tensor = N
     warp_magnitude = torch.norm(uv_warps_np, dim=-1).mean(dim=[-3, -2, -1])  # [B, T]
 
     # 2. Variance: How spatially diverse are the warps?
-    warp_variance = uv_warps_np.view(B, T, -1).var(dim=-1)  # [B, T]
+    warp_variance = uv_warps_np.reshape(B, T, -1).var(dim=-1)  # [B, T]
 
     # 3. Temporal change: How much do warps change frame-to-frame?
     warp_temporal_diff = torch.diff(uv_warps_np, dim=1).abs().mean(dim=[-4, -3, -2, -1])  # [B, T-1]
@@ -50,7 +50,7 @@ def visualize_uv_warps(uv_warps: torch.Tensor, target_uv_warps: torch.Tensor = N
     # If target provided, compute same stats
     if target_np is not None:
         target_magnitude = torch.norm(target_np, dim=-1).mean(dim=[-3, -2, -1])
-        target_variance = target_np.view(B, T, -1).var(dim=-1)
+        target_variance = target_np.reshape(B, T, -1).var(dim=-1)
         target_temporal_diff = torch.diff(target_np, dim=1).abs().mean(dim=[-4, -3, -2, -1])
 
     # Create comprehensive visualization
@@ -253,8 +253,8 @@ def log_warp_statistics(outputs: dict, targets: dict, step: int, wandb_logger=No
     pred_magnitude = torch.norm(pred_warps, dim=-1).mean()
     target_magnitude = torch.norm(target_warps, dim=-1).mean()
 
-    pred_variance = pred_warps.view(pred_warps.shape[0], pred_warps.shape[1], -1).var(dim=-1).mean()
-    target_variance = target_warps.view(target_warps.shape[0], target_warps.shape[1], -1).var(dim=-1).mean()
+    pred_variance = pred_warps.reshape(pred_warps.shape[0], pred_warps.shape[1], -1).var(dim=-1).mean()
+    target_variance = target_warps.reshape(target_warps.shape[0], target_warps.shape[1], -1).var(dim=-1).mean()
 
     mse = ((pred_warps - target_warps) ** 2).mean()
 
