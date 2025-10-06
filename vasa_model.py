@@ -467,6 +467,7 @@ class MotionTransformer(nn.Module):
         self.expression_dim = config.model.expression_dim  # Should be 128
         self.context_size = config.motion.context_size
         self.window_size = config.motion.window_size  # Should be 50
+        self.use_derived_warps = getattr(config.model, 'use_derived_warps', False)
 
         # Transformer configuration
         nhead = config.model.n_heads
@@ -553,21 +554,24 @@ class MotionTransformer(nn.Module):
             nn.SiLU(),
             nn.Linear(self.d_model // 2, self.expression_dim)
         )
-        self.scale_head = nn.Sequential(
-            nn.Linear(self.d_model, self.d_model // 4),
-            nn.SiLU(),
-            nn.Linear(self.d_model // 4, 3)
-        )
-        self.rotation_head = nn.Sequential(
-            nn.Linear(self.d_model, self.d_model // 4),
-            nn.SiLU(),
-            nn.Linear(self.d_model // 4, 3)
-        )
-        self.translation_head = nn.Sequential(
-            nn.Linear(self.d_model, self.d_model // 4),
-            nn.SiLU(),
-            nn.Linear(self.d_model // 4, 3)
-        )
+        # DISABLED: scale, rotation, and translation not used by nemo's pretrained warp generator
+        # These are handled internally by nemo's pretrained components
+        # Only theta (pose matrix) and expression_embed are predicted
+        # self.scale_head = nn.Sequential(
+        #     nn.Linear(self.d_model, self.d_model // 4),
+        #     nn.SiLU(),
+        #     nn.Linear(self.d_model // 4, 3)
+        # )
+        # self.rotation_head = nn.Sequential(
+        #     nn.Linear(self.d_model, self.d_model // 4),
+        #     nn.SiLU(),
+        #     nn.Linear(self.d_model // 4, 3)
+        # )
+        # self.translation_head = nn.Sequential(
+        #     nn.Linear(self.d_model, self.d_model // 4),
+        #     nn.SiLU(),
+        #     nn.Linear(self.d_model // 4, 3)
+        # )
 
         # UV Warp generation moved to implicit WarpGeneratorFromZdyn
         # (No explicit warp head needed - warps derived from zdyn + theta)
@@ -734,9 +738,6 @@ class MotionTransformer(nn.Module):
         # Predict outputs matching H5 cache structure
         theta_pred = self.theta_head(out).view(B, T, 3, 4)  # H5: (1, 4, 4) but model uses 3x4
         expr_pred = self.expr_head(out)  # [B, T, 128] - matches target_pose_embed in H5
-        scale_pred = self.scale_head(out)  # [B, T, 3] - matches H5
-        rotation_pred = self.rotation_head(out)  # [B, T, 3] - matches H5
-        translation_pred = self.translation_head(out)  # [B, T, 3] - matches H5
 
         # Debug expression predictions
         if torch.rand(1).item() < 0.01:  # Log 1% of the time
@@ -749,21 +750,28 @@ class MotionTransformer(nn.Module):
         # UV warps will be generated implicitly by WarpGeneratorFromZdyn in VASAModel
         # No explicit prediction needed here
 
-        # Add assertions to verify output shapes match H5 expectations
+        # Add assertions to verify output shapes
         assert theta_pred.shape == (B, T, 3, 4), f"Theta pred shape mismatch: {theta_pred.shape}"
         assert expr_pred.shape == (B, T, 128), f"Expression pred shape mismatch: {expr_pred.shape}"
-        assert scale_pred.shape == (B, T, 3), f"Scale pred shape mismatch: {scale_pred.shape}"
-        assert rotation_pred.shape == (B, T, 3), f"Rotation pred shape mismatch: {rotation_pred.shape}"
-        assert translation_pred.shape == (B, T, 3), f"Translation pred shape mismatch: {translation_pred.shape}"
 
-        return {
+        # Build output dict - when using derived warps, only predict theta and expression_embed
+        # Nemo's pretrained components handle scale/rotation/translation internally
+        output_dict = {
             'theta': theta_pred,  # Pose matrix
             'expression_embed': expr_pred,  # Aligned expression embedding (target_pose_embed in H5)
-            'scale': scale_pred,  # SRT scale
-            'rotation': rotation_pred,  # SRT rotation
-            'translation': translation_pred,  # SRT translation
             # Note: uv_warps will be added by VASAModel.forward() via implicit generation
         }
+
+        # Only include SRT components if NOT using derived warps (legacy mode)
+        if not self.use_derived_warps:
+            rotation_pred = motion_data['rotation'] if 'rotation' in motion_data else torch.zeros(B, T, 3, device=device)
+            scale_pred = motion_data['scale'] if 'scale' in motion_data else torch.zeros(B, T, 3, device=device)
+            translation_pred = motion_data['translation'] if 'translation' in motion_data else torch.zeros(B, T, 3, device=device)
+            output_dict['rotation'] = rotation_pred
+            output_dict['scale'] = scale_pred
+            output_dict['translation'] = translation_pred
+
+        return output_dict
 
 
 class VASAModel(nn.Module):

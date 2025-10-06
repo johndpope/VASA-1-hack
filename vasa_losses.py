@@ -1802,7 +1802,8 @@ class VASALossModule:
 
             # Motion smoothness loss if sequence length > 1
             motion_loss = torch.tensor(0.0, device=device)
-            if pred['theta'].shape[1] > 1:
+            seq_len = pred.get('theta', pred.get('expression_embed')).shape[1] if pred else 0
+            if seq_len > 1:
                 motion_loss = self._compute_motion_smoothness_loss(pred) * self.lambda_temporal
 
             # Combined reconstruction loss
@@ -2057,42 +2058,39 @@ class VASALossModule:
                 Motion smoothness loss
             """
             loss = 0.0
-            
-            # Compute velocity (first derivative)
-            theta_vel = torch.diff(pred['theta'], dim=1)
-            rotation_vel = torch.diff(pred['rotation'], dim=1)
-            scale_vel = torch.diff(pred['scale'], dim=1)
-            translation_vel = torch.diff(pred['translation'], dim=1)
-            expression_vel = torch.diff(pred['expression_embed'], dim=1)
-            
-            # Compute acceleration (second derivative)
-            if pred['theta'].shape[1] > 2:
-                theta_acc = torch.diff(theta_vel, dim=1)
-                rotation_acc = torch.diff(rotation_vel, dim=1)
-                scale_acc = torch.diff(scale_vel, dim=1)
-                translation_acc = torch.diff(translation_vel, dim=1)
-                # expression_acc = torch.diff(expression_vel, dim=1)
+
+            # Compute velocity (first derivative) - only for components that exist
+            velocities = {}
+            accelerations = {}
+
+            if 'theta' in pred:
+                velocities['theta'] = torch.diff(pred['theta'], dim=1)
+            if 'rotation' in pred:
+                velocities['rotation'] = torch.diff(pred['rotation'], dim=1)
+            if 'scale' in pred:
+                velocities['scale'] = torch.diff(pred['scale'], dim=1)
+            if 'translation' in pred:
+                velocities['translation'] = torch.diff(pred['translation'], dim=1)
+            if 'expression_embed' in pred:
+                velocities['expression'] = torch.diff(pred['expression_embed'], dim=1)
+
+            # Compute acceleration (second derivative) for available components
+            T = pred.get('theta', pred.get('expression_embed')).shape[1]
+            if T > 2:
+                for key, vel in velocities.items():
+                    accelerations[key] = torch.diff(vel, dim=1)
             else:
-                theta_acc = torch.zeros_like(theta_vel)
-                rotation_acc = torch.zeros_like(rotation_vel)
-                scale_acc = torch.zeros_like(scale_vel)
-                translation_acc = torch.zeros_like(translation_vel)
-                # expression_acc = torch.zeros_like(expression_vel)
-            
-            # Velocity smoothness
-            loss += F.mse_loss(theta_vel, torch.zeros_like(theta_vel))
-            loss += F.mse_loss(rotation_vel, torch.zeros_like(rotation_vel))
-            loss += F.mse_loss(scale_vel, torch.zeros_like(scale_vel))
-            loss += F.mse_loss(translation_vel, torch.zeros_like(translation_vel))
-            # loss += F.mse_loss(expression_vel, torch.zeros_like(expression_vel))
-            
-            # Acceleration smoothness
-            loss += 0.5 * F.mse_loss(theta_acc, torch.zeros_like(theta_acc))
-            loss += 0.5 * F.mse_loss(rotation_acc, torch.zeros_like(rotation_acc))
-            loss += 0.5 * F.mse_loss(scale_acc, torch.zeros_like(scale_acc))
-            loss += 0.5 * F.mse_loss(translation_acc, torch.zeros_like(translation_acc))
-            # loss += 0.5 * F.mse_loss(expression_acc, torch.zeros_like(expression_acc))
-            
+                for key, vel in velocities.items():
+                    accelerations[key] = torch.zeros_like(vel)
+
+            # Velocity smoothness - only for available components
+            for key, vel in velocities.items():
+                loss += F.mse_loss(vel, torch.zeros_like(vel))
+
+            # Acceleration smoothness - only for available components
+            for key, acc in accelerations.items():
+                loss += 0.5 * F.mse_loss(acc, torch.zeros_like(acc))
+
             return loss
 
 
@@ -2224,39 +2222,48 @@ class VASALossModule:
             import io
             from PIL import Image
 
-            # Extract frame data for each parameter
-            param_data = {
-                'theta': {
+            # Extract frame data for each parameter - only include components that exist
+            param_data = {}
+
+            if 'theta' in pred:
+                param_data['theta'] = {
                     'pred': pred['theta'][:, frame_idx].reshape(-1),
                     'target': target['theta'][:, frame_idx].reshape(-1),
                     'title': 'Pose Matrix (θ)',
                     'dim': 12
-                },
-                'scale': {
+                }
+
+            if 'scale' in pred:
+                param_data['scale'] = {
                     'pred': pred['scale'][:, frame_idx],
                     'target': target['scale'][:, frame_idx],
                     'title': 'Scale',
                     'dim': 3
-                },
-                'rotation': {
+                }
+
+            if 'rotation' in pred:
+                param_data['rotation'] = {
                     'pred': pred['rotation'][:, frame_idx],
                     'target': target['rotation'][:, frame_idx],
                     'title': 'Rotation',
                     'dim': 3
-                },
-                'translation': {
+                }
+
+            if 'translation' in pred:
+                param_data['translation'] = {
                     'pred': pred['translation'][:, frame_idx],
                     'target': target['translation'][:, frame_idx],
                     'title': 'Translation',
                     'dim': 3
-                },
-                'expression': {
+                }
+
+            if 'expression_embed' in pred:
+                param_data['expression'] = {
                     'pred': pred['expression_embed'][:, frame_idx],
                     'target': target['expression_embed'][:, frame_idx],
                     'title': 'Expression',
                     'dim': 128
                 }
-            }
 
             # Create figure with subplots for each parameter
             fig = plt.figure(figsize=(20, 25))
@@ -3107,12 +3114,19 @@ class VASALossModule:
     def _extract_distance_from_motion(self, motion: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Extract head distance from translation."""
         # Use z-translation as proxy for head distance
+        if 'translation' not in motion:
+            # If translation not available (e.g., derived warps mode), return default
+            B = motion.get('theta', motion.get('expression_embed')).shape[0]
+            T = motion.get('theta', motion.get('expression_embed')).shape[1]
+            device = motion.get('theta', motion.get('expression_embed')).device
+            return torch.ones(B, T, 1, device=device) * 0.5  # Default distance
+
         translation = motion['translation']  # [B, T, 3]
         z_dist = translation[..., 2:3]  # Get z-component
-        
+
         # Normalize to [0, 1]
         distance = torch.sigmoid(z_dist)
-        
+
         return distance
 
     def _extract_emotion_from_motion(self, motion: Dict[str, torch.Tensor]) -> torch.Tensor:
