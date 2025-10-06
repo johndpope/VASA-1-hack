@@ -10,6 +10,7 @@ model:
   dim_feedforward: 2048
   dropout: 0.05
   expression_dim: 128  # Expression embedding dimension from volumetric avatar
+  use_derived_warps: true    # Use identity-conditioned warp generation via volumetric_avatar pipeline
   # Add these:
   condition_embedding_dim: 512  # Dimension for condition embeddings
   use_prev_motion: true        # Whether to use previous motion context

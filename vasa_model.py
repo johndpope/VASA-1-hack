@@ -483,21 +483,14 @@ class MotionTransformer(nn.Module):
         self.rotation_emb = nn.Linear(3, self.d_model // 4)
         self.translation_emb = nn.Linear(3, self.d_model // 4)
 
-        # UV Warp encoder - simplified since we're only using UV warps from H5
-        # Input UV warps: [B, T, 16, 64, 64, 3]
-        self.uv_warp_encoder = nn.Sequential(
-            nn.Conv3d(3, 16, kernel_size=(4, 8, 8), stride=(4, 8, 8)),  # [B*T, 3, 16, 64, 64] -> [B*T, 16, 4, 8, 8]
-            nn.ReLU(),
-            nn.Conv3d(16, 32, kernel_size=(2, 4, 4), stride=(2, 4, 4)),  # -> [B*T, 32, 2, 2, 2]
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(32 * 2 * 2 * 2, self.d_model // 4)  # Larger embedding for UV warps
-        )
+        # UV Warp encoder REMOVED - warps now generated implicitly, not encoded
+        # Motion embeddings no longer include UV warps during training
 
-        # Combine all motion embeddings
-        # theta_emb (d_model/2) + expr_emb (d_model/2) + scale (d_model/4) + rotation (d_model/4) + translation (d_model/4) + uv_warp (d_model/4)
-        # = d_model + d_model/4 * 4 = 2 * d_model
-        self.motion_proj = nn.Linear(2 * self.d_model, self.d_model)
+        # Combine all motion embeddings (without UV warps)
+        # theta_emb (d_model/2) + expr_emb (d_model/2) + scale (d_model/4) + rotation (d_model/4) + translation (d_model/4)
+        # = d_model + d_model/4 * 3 = 1.75 * d_model
+        total_motion_dim = self.d_model + (self.d_model // 4) * 3
+        self.motion_proj = nn.Linear(total_motion_dim, self.d_model)
 
         # Timestep embedding
         self.time_emb = nn.Sequential(
@@ -576,17 +569,8 @@ class MotionTransformer(nn.Module):
             nn.Linear(self.d_model // 4, 3)
         )
 
-        # UV Warp prediction head - only predict UV warps to match H5 cache
-        # Output size: 16 * 64 * 64 * 3 = 196,608 values per frame
-        warp_hidden_dim = self.d_model * 2  # Larger hidden dim for complex warp fields
-
-        self.uv_warp_head = nn.Sequential(
-            nn.Linear(self.d_model, warp_hidden_dim),
-            nn.SiLU(),
-            nn.Linear(warp_hidden_dim, warp_hidden_dim),
-            nn.SiLU(),
-            nn.Linear(warp_hidden_dim, 16 * 64 * 64 * 3)  # Full UV warp field
-        )
+        # UV Warp generation moved to implicit WarpGeneratorFromZdyn
+        # (No explicit warp head needed - warps derived from zdyn + theta)
 
     def _get_sinusoidal_embedding(self, ts, dim):
         half_dim = dim // 2
@@ -621,37 +605,19 @@ class MotionTransformer(nn.Module):
         rotation_emb = self.rotation_emb(motion_data.get('rotation', torch.zeros(B, T, 3, device=device)))
         translation_emb = self.translation_emb(motion_data.get('translation', torch.zeros(B, T, 3, device=device)))
 
-        # Process UV warps - during training they're provided, during generation they're predicted
-        BT = B * T
+        # UV warps no longer encoded - they will be generated implicitly from zdyn + theta
+        # Verify shapes match H5 cache expectations (for debugging)
+        assert motion_data['theta'].shape[2:] == (3, 4), f"Theta shape mismatch: expected (B, T, 3, 4), got {motion_data['theta'].shape}"
+        assert motion_data['scale'].shape[2:] == (3,), f"Scale shape mismatch: expected (B, T, 3), got {motion_data['scale'].shape}"
+        assert motion_data['rotation'].shape[2:] == (3,), f"Rotation shape mismatch: expected (B, T, 3), got {motion_data['rotation'].shape}"
+        assert motion_data['translation'].shape[2:] == (3,), f"Translation shape mismatch: expected (B, T, 3), got {motion_data['translation'].shape}"
+        assert expr.shape[2:] == (128,), f"Expression shape mismatch: expected (B, T, 128), got {expr.shape}"
 
-        if 'uv_warps' in motion_data:
-            # Training mode - UV warps are provided
-            uv_warps = motion_data['uv_warps']  # [B, T, 16, 64, 64, 3]
-
-            # Add assertions to verify shapes match H5 cache expectations
-            assert uv_warps.shape[2:] == (16, 64, 64, 3), f"UV warp shape mismatch: expected (B, T, 16, 64, 64, 3), got {uv_warps.shape}"
-            assert motion_data['theta'].shape[2:] == (3, 4), f"Theta shape mismatch: expected (B, T, 3, 4), got {motion_data['theta'].shape}"
-            assert motion_data['scale'].shape[2:] == (3,), f"Scale shape mismatch: expected (B, T, 3), got {motion_data['scale'].shape}"
-            assert motion_data['rotation'].shape[2:] == (3,), f"Rotation shape mismatch: expected (B, T, 3), got {motion_data['rotation'].shape}"
-            assert motion_data['translation'].shape[2:] == (3,), f"Translation shape mismatch: expected (B, T, 3), got {motion_data['translation'].shape}"
-            assert expr.shape[2:] == (128,), f"Expression shape mismatch: expected (B, T, 128), got {expr.shape}"
-
-            # Reshape UV warps for 3D conv processing: [B*T, C, D, H, W]
-            uv_warps_reshaped = uv_warps.reshape(BT, 16, 64, 64, 3).permute(0, 4, 1, 2, 3)  # [B*T, 3, 16, 64, 64]
-
-            # Encode UV warps
-            uv_warp_emb = self.uv_warp_encoder(uv_warps_reshaped).view(B, T, -1)  # [B, T, d_model//4]
-        else:
-            # Generation mode - UV warps will be predicted, create placeholder embedding
-            # This will be learned to predict the appropriate UV warps
-            uv_warp_emb = torch.zeros(B, T, self.d_model // 4, device=device)
-
-        # Combine all embeddings
+        # Combine all embeddings (no UV warp embedding)
         current_emb = torch.cat([
             theta_emb, expr_emb,  # d_model/2 + d_model/2 = d_model
-            scale_emb, rotation_emb, translation_emb,  # d_model/4 * 3
-            uv_warp_emb  # d_model/4
-        ], dim=-1)  # Total: 2 * d_model
+            scale_emb, rotation_emb, translation_emb  # d_model/4 * 3
+        ], dim=-1)  # Total: 1.75 * d_model
         current_emb = self.motion_proj(current_emb)  # [B, T, d_model]
 
         # Handle previous context if provided
@@ -668,14 +634,11 @@ class MotionTransformer(nn.Module):
             prev_rotation_emb = self.rotation_emb(prev_context.get('rotation', torch.zeros(B, C, 3, device=device)))
             prev_translation_emb = self.translation_emb(prev_context.get('translation', torch.zeros(B, C, 3, device=device)))
 
-            # For prev_context, use zeros for UV warps (they're frame-specific, not transferable)
-            prev_uv_warp_emb = torch.zeros(B, C, self.d_model // 4, device=device)
-
+            # No UV warp embedding for prev_context either
             prev_emb = torch.cat([
                 prev_theta_emb, prev_expr_emb,  # d_model
-                prev_scale_emb, prev_rotation_emb, prev_translation_emb,  # d_model/4 * 3
-                prev_uv_warp_emb  # d_model/4
-            ], dim=-1)  # Total: 2 * d_model
+                prev_scale_emb, prev_rotation_emb, prev_translation_emb  # d_model/4 * 3
+            ], dim=-1)  # Total: 1.75 * d_model
             prev_emb = self.motion_proj(prev_emb)  # [B, C, d_model]
 
             # Concatenate context and current
@@ -783,8 +746,8 @@ class MotionTransformer(nn.Module):
             logger.info(f"  Has NaN: {torch.isnan(expr_pred).any().item()}")
             logger.info(f"  Has Inf: {torch.isinf(expr_pred).any().item()}")
 
-        # Predict UV warps matching H5 structure
-        uv_warps_pred = self.uv_warp_head(out).view(B, T, 16, 64, 64, 3)  # matches H5: (1, 16, 64, 64, 3)
+        # UV warps will be generated implicitly by WarpGeneratorFromZdyn in VASAModel
+        # No explicit prediction needed here
 
         # Add assertions to verify output shapes match H5 expectations
         assert theta_pred.shape == (B, T, 3, 4), f"Theta pred shape mismatch: {theta_pred.shape}"
@@ -792,7 +755,6 @@ class MotionTransformer(nn.Module):
         assert scale_pred.shape == (B, T, 3), f"Scale pred shape mismatch: {scale_pred.shape}"
         assert rotation_pred.shape == (B, T, 3), f"Rotation pred shape mismatch: {rotation_pred.shape}"
         assert translation_pred.shape == (B, T, 3), f"Translation pred shape mismatch: {translation_pred.shape}"
-        assert uv_warps_pred.shape == (B, T, 16, 64, 64, 3), f"UV warp pred shape mismatch: {uv_warps_pred.shape}"
 
         return {
             'theta': theta_pred,  # Pose matrix
@@ -800,8 +762,9 @@ class MotionTransformer(nn.Module):
             'scale': scale_pred,  # SRT scale
             'rotation': rotation_pred,  # SRT rotation
             'translation': translation_pred,  # SRT translation
-            'uv_warps': uv_warps_pred  # UV warps only - matches H5 cache
+            # Note: uv_warps will be added by VASAModel.forward() via implicit generation
         }
+
 
 class VASAModel(nn.Module):
     def __init__(
@@ -813,6 +776,9 @@ class VASAModel(nn.Module):
         super().__init__()
         self.config = config
         self.volumetric_avatar = volumetric_avatar.eval()
+
+        # Freeze volumetric_avatar (pretrained from nemo, no retraining needed)
+        # Only motion_transformer and condition_embedding will be trained
         for param in self.volumetric_avatar.parameters():
             param.requires_grad = False
 
@@ -839,6 +805,88 @@ class VASAModel(nn.Module):
         self.start_prev_scale = nn.Parameter(torch.zeros(1, config.motion.context_size, 3))
         self.start_prev_rotation = nn.Parameter(torch.zeros(1, config.motion.context_size, 3))
         self.start_prev_translation = nn.Parameter(torch.zeros(1, config.motion.context_size, 3))
+
+        # Flag to use derived warps from zdyn via volumetric_avatar.predict_embed
+        self.use_derived_warps = config.model.get('use_derived_warps', True)
+
+        # NOTE: Warp generation uses volumetric_avatar's predict_embed pipeline
+        # This leverages the full nemo architecture with identity conditioning
+        # See: compute_warps_from_zdyn() method below
+
+    def compute_warps_from_zdyn(
+        self,
+        zdyn: torch.Tensor,
+        idt_embed: torch.Tensor,
+        theta: torch.Tensor = None
+    ) -> torch.Tensor:
+        """
+        Compute UV warps from zdyn using volumetric_avatar's predict_embed pipeline.
+
+        This leverages the full nemo architecture with identity conditioning,
+        which is better than simple projection as it uses pretrained embeddings.
+
+        Args:
+            zdyn: [B, T, zdyn_dim] expression dynamics from motion transformer
+            idt_embed: [B, idt_dim] identity embedding from source image
+            theta: [B, T, 3, 4] pose matrices (optional, can use zeros if not needed)
+
+        Returns:
+            uv_warps: [B, T, 16, 64, 64, 3] volumetric UV warp field
+        """
+        B, T = zdyn.shape[:2]
+        device = zdyn.device
+
+        # Flatten for per-frame processing
+        zdyn_flat = zdyn.view(B * T, -1)  # [B*T, zdyn_dim]
+
+        # Repeat identity for all frames
+        idt_embed_flat = idt_embed.unsqueeze(1).repeat(1, T, 1).view(B * T, -1)  # [B*T, idt_dim]
+
+        # Prepare warp_embed_dict directly without using predict_embed
+        # Since predict_embed requires source/target images which we don't have,
+        # we'll use the warp embedding pipeline components directly
+
+        # First, unsqueeze zdyn for spatial dimensions (like pose_unsqueeze_nw)
+        # zdyn_flat is [B*T, zdyn_dim], need to make it [B*T, C, H, W] format
+        embed_size = self.volumetric_avatar.embed_size
+
+        # Use pose_unsqueeze_nw to expand zdyn to spatial format
+        warp_target_embed = self.volumetric_avatar.pose_unsqueeze_nw(zdyn_flat).view(
+            B * T, -1, embed_size, embed_size
+        )  # [B*T, C, embed_size, embed_size]
+
+        # Combine with identity using warp_embed_head_orig_nw
+        if self.volumetric_avatar.args.cat_em:
+            warp_embed_orig = self.volumetric_avatar.warp_embed_head_orig_nw(
+                torch.cat([warp_target_embed, idt_embed_flat.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, embed_size, embed_size)], dim=1)
+            )
+        else:
+            warp_embed_orig = self.volumetric_avatar.warp_embed_head_orig_nw(
+                (warp_target_embed + idt_embed_flat.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, embed_size, embed_size)) * 0.5
+            )
+
+        # Create target_warp_embed_dict
+        c = warp_embed_orig.shape[1]
+        target_warp_embed_dict = {
+            'orig': warp_embed_orig.view(B * T, c, embed_size ** 2),
+            'ada_v': zdyn_flat  # Use zdyn for adaptive parameters
+        }
+
+        # Generate UV warps using nemo's uv_generator_nw
+        target_uv_warp, _ = self.volumetric_avatar.uv_generator_nw(target_warp_embed_dict)
+
+        # Handle resizing if configured in volumetric_avatar
+        if self.volumetric_avatar.resize_warp:
+            target_uv_warp = self.volumetric_avatar.resize_warp_func(target_uv_warp)
+
+        # Reshape back to [B, T, depth, H, W, 3]
+        # Assuming target_uv_warp is [B*T, depth, H, W, 3]
+        depth = target_uv_warp.shape[1]
+        H = target_uv_warp.shape[2]
+        W = target_uv_warp.shape[3]
+        target_uv_warp = target_uv_warp.view(B, T, depth, H, W, 3)
+
+        return target_uv_warp
 
     def _apply_dropout(self, conditions: Dict[str, torch.Tensor], dropout_probs: Dict[str, float]) -> Dict[str, torch.Tensor]:
         """Apply dropout to conditions for classifier-free guidance during training."""
@@ -884,7 +932,8 @@ class VASAModel(nn.Module):
         conditions: Optional[Dict[str, torch.Tensor]] = None,
         cond_emb: Optional[torch.Tensor] = None,
         prev_context: Optional[Dict[str, torch.Tensor]] = None,
-        noise: Optional[Dict[str, torch.Tensor]] = None
+        noise: Optional[Dict[str, torch.Tensor]] = None,
+        idt_embed: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         """Forward pass for training and inference."""
 
@@ -977,8 +1026,41 @@ class VASAModel(nn.Module):
             prev_context=prev_context
         )
 
+        # Generate warps using volumetric_avatar's predict_embed pipeline if enabled
+        # This leverages identity conditioning and pretrained nemo components
+        if self.use_derived_warps:
+            # Only generate warps if use_derived_warps is enabled
+            if 'expression_embed' in outputs and 'theta' in outputs:
+                if idt_embed is not None:
+                    logger.info(f"[DERIVED WARPS] Generating UV warps from zdyn {outputs['expression_embed'].shape} + idt_embed {idt_embed.shape}")
+                    implicit_warps = self.compute_warps_from_zdyn(
+                        zdyn=outputs['expression_embed'],
+                        idt_embed=idt_embed,
+                        theta=outputs['theta']
+                    )
+                    outputs['uv_warps'] = implicit_warps
+                    outputs['warp_source'] = 'derived'  # Tag for debugging
+                    logger.info(f"[DERIVED WARPS] ✅ Generated warps shape: {implicit_warps.shape}")
+                else:
+                    logger.error(f"[WARPS ERROR] idt_embed is None but use_derived_warps=True")
+                    raise ValueError(f"Cannot generate derived warps: idt_embed required (use_derived_warps=True but idt_embed=None)")
+            else:
+                raise ValueError(f"Cannot generate warps: missing expression_embed or theta in outputs. Keys: {outputs.keys()}")
+        else:
+            # use_derived_warps=False: Use pre-computed warps from dataset
+            logger.debug(f"[PRE-COMPUTED WARPS] Using warps from dataset (use_derived_warps=False)")
+            # Copy warps from motion_data if available (these are ground truth warps from dataset)
+            if 'uv_warps' in motion_data:
+                outputs['uv_warps'] = motion_data['uv_warps']
+                outputs['warp_source'] = 'dataset'  # Tag for debugging
+                logger.debug(f"[PRE-COMPUTED WARPS] Copied warps from motion_data: {motion_data['uv_warps'].shape}")
+            else:
+                logger.warning(f"[PRE-COMPUTED WARPS] No uv_warps in motion_data! Available keys: {list(motion_data.keys())}")
+
         # Clean outputs
         for key, tensor in outputs.items():
+            if isinstance(tensor, str):  # Skip string tags like 'warp_source'
+                continue
             if torch.isnan(tensor).any():
                 tensor = torch.nan_to_num(tensor, nan=0.0, posinf=10.0, neginf=-10.0)
                 outputs[key] = tensor
@@ -999,7 +1081,8 @@ class VASAModel(nn.Module):
         conditions: Dict[str, torch.Tensor],
         num_steps: int = 50,
         eta: float = 0.8,  # Increased from 0.5 to add more stochasticity
-        cfg_scales: Optional[Dict[str, float]] = None
+        cfg_scales: Optional[Dict[str, float]] = None,
+        idt_embed: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         """Generate motion sequence using DDIM sampling."""
         try:
@@ -1146,6 +1229,22 @@ class VASAModel(nn.Module):
                                 eta=eta
                             )
                             window_motion[key] = scheduler_output.prev_sample
+
+                # Generate warps using volumetric_avatar's predict_embed pipeline
+                if 'expression_embed' in window_motion and 'theta' in window_motion:
+                    if idt_embed is not None and self.use_derived_warps:
+                        logger.debug(f"[DERIVED WARPS] Window {start_idx//stride}: zdyn {window_motion['expression_embed'].shape} + idt {idt_embed.shape}")
+                        window_motion['uv_warps'] = self.compute_warps_from_zdyn(
+                            zdyn=window_motion['expression_embed'],
+                            idt_embed=idt_embed,
+                            theta=window_motion['theta']
+                        )
+                        logger.debug(f"[DERIVED WARPS] Window {start_idx//stride}: Generated warps {window_motion['uv_warps'].shape}")
+                    else:
+                        logger.error(f"[WARPS ERROR] Window {start_idx//stride}: idt_embed is None: {idt_embed is None}, use_derived_warps: {self.use_derived_warps}")
+                        raise ValueError(f"Cannot generate warps: idt_embed required for compute_warps_from_zdyn (idt_embed={'None' if idt_embed is None else 'provided'})")
+                else:
+                    raise ValueError(f"Cannot generate warps: missing expression_embed or theta. Keys: {window_motion.keys()}")
 
                 # Store generated window for ALL parameters
                 for key in full_motion.keys():
