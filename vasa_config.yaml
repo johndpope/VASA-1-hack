@@ -80,10 +80,10 @@ train:
   # To increase GPU utilization:
   # - Increase batch_size (e.g., from 28 to 56)
   # - This processes more windows per step but maintains temporal continuity
-  batch_size: 16               # Batch size for training
+  batch_size: 4               # Batch size for training
 
-  windows_per_batch: 8          # INCREASED from 4 to 8 to use more VRAM (was 4)
-  gradient_accumulation_steps: 2  # REDUCED from 4 to maintain effective batch size
+  windows_per_batch: 4          # INCREASED from 4 to 8 to use more VRAM (was 4)
+  gradient_accumulation_steps: 4  # REDUCED from 4 to maintain effective batch size
   num_epochs: 10000            # Reduced for quick testing
 
   beta1: 0.9
@@ -223,9 +223,9 @@ loss:
   lambda_emo_match: 0.0               # DISABLED to prevent static pull
   emo_match_type: 'combined'          # 'l1', 'l2', 'lpips', or 'combined'
   emo_cache_dir: 'cache_emo'          # Directory for cached EMO outputs
-  emo_keyframes_per_window: 5         # Number of keyframes to compare per window
   emo_match_start_epoch: 0            # Start EMO matching from epoch 0 for immediate quality
   emo_min_valid_frames: 0.1           # LOWERED for overfitting: Skip EMO matching when <10% frames are valid (was 0.5)
+  # Note: emo_keyframes_per_window moved to dataset section below
 
   # Disentanglement loss configuration
   disentangle_num_pairs: 3           # Number of frame pairs to sample for l_consist
@@ -244,8 +244,9 @@ loss:
   
   # Frame generation for disentanglement losses and visualization
   use_sparse_frames: false    # If true, only generate first and last frame (saves 90% memory)
-  enable_frame_generation: true  # Generate frames for visualization even if disentanglement losses are disabled
-  
+  enable_frame_generation: true   # Enable frame generation for control losses (gaze, blink, emotion)
+  save_debug_frames: false    # Save generated frames to debug_generated_frames/ directory (slows training, creates many files)
+
   warmup_epochs: 0            # No warmup for overfitting
   
   # Loss scheduling
@@ -291,7 +292,8 @@ dataset:
   # EMO generation settings
   generate_emo_frames: true   # Generate EMO frames for quality comparison
   emo_identity_path: "nemo/data/IMG_1.png"  # Same identity image for EMO generation
-  emo_keyframes_per_window: 5  # Generate 5 EMO frames per window for comparison
+  emo_keyframes_per_window: 50  # Generate 50 EMO reference frames per window during preprocessing
+                                # NOTE: Aligned with vis_freq=50 so frame generation happens every 50 steps for control losses
   use_single_bucket: true     # Use single-bucket caching for all windows
 
   # Quality filtering
@@ -340,7 +342,8 @@ audio:
 vis:
   save_videos: true
   save_frames: false
-  vis_freq: 5                 # More frequent visualization
+  vis_freq: 50                # Visualize every 50 steps (reduced from 5 to save VRAM)
+                            # NOTE: Aligned with emo_keyframes_per_window=50 to enable control losses on vis steps
   num_vis_samples: 4
 
 # Logging configuration

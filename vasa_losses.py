@@ -228,6 +228,9 @@ class VASALossModule:
         self.lambda_warp_tv = getattr(config.loss, 'lambda_warp_tv', 0.05)  # Total variation regularization
         self.lambda_warp_magnitude = getattr(config.loss, 'lambda_warp_magnitude', 5.0)  # UV warp magnitude matching
 
+        # Check if using derived warps (disable warp loss if true)
+        self.use_derived_warps = getattr(config.model, 'use_derived_warps', False)
+
         # Initialize identity feature extractor for cross-id loss
         try:
             from facenet_pytorch import InceptionResnetV1
@@ -622,17 +625,22 @@ class VASALossModule:
                 logger.debug(f"  Expression std: {expr_std.item():.6f}")
 
             # 2. Warp Regularization Loss
-            logger.debug("\nComputing warp regularization losses:")
-            # Check for any warp fields (UV warps is our main one now)
-            if ('uv_warps' in outputs and 'uv_warps' in targets) or \
-               ('xy_warps' in outputs and 'xy_warps' in targets) or \
-               ('rigid_warps' in outputs and 'rigid_warps' in targets):
-                warp_losses = self._compute_warp_regularization_losses(outputs, targets)
-                losses.update(warp_losses)
-                logger.debug("Warp regularization losses:")
-                for k, v in warp_losses.items():
-                    if isinstance(v, torch.Tensor):
-                        logger.debug(f"  {k}: {v.item():.6f}")
+            # SKIP warp losses when using derived warps - they're generated from frozen networks
+            # so comparing to dataset warps is meaningless. Expression loss is what matters.
+            if not self.use_derived_warps:
+                logger.debug("\nComputing warp regularization losses:")
+                # Check for any warp fields (UV warps is our main one now)
+                if ('uv_warps' in outputs and 'uv_warps' in targets) or \
+                   ('xy_warps' in outputs and 'xy_warps' in targets) or \
+                   ('rigid_warps' in outputs and 'rigid_warps' in targets):
+                    warp_losses = self._compute_warp_regularization_losses(outputs, targets)
+                    losses.update(warp_losses)
+                    logger.debug("Warp regularization losses:")
+                    for k, v in warp_losses.items():
+                        if isinstance(v, torch.Tensor):
+                            logger.debug(f"  {k}: {v.item():.6f}")
+            else:
+                logger.debug("\n⚠️ SKIPPING warp losses (using derived warps from frozen networks)")
 
             # 3. Expression Verification Loss
             logger.debug("\nChecking verification loss conditions:")
@@ -2440,9 +2448,9 @@ class VASALossModule:
             if abs(frames_mean) < 0.01 and frames_max < 0.1:
                 logger.error(f"🚨 Generated frames appear EMPTY/BLACK - all values near zero!")
 
-            # Sample frames for extraction
-            num_samples = min(5, T)
-            sample_indices = torch.linspace(0, T-1, num_samples, dtype=torch.long)
+            # Sample frames for extraction - process all frames for accurate control losses
+            num_samples = T  # Process all frames (was limited to 5)
+            sample_indices = torch.arange(0, T, dtype=torch.long)  # All frame indices
 
             landmark_keys = ['lips', 'right_eye', 'left_eye', 'jaw', 'nose']
             pred_landmarks = {k: [] for k in landmark_keys}
@@ -2452,70 +2460,72 @@ class VASALossModule:
 
             logger.debug(f"Extracting features from {num_samples} frames at indices: {sample_indices.tolist()}")
 
-            # Save generated frames for debugging with detailed statistics
-            debug_dir = "debug_generated_frames"
-            import os
-            os.makedirs(debug_dir, exist_ok=True)
-            for i, t_idx in enumerate(sample_indices):
-                frame_debug = generated_frames[0, t_idx].detach().cpu()
-                if frame_debug.shape[0] == 3:  # [C, H, W]
-                    from torchvision.utils import save_image
+            # Optional: Save generated frames for debugging (configurable)
+            save_debug_frames = getattr(self.config.loss, 'save_debug_frames', False)
+            if save_debug_frames:
+                debug_dir = "debug_generated_frames"
+                import os
+                os.makedirs(debug_dir, exist_ok=True)
+                for i, t_idx in enumerate(sample_indices):
+                    frame_debug = generated_frames[0, t_idx].detach().cpu()
+                    if frame_debug.shape[0] == 3:  # [C, H, W]
+                        from torchvision.utils import save_image
 
-                    # Detailed frame statistics
-                    frame_min = frame_debug.min().item()
-                    frame_max = frame_debug.max().item()
-                    frame_mean = frame_debug.mean().item()
-                    frame_std = frame_debug.std().item()
+                        # Detailed frame statistics
+                        frame_min = frame_debug.min().item()
+                        frame_max = frame_debug.max().item()
+                        frame_mean = frame_debug.mean().item()
+                        frame_std = frame_debug.std().item()
 
-                    # Check if frame is nearly black/empty (very low variance or all near zero)
-                    is_black = frame_std < 0.01 or (frame_max - frame_min) < 0.05
-                    is_nearly_zero = abs(frame_mean) < 0.01
+                        # Check if frame is nearly black/empty (very low variance or all near zero)
+                        is_black = frame_std < 0.01 or (frame_max - frame_min) < 0.05
+                        is_nearly_zero = abs(frame_mean) < 0.01
 
-                    logger.info(f"📊 Frame {i} (t={t_idx}) stats: min={frame_min:.3f}, max={frame_max:.3f}, mean={frame_mean:.3f}, std={frame_std:.3f}")
-                    if is_black:
-                        logger.warning(f"⚠️ Frame {i} appears BLACK (low variance: {frame_std:.4f})")
-                    if is_nearly_zero:
-                        logger.warning(f"⚠️ Frame {i} appears EMPTY (near-zero mean: {frame_mean:.4f})")
+                        logger.info(f"📊 Frame {i} (t={t_idx}) stats: min={frame_min:.3f}, max={frame_max:.3f}, mean={frame_mean:.3f}, std={frame_std:.3f}")
+                        if is_black:
+                            logger.warning(f"⚠️ Frame {i} appears BLACK (low variance: {frame_std:.4f})")
+                        if is_nearly_zero:
+                            logger.warning(f"⚠️ Frame {i} appears EMPTY (near-zero mean: {frame_mean:.4f})")
 
-                    # If frame is in [-1, 1] range, convert to [0, 1]
-                    if frame_min < 0:
-                        frame_debug = (frame_debug + 1.0) / 2.0
+                        # If frame is in [-1, 1] range, convert to [0, 1]
+                        if frame_min < 0:
+                            frame_debug = (frame_debug + 1.0) / 2.0
 
-                    # Remove green screen background (chroma key)
-                    # Convert to numpy for processing [C, H, W] -> [H, W, C]
-                    frame_np = frame_debug.permute(1, 2, 0).numpy()
+                        # Remove green screen background (chroma key)
+                        # Convert to numpy for processing [C, H, W] -> [H, W, C]
+                        frame_np = frame_debug.permute(1, 2, 0).numpy()
 
-                    # Convert to uint8 for OpenCV
-                    import cv2
-                    frame_bgr = (frame_np * 255).clip(0, 255).astype(np.uint8)
-                    frame_bgr = cv2.cvtColor(frame_bgr, cv2.COLOR_RGB2BGR)
-                    frame_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+                        # Convert to uint8 for OpenCV
+                        import cv2
+                        frame_bgr = (frame_np * 255).clip(0, 255).astype(np.uint8)
+                        frame_bgr = cv2.cvtColor(frame_bgr, cv2.COLOR_RGB2BGR)
+                        frame_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
 
-                    # Green color range in HSV for chroma keying
-                    lower_green = np.array([35, 40, 40])   # Lower bound for green
-                    upper_green = np.array([85, 255, 255]) # Upper bound for green
+                        # Green color range in HSV for chroma keying
+                        lower_green = np.array([35, 40, 40])   # Lower bound for green
+                        upper_green = np.array([85, 255, 255]) # Upper bound for green
 
-                    # Create mask for green pixels
-                    green_mask = cv2.inRange(frame_hsv, lower_green, upper_green)
+                        # Create mask for green pixels
+                        green_mask = cv2.inRange(frame_hsv, lower_green, upper_green)
 
-                    # Create alpha channel (255 where not green, 0 where green)
-                    alpha = 255 - green_mask
+                        # Create alpha channel (255 where not green, 0 where green)
+                        alpha = 255 - green_mask
 
-                    # Convert back to RGB
-                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                        # Convert back to RGB
+                        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
-                    # Add alpha channel [H, W, 4]
-                    frame_rgba = np.dstack([frame_rgb, alpha])
+                        # Add alpha channel [H, W, 4]
+                        frame_rgba = np.dstack([frame_rgb, alpha])
 
-                    # Convert back to tensor [4, H, W] and normalize to [0, 1]
-                    frame_debug = torch.from_numpy(frame_rgba).permute(2, 0, 1).float() / 255.0
+                        # Convert back to tensor [4, H, W] and normalize to [0, 1]
+                        frame_debug = torch.from_numpy(frame_rgba).permute(2, 0, 1).float() / 255.0
 
-                    save_path = f"{debug_dir}/frame_{i}_idx{t_idx}.png"
-                    save_image(frame_debug, save_path)
+                        save_path = f"{debug_dir}/frame_{i}_idx{t_idx}.png"
+                        save_image(frame_debug, save_path)
 
-                    # Log file size to correlate with quality
-                    file_size = os.path.getsize(save_path) / 1024  # KB
-                    logger.info(f"💾 Saved {save_path} ({file_size:.1f} KB) with alpha channel")
+                        # Log file size to correlate with quality
+                        file_size = os.path.getsize(save_path) / 1024  # KB
+                        logger.info(f"💾 Saved {save_path} ({file_size:.1f} KB) with alpha channel")
 
             # Track which indices successfully extracted features
             successful_indices = []

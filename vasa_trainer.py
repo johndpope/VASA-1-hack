@@ -756,6 +756,33 @@ class VASATrainer:
         else:
             logger.info("Using pre-computed warps from dataset")
 
+        # Pre-compute identity embedding once for derived warps (MEMORY OPTIMIZATION)
+        self.idt_embed = None
+        if self.use_derived_warps and self.identity_image is not None:
+            with torch.no_grad():
+                identity_img = self.identity_image.to(self.accelerator.device)
+
+                # Get face mask
+                identity_mask, _, _, _ = self.model.volumetric_avatar.face_idt.forward(identity_img)
+                identity_mask = (identity_mask > 0.6).float()
+                identity_mask = torch.nn.functional.avg_pool2d(identity_mask, 3, stride=1, padding=1)
+
+                # Mask identity image
+                masked_identity = identity_img * identity_mask
+
+                # Extract identity embedding (spatial feature map)
+                idt_embed_spatial = self.model.volumetric_avatar.idt_embedder_nw(masked_identity)
+
+                # Convert to vector via global average pooling
+                self.idt_embed = torch.nn.functional.adaptive_avg_pool2d(
+                    idt_embed_spatial, (1, 1)
+                ).squeeze(-1).squeeze(-1)  # [1, 512]
+
+                logger.info(f"✅ Pre-computed identity embedding: {self.idt_embed.shape}")
+
+                # Clean up
+                del identity_img, identity_mask, masked_identity, idt_embed_spatial
+
         # Initialize MotionSequenceHandler
         self.motion_handler = MotionSequenceHandler(
             window_size=config.motion.window_size,
@@ -1230,53 +1257,28 @@ class VASATrainer:
                                     logger.error(f"audio_features missing after dropout! Keys: {list(control_signals.keys())}")
                                     raise ValueError("audio_features removed by dropout - this should never happen!")
 
-                            # Compute identity embedding from identity image for derived warps
-                            idt_embed = None
-                            if self.use_derived_warps:
-                                # Get source image for identity embedding
-                                if self.identity_image is not None:
-                                    identity_frame = self.identity_image.to(self.accelerator.device)  # [1, C, H, W]
-                                else:
-                                    # Use first frame from window
-                                    target_frames_temp = window.get('frames', None)
-                                    if target_frames_temp is not None:
-                                        identity_frame = target_frames_temp[0:1, 0]  # [1, C, H, W]
-                                    else:
-                                        logger.error("[IDT_EMBED] No identity image or frames available!")
-                                        identity_frame = None
-
-                                if identity_frame is not None:
+                            # Use pre-computed identity embedding for derived warps (MEMORY OPTIMIZATION)
+                            idt_embed = self.idt_embed if self.use_derived_warps else None
+                            if self.use_derived_warps and idt_embed is None:
+                                logger.warning("[IDT_EMBED] Pre-computed idt_embed not available, falling back to runtime computation")
+                                # Fallback: compute from first frame if needed
+                                target_frames_temp = window.get('frames', None)
+                                if target_frames_temp is not None:
+                                    identity_frame = target_frames_temp[0:1, 0]  # [1, C, H, W]
                                     with torch.no_grad():
-                                        # Get face mask
                                         identity_mask, _, _, _ = self.model.volumetric_avatar.face_idt.forward(identity_frame)
                                         identity_mask = (identity_mask > 0.6).float()
                                         identity_mask = torch.nn.functional.avg_pool2d(identity_mask, 3, stride=1, padding=1)
-
-                                        # Mask source image
                                         masked_identity = identity_frame * identity_mask
+                                        idt_embed_spatial = self.model.volumetric_avatar.idt_embedder_nw(masked_identity)
+                                        idt_embed = torch.nn.functional.adaptive_avg_pool2d(
+                                            idt_embed_spatial, (1, 1)
+                                        ).squeeze(-1).squeeze(-1)
+                                        logger.debug(f"[IDT_EMBED] Computed fallback idt_embed: {idt_embed.shape}")
 
-                                        # Extract identity embedding (returns 4D spatial feature map)
-                                        idt_embed_spatial = self.model.volumetric_avatar.idt_embedder_nw(masked_identity)  # [B, C, H, W]
-
-                                        # Convert spatial feature map to feature vector via global average pooling
-                                        # This matches what nemo expects: [B, idt_dim]
-                                        idt_embed = torch.nn.functional.adaptive_avg_pool2d(idt_embed_spatial, (1, 1)).squeeze(-1).squeeze(-1)  # [B, C]
-                                        logger.debug(f"[IDT_EMBED] ✅ Computed idt_embed from identity image: {idt_embed.shape}")
-                                else:
-                                    logger.error("[IDT_EMBED] ❌ Could not get identity frame!")
-
-                            # Forward pass with CFG during inference
-                            outputs = self.model(
-                                motion_data=noised_motion,  # Use noised motion
-                                noise_level=t,              # Pass timestep
-                                conditions=control_signals,
-                                noise=noise,                # Pass noise for loss computation
-                                idt_embed=idt_embed         # Pass identity for derived warps
-                            )
-                            
                             # Get actual frames from the window data for disentanglement loss
                             target_frames = window.get('frames', None)  # Get frames from dataset
-                            
+
                             # Generate frames if we have disentanglement losses enabled
                             # OPTIMIZATION: Only generate the 2 frames needed for disentanglement loss
                             # Note: VASA paper doesn't specify needing all frames for these losses,
@@ -1285,12 +1287,35 @@ class VASATrainer:
                             use_sparse_frames = getattr(self.config.loss, 'use_sparse_frames', False)  # Read from config, default to False
                             enable_frame_generation = getattr(self.config.loss, 'enable_frame_generation', False)  # Read from config
 
+                            # Determine if this is a visualization step
+                            # MEMORY OPTIMIZATION: Skip warp generation during normal training
+                            is_vis_step = (self.global_step % self.config.vis.vis_freq == 0)
+
                             # Generate frames if:
                             # 1. Disentanglement losses are enabled (lambda_consist > 0 or lambda_cross_id > 0)
                             # 2. OR frame generation is explicitly enabled for visualization
+                            # 3. OR this is a visualization step (for control losses and logging)
                             needs_frames = (self.config.loss.lambda_consist > 0 or
                                           self.config.loss.lambda_cross_id > 0 or
-                                          enable_frame_generation)
+                                          enable_frame_generation or
+                                          is_vis_step)  # Enable frames on vis steps for control losses
+
+                            # Only generate warps when frames are needed
+                            needs_warps = needs_frames
+
+                            # Log frame generation decision on vis steps
+                            if is_vis_step:
+                                logger.info(f"[VIS STEP {self.global_step}] Generating frames for control losses and visualization (vis_freq={self.config.vis.vis_freq})")
+
+                            # Forward pass with CFG during inference
+                            outputs = self.model(
+                                motion_data=noised_motion,  # Use noised motion
+                                noise_level=t,              # Pass timestep
+                                conditions=control_signals,
+                                noise=noise,                # Pass noise for loss computation
+                                idt_embed=idt_embed,        # Pass identity for derived warps
+                                generate_warps=needs_warps  # Only generate warps when needed (saves VRAM)
+                            )
 
                             if needs_frames and target_frames is not None:
                                 try:
@@ -1672,14 +1697,19 @@ class VASATrainer:
                                                             single_motion[key] = stored_outputs[key][:, frame_idx:frame_idx+1].to(device)
                                                         else:
                                                             single_motion[key] = stored_outputs[key] if not isinstance(stored_outputs[key], torch.Tensor) else stored_outputs[key].to(device)
-                                                
-                                                # Generate single frame only using bridge
-                                                single_frame_generated, _ = self.va_bridge.generate_frames_from_motion(
-                                                    motion_outputs=single_motion,
-                                                    source_img=source_img,
-                                                    use_black_background=True  # Use black background for thumbnails
-                                                )
-                                                single_frame_generated = single_frame_generated.detach()
+
+                                                # Check if we have uv_warps (required for frame generation)
+                                                if 'uv_warps' not in single_motion:
+                                                    logger.debug("Skipping thumbnail generation - no warps available (non-vis step)")
+                                                    single_frame_generated = None
+                                                else:
+                                                    # Generate single frame only using bridge
+                                                    single_frame_generated, _ = self.va_bridge.generate_frames_from_motion(
+                                                        motion_outputs=single_motion,
+                                                        source_img=source_img,
+                                                        use_black_background=True  # Use black background for thumbnails
+                                                    )
+                                                    single_frame_generated = single_frame_generated.detach()
                                                 
                                                 # Clear memory immediately
                                                 del single_motion
@@ -2524,12 +2554,12 @@ class VASATrainer:
     def _generate_synced_frames(self, identity_image: torch.Tensor, motion_outputs: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
         Generate synchronized frames using extracted features and motion parameters.
-        Computes canonical volume once and reuses it for the entire sequence.
-        
+        Uses proper non-rigid warps from compute_warps_from_zdyn.
+
         Args:
             identity_image: Source identity image tensor [B, C, H, W] or [C, H, W]
             motion_outputs: Dictionary containing predicted motion parameters
-            
+
         Returns:
             Generated frames tensor [B, T, C, H, W]
         """
@@ -2537,86 +2567,85 @@ class VASATrainer:
             # Ensure identity_image has batch dimension
             if len(identity_image.shape) == 3:
                 identity_image = identity_image.unsqueeze(0)
-            
+
             # Get dimensions
             motion_batch_size = motion_outputs['theta'].size(0)
             seq_len = motion_outputs['theta'].size(1)
+            device = identity_image.device
             logger.debug(f"Motion batch size: {motion_batch_size}, sequence length: {seq_len}")
-            
+
+            # Use pre-computed identity embedding (MEMORY OPTIMIZATION)
+            # We always have this from initialization if using derived warps
+            if self.idt_embed is None:
+                raise ValueError("idt_embed not pre-computed! This should be set during trainer initialization.")
+
+            idt_embed = self.idt_embed
+            logger.debug(f"Using pre-computed idt_embed: {idt_embed.shape}")
+
             # Compute canonical volume once
             try:
                 # Extract features for first image only
                 canonical_volume = self._extract_features_and_embeddings({
                     'source_img': identity_image[0:1]
                 })
-                
+
                 # Expand to match batch size
                 canonical_volume = canonical_volume.expand(motion_batch_size, -1, -1, -1, -1)
                 logger.debug(f"Expanded canonical volume shape: {canonical_volume.shape}")
-                
+
                 # Initialize list for generated frames
                 generated_frames = []
-                
-                # Create sampling grid once
-                device = canonical_volume.device
-                grid_s = torch.linspace(-1, 1, self.model.volumetric_avatar.args.latent_volume_size)
-                grid_z = torch.linspace(-1, 1, self.model.volumetric_avatar.args.latent_volume_depth)
-                w, v, u = torch.meshgrid(grid_z, grid_s, grid_s, indexing='ij')
-                e = torch.ones_like(u)
-                identity_grid_3d = torch.stack([u, v, w, e], dim=3).view(1, -1, 4).to(device)
-                grid = identity_grid_3d.expand(motion_batch_size, -1, -1)
-                
+
                 # Process each timestep
                 for t in range(seq_len):
                     # Get motion parameters for current timestep
-                    curr_theta = motion_outputs['theta'][:, t]  # [B, 3, 4]
-                    curr_expression = motion_outputs['expression_embed'][:, t]
-                    
-                    # Apply rotation transform
-                    target_rotation_warp = grid.bmm(curr_theta[:, :3].transpose(1, 2)).view(
-                        motion_batch_size,
-                        self.model.volumetric_avatar.args.latent_volume_depth,
-                        self.model.volumetric_avatar.args.latent_volume_size,
-                        self.model.volumetric_avatar.args.latent_volume_size,
-                        3
-                    )
-                    
-                    # Apply warping to canonical volume
-                    warped_volume = self.model.volumetric_avatar.grid_sample(canonical_volume, target_rotation_warp)
-                    
+                    curr_theta = motion_outputs['theta'][:, t:t+1]  # [B, 1, 3, 4] - keep T dim
+                    curr_expression = motion_outputs['expression_embed'][:, t:t+1]  # [B, 1, 128]
+
+                    # Generate proper non-rigid warps using nemo's pipeline
+                    uv_warp = self.model.compute_warps_from_zdyn(
+                        zdyn=curr_expression,  # [B, 1, 128]
+                        idt_embed=idt_embed,   # [1, 512]
+                        theta=curr_theta       # [B, 1, 3, 4]
+                    )  # Returns [B, 1, 16, 64, 64, 3]
+
+                    # Remove T dimension and get single timestep warp
+                    uv_warp = uv_warp[:, 0]  # [B, 16, 64, 64, 3]
+
+                    # Apply non-rigid UV warping to canonical volume
+                    warped_volume = self.model.volumetric_avatar.grid_sample(canonical_volume, uv_warp)
+
                     # Reshape for decoder
                     c = self.model.volumetric_avatar.args.latent_volume_channels
                     d = self.model.volumetric_avatar.args.latent_volume_depth
                     s = self.model.volumetric_avatar.args.latent_volume_size
                     latent_feats = warped_volume.view(motion_batch_size, c * d, s, s)
-                    
+
                     # Generate frame using decoder
                     frame, _, _, _ = self.model.volumetric_avatar.decoder_nw(
-                        {'expression_embed': curr_expression},
+                        {'expression_embed': curr_expression[:, 0]},  # Remove T dim for decoder
                         None,
                         latent_feats,
                         False
                     )
-                    
-                    save_image(frame[0], f"frame_{t}.png")
+
                     # Save frame (detach to avoid memory leak)
                     generated_frames.append(frame.detach())
-                    
-                    # Clear warped volume to free memory
-                    del warped_volume
-                    del latent_feats
-                    torch.cuda.empty_cache()
-                
+
+                    # Clear intermediate tensors to free memory
+                    del uv_warp, warped_volume, latent_feats
+
                 # Stack frames along time dimension [B, T, C, H, W]
                 generated_frames = torch.stack(generated_frames, dim=1)
                 logger.debug(f"Final generated frames shape: {generated_frames.shape}")
-                
+
                 return generated_frames
-                
+
             finally:
                 # Clean up canonical volume
                 del canonical_volume
-                torch.cuda.empty_cache()
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
 
         except Exception as e:
             logger.error(f"Error generating synced frames: {str(e)}")
@@ -3563,7 +3592,7 @@ if __name__ == "__main__":
         # EMO generation parameters
         generate_emo_frames=config.dataset.get('generate_emo_frames', False),
         emo_identity_path=config.dataset.get('emo_identity_path', 'nemo/data/IMG_1.png'),
-        emo_keyframes_per_window=config.dataset.get('emo_keyframes_per_window', 5),
+        emo_keyframes_per_window=config.dataset.get('emo_keyframes_per_window', 50),
         va_bridge=va_bridge_for_dataset
     )
 

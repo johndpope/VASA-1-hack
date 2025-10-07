@@ -245,7 +245,7 @@ loss:
   # Frame generation for disentanglement losses and visualization
   use_sparse_frames: false    # If true, only generate first and last frame (saves 90% memory)
   enable_frame_generation: true  # Generate frames for visualization even if disentanglement losses are disabled
-  
+  save_debug_frames: true  
   warmup_epochs: 0            # No warmup for overfitting
   
   # Loss scheduling

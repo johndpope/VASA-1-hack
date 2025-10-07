@@ -847,8 +847,9 @@ class VASAModel(nn.Module):
         # Flatten for per-frame processing
         zdyn_flat = zdyn.view(B * T, -1)  # [B*T, zdyn_dim]
 
-        # Repeat identity for all frames
-        idt_embed_flat = idt_embed.unsqueeze(1).repeat(1, T, 1).view(B * T, -1)  # [B*T, idt_dim]
+        # Repeat identity for all frames (detach since it's pre-computed with no_grad)
+        # This prevents gradients flowing to frozen identity embedder
+        idt_embed_flat = idt_embed.detach().unsqueeze(1).repeat(1, T, 1).view(B * T, -1)  # [B*T, idt_dim]
 
         # Prepare warp_embed_dict directly without using predict_embed
         # Since predict_embed requires source/target images which we don't have,
@@ -863,15 +864,21 @@ class VASAModel(nn.Module):
             B * T, -1, embed_size, embed_size
         )  # [B*T, C, embed_size, embed_size]
 
+        # Expand identity embed spatially (reuse to avoid recreating)
+        idt_spatial = idt_embed_flat.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, embed_size, embed_size)
+
         # Combine with identity using warp_embed_head_orig_nw
         if self.volumetric_avatar.args.cat_em:
             warp_embed_orig = self.volumetric_avatar.warp_embed_head_orig_nw(
-                torch.cat([warp_target_embed, idt_embed_flat.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, embed_size, embed_size)], dim=1)
+                torch.cat([warp_target_embed, idt_spatial], dim=1)
             )
         else:
             warp_embed_orig = self.volumetric_avatar.warp_embed_head_orig_nw(
-                (warp_target_embed + idt_embed_flat.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, embed_size, embed_size)) * 0.5
+                (warp_target_embed + idt_spatial) * 0.5
             )
+
+        # Free intermediate tensors
+        del warp_target_embed, idt_spatial, idt_embed_flat
 
         # Create target_warp_embed_dict
         c = warp_embed_orig.shape[1]
@@ -880,12 +887,20 @@ class VASAModel(nn.Module):
             'ada_v': zdyn_flat  # Use zdyn for adaptive parameters
         }
 
+        # Free warp_embed_orig after creating dict (dict holds a view)
+        del warp_embed_orig
+
         # Generate UV warps using nemo's uv_generator_nw
         target_uv_warp, _ = self.volumetric_avatar.uv_generator_nw(target_warp_embed_dict)
 
+        # Free dict after use
+        del target_warp_embed_dict
+
         # Handle resizing if configured in volumetric_avatar
         if self.volumetric_avatar.resize_warp:
+            old_warp = target_uv_warp
             target_uv_warp = self.volumetric_avatar.resize_warp_func(target_uv_warp)
+            del old_warp
 
         # Reshape back to [B, T, depth, H, W, 3]
         # Assuming target_uv_warp is [B*T, depth, H, W, 3]
@@ -941,9 +956,15 @@ class VASAModel(nn.Module):
         cond_emb: Optional[torch.Tensor] = None,
         prev_context: Optional[Dict[str, torch.Tensor]] = None,
         noise: Optional[Dict[str, torch.Tensor]] = None,
-        idt_embed: Optional[torch.Tensor] = None
+        idt_embed: Optional[torch.Tensor] = None,
+        generate_warps: bool = False  # Only generate warps when needed (visualization/frame generation)
     ) -> Dict[str, torch.Tensor]:
-        """Forward pass for training and inference."""
+        """Forward pass for training and inference.
+
+        Args:
+            generate_warps: If True, generate UV warps (expensive). Only needed for visualization
+                           or frame generation. Skip during normal training to save VRAM.
+        """
 
         # Validate and clean motion data - CREATE A COPY to avoid modifying original
         motion_data = {k: v.clone() for k, v in motion_data.items()}  # Clone to avoid modifying dataset
@@ -1036,8 +1057,10 @@ class VASAModel(nn.Module):
 
         # Generate warps using volumetric_avatar's predict_embed pipeline if enabled
         # This leverages identity conditioning and pretrained nemo components
-        if self.use_derived_warps:
-            # Only generate warps if use_derived_warps is enabled
+        # IMPORTANT: Only generate warps when explicitly requested (generate_warps=True)
+        # This saves massive VRAM during training when warps are only needed for visualization
+        if self.use_derived_warps and generate_warps:
+            # Only generate warps if use_derived_warps is enabled AND generate_warps=True
             if 'expression_embed' in outputs and 'theta' in outputs:
                 if idt_embed is not None:
                     logger.info(f"[DERIVED WARPS] Generating UV warps from zdyn {outputs['expression_embed'].shape} + idt_embed {idt_embed.shape}")
@@ -1054,6 +1077,8 @@ class VASAModel(nn.Module):
                     raise ValueError(f"Cannot generate derived warps: idt_embed required (use_derived_warps=True but idt_embed=None)")
             else:
                 raise ValueError(f"Cannot generate warps: missing expression_embed or theta in outputs. Keys: {outputs.keys()}")
+        elif self.use_derived_warps and not generate_warps:
+            logger.debug(f"[DERIVED WARPS] Skipping warp generation (generate_warps=False)")
         else:
             # use_derived_warps=False: Use pre-computed warps from dataset
             logger.debug(f"[PRE-COMPUTED WARPS] Using warps from dataset (use_derived_warps=False)")

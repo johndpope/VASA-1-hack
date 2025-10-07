@@ -278,7 +278,7 @@ def main():
         use_single_bucket=True,  # Use SingleBucketCache for preprocessing
         generate_emo_frames=True,  # Enable EMO frame generation
         emo_identity_path="nemo/data/IMG_1.png",  # Identity image
-        emo_keyframes_per_window=5,  # 5 keyframes per window
+        emo_keyframes_per_window=50,  # 50 keyframes per window
         va_bridge=va_bridge  # Pass the bridge
     )
 
