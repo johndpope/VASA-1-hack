@@ -650,7 +650,9 @@ class VASAInference:
                 logger.info(f"Motion variation - Expression: {expr_var:.6f}, Theta: {theta_var:.6f}, Rotation: {rot_var:.6f}")
 
                 # Generate frames for this window
-                for t in range(motion_sequence['expression_embed'].size(1)):
+                # Skip overlapping frames for windows after the first
+                start_idx = 0 if window_idx == 0 else self.stride
+                for t in range(start_idx, motion_sequence['expression_embed'].size(1)):
                     # Get current motion parameters
                     curr_expression = motion_sequence['expression_embed'][:, t]
                     curr_theta = motion_sequence['theta'][:, t]
