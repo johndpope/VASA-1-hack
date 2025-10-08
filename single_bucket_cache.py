@@ -111,6 +111,10 @@ class SingleBucketCache:
                                 elif isinstance(meta_value, (list, dict)):
                                     meta_group.attrs[meta_key] = json.dumps(meta_value)
 
+                            # Also save video_path as top-level attribute for easy filtering
+                            if 'video_path' in value:
+                                window_group.attrs['video_path'] = value['video_path']
+
                         elif key == 'lip_metrics':
                             # Handle nested lip metrics
                             lip_group = window_group.create_group('lip_metrics')
@@ -477,7 +481,7 @@ class SingleBucketCache:
                     else:
                         # Check essential keys
                         window = f[window_key]
-                        essential_keys = ['frames', 'audio_features', 'gaze', 'emotion']
+                        essential_keys = ['identity_frame', 'audio_features', 'gaze', 'emotion']
                         for key in essential_keys:
                             if key not in window:
                                 issues.append(f"Window {i} missing key: {key}")

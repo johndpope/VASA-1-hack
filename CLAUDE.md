@@ -46,6 +46,57 @@
 - ✅ Including previous audio features in context
 - ⚠️ May need to adjust concatenation strategy to match JoyVASA
 
+### Expression Audit Tool
+
+#### Purpose
+Diagnose training issues by comparing ground truth expressions vs model predictions frame-by-frame.
+
+#### Quick Start
+```bash
+./audit.sh  # Interactive menu
+```
+
+Or direct:
+```bash
+python audit_expressions.py \
+    --video junk/videovideoeI2V8Bd5X9s-scene6_scene1.mp4 \
+    --identity ./data/IMG_1.png \
+    --config overfit_config.yaml \
+    --checkpoint checkpoints_overfit/best_checkpoint.pt \
+    --output-dir expression_audit
+```
+
+#### What It Analyzes
+1. **Expression L2 Distance** - Per-frame difference in expression embeddings
+   - Target: < 1.0 for good overfitting
+   - Current: ~5.5 (model NOT overfitting yet)
+
+2. **Theta L2 Distance** - Per-frame head pose difference
+   - Target: < 0.3 for good overfitting
+   - Current: ~1.5 (poor pose matching)
+
+3. **Audio Alignment** - Verifies identical audio features used
+   - Should be: 0.000000 ✅
+   - Confirms audio preprocessing is correct
+
+#### Current Findings (Epoch 226)
+- ❌ **Model is NOT overfitting** despite 226 epochs
+- ❌ Expression L2: 5.54 (should be < 1.0)
+- ❌ Theta L2: 1.50 (should be < 0.3)
+- ✅ Audio features identical (preprocessing correct)
+
+**Root causes**:
+1. Model capacity too small (12.5M vs 29M target)
+2. Loss weights may need tuning
+3. Learning rate may be too high
+4. Need more training epochs
+
+#### Output Files
+- `expression_comparison.png` - Visualization with 3 subplots showing L2 distances over time
+- `expression_metrics.csv` - Per-frame metrics for detailed analysis
+
+See `AUDIT_TOOL_README.md` for full documentation.
+
 ### Known Issues
 
 #### 1. Wandb Visualization

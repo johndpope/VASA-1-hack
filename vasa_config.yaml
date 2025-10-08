@@ -55,7 +55,7 @@ motion:
     
   # Mixed precision training
   amp: true                   # Whether to use automatic mixed precision
-  scaler_growth: 2.0          # Gradient scaler growth rate
+
 
 # Training parameters - OVERFITTING FOCUSED
 train:
@@ -175,22 +175,22 @@ loss:
   lambda_blink: 0.1           # Will ramp to 2.0
 
   # Stage 3: Eye Gaze (unlocks at epoch 15 if blink < 0.15)
-  lambda_gaze_direction: 0.1  # Will ramp to 1.5
+  lambda_gaze_direction: 0.0  # DISABLED until TDD converges (was 0.1)
 
   # Stage 4: Head Pose (unlocks at epoch 25 if gaze < 0.2)
-  lambda_head_distance: 0.1   # Will ramp to 1.0
+  lambda_head_distance: 0.0   # DISABLED until TDD converges (was 0.1)
 
   # Stage 5: Emotion (unlocks at epoch 35 if head pose < 0.25)
-  lambda_emotion: 0.0        # Will ramp to 0.8 - https://github.com/johndpope/VASA-1-hack/issues/57
+  lambda_emotion: 0.0        # DISABLED until TDD converges
 
   # Stage 6: Lip Sync (unlocks at epoch 45 if emotion < 0.3)
   lambda_lips: 2.0            # INCREASED from 0.1 to force better mouth movement
   lambda_sync: 0.0            # SyncNet for evaluation only, audio conditioning handles training
   
   # Other losses
-  lambda_nonlip: 0.1          # Weight for non-lip facial landmarks
-  lambda_speed: 0.1
-  lambda_control: 1.0         # Overall control weight (was 0.0, now 1.0 to enable all control losses)
+  lambda_nonlip: 0.0          # DISABLED until TDD converges (was 0.1)
+  lambda_speed: 0.0           # DISABLED until TDD converges (was 0.1)
+  lambda_control: 0.0         # DISABLED until TDD converges - focus on theta+expression first
   lambda_lip: 0.0
   lambda_cfg: 0.5
   lambda_perceptual: 0.5      # Increased perceptual loss for better quality
@@ -218,8 +218,8 @@ loss:
   lambda_warp_l1: 0.0         # DISABLED - conflicts with magnitude loss (was 0.1)
   lambda_warp_tv: 0.05        # REDUCED from 0.1 - spatial smoothness only (removed redundant warp_smooth)
 
-  # EMO (Volumetric Avatar) Matching Loss - ensures VASA matches high-quality EMO output
-  use_emo_matching: false             # DISABLED - EMO keyframes are static, causing expression collapse
+  # EMO (Volumetric Avatar) Matching Loss - DISABLED for TDD-focused training
+  use_emo_matching: false             # DISABLED - not needed until TDD converges
   lambda_emo_match: 0.0               # DISABLED to prevent static pull
   emo_match_type: 'combined'          # 'l1', 'l2', 'lpips', or 'combined'
   emo_cache_dir: 'cache_emo'          # Directory for cached EMO outputs
@@ -244,7 +244,7 @@ loss:
   
   # Frame generation for disentanglement losses and visualization
   use_sparse_frames: false    # If true, only generate first and last frame (saves 90% memory)
-  enable_frame_generation: true   # Enable frame generation for control losses (gaze, blink, emotion)
+  enable_frame_generation: false   # DISABLED - control losses not needed until TDD (expression DB) converges
   save_debug_frames: false    # Save generated frames to debug_generated_frames/ directory (slows training, creates many files)
 
   warmup_epochs: 0            # No warmup for overfitting
@@ -290,10 +290,9 @@ dataset:
   use_identity_image: true    # Use high-quality identity image instead of video frame
   identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image
   # EMO generation settings
-  generate_emo_frames: true   # Generate EMO frames for quality comparison
+  generate_emo_frames: false   # DISABLED - not needed until TDD converges (was true)
   emo_identity_path: "nemo/data/IMG_1.png"  # Same identity image for EMO generation
-  emo_keyframes_per_window: 50  # Generate 50 EMO reference frames per window during preprocessing
-                                # NOTE: Aligned with vis_freq=50 so frame generation happens every 50 steps for control losses
+  emo_keyframes_per_window: 0  # DISABLED - skip EMO generation (was 50)
   use_single_bucket: true     # Use single-bucket caching for all windows
 
   # Quality filtering
@@ -342,8 +341,8 @@ audio:
 vis:
   save_videos: true
   save_frames: false
-  vis_freq: 50                # Visualize every 50 steps (reduced from 5 to save VRAM)
-                            # NOTE: Aligned with emo_keyframes_per_window=50 to enable control losses on vis steps
+  vis_freq: 500                # Visualize every 500 steps - focus on TDD (expression DB) first, not control losses
+                            # Control losses disabled until basic convergence achieved
   num_vis_samples: 4
 
 # Logging configuration

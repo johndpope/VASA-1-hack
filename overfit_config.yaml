@@ -31,7 +31,7 @@ diffusion:
   noise_injection_epochs: 30      # Inject noise for first N epochs
   noise_injection_scale: 0.05     # Scale of additional noise (0.05 = 5% of signal)
 
-# Motion generation parameters - SMALLER WINDOWS
+# Motion generation parameters - SMALLER WINDOWS FOR TDD
 motion:
   num_speed_buckets: 9
   window_size: 50              # Reduced from 50 to 20 for faster training
@@ -55,7 +55,7 @@ motion:
     
   # Mixed precision training
   amp: true                   # Whether to use automatic mixed precision
-  scaler_growth: 2.0          # Gradient scaler growth rate
+
 
 # Training parameters - OVERFITTING FOCUSED
 train:
@@ -175,22 +175,22 @@ loss:
   lambda_blink: 0.1           # Will ramp to 2.0
 
   # Stage 3: Eye Gaze (unlocks at epoch 15 if blink < 0.15)
-  lambda_gaze_direction: 0.1  # Will ramp to 1.5
+  lambda_gaze_direction: 0.0  # DISABLED until TDD converges (was 0.1)
 
   # Stage 4: Head Pose (unlocks at epoch 25 if gaze < 0.2)
-  lambda_head_distance: 0.1   # Will ramp to 1.0
+  lambda_head_distance: 0.0   # DISABLED until TDD converges (was 0.1)
 
   # Stage 5: Emotion (unlocks at epoch 35 if head pose < 0.25)
-  lambda_emotion: 0.0        # Will ramp to 0.8 - https://github.com/johndpope/VASA-1-hack/issues/57
+  lambda_emotion: 0.0        # DISABLED until TDD converges
 
   # Stage 6: Lip Sync (unlocks at epoch 45 if emotion < 0.3)
   lambda_lips: 2.0            # INCREASED from 0.1 to force better mouth movement
   lambda_sync: 0.0            # SyncNet for evaluation only, audio conditioning handles training
   
   # Other losses
-  lambda_nonlip: 0.1          # Weight for non-lip facial landmarks
-  lambda_speed: 0.1
-  lambda_control: 1.0         # Overall control weight (was 0.0, now 1.0 to enable all control losses)
+  lambda_nonlip: 0.0          # DISABLED until TDD converges (was 0.1)
+  lambda_speed: 0.0           # DISABLED until TDD converges (was 0.1)
+  lambda_control: 0.0         # DISABLED until TDD converges - focus on theta+expression first
   lambda_lip: 0.0
   lambda_cfg: 0.5
   lambda_perceptual: 0.5      # Increased perceptual loss for better quality
@@ -210,9 +210,9 @@ loss:
 
   # Expression-specific losses (CRITICAL FOR PREVENTING COLLAPSE)
   lambda_expression_l1: 0.0   # DISABLED - conflicts with L2, too weak (was 0.1)
-  lambda_expression_variance: 5.0  # Force prediction variance to match target variance
-  lambda_expression_temporal: 2.0  # Force temporal variation in expressions
-  lambda_audio_expr_coupling: 2.0  # REDUCED from 5.0 to 2.0 - let expression reconstruction dominate
+  lambda_expression_variance: 10.0  # INCREASED to force variance matching (was 5.0)
+  lambda_expression_temporal: 5.0  # INCREASED to force temporal variation (was 2.0)
+  lambda_audio_expr_coupling: 3.0  # INCREASED to tie expression to audio changes (was 2.0)
 
   # Warp regularization (CLEANED UP - removed conflicts)
   lambda_warp_l1: 0.0         # DISABLED - conflicts with magnitude loss (was 0.1)
@@ -244,8 +244,8 @@ loss:
   
   # Frame generation for disentanglement losses and visualization
   use_sparse_frames: false    # If true, only generate first and last frame (saves 90% memory)
-  enable_frame_generation: true  # Generate frames for visualization even if disentanglement losses are disabled
-  save_debug_frames: true  
+  enable_frame_generation: false  # DISABLED - control losses not needed until TDD (expression DB) converges
+  save_debug_frames: false  
   warmup_epochs: 0            # No warmup for overfitting
   
   # Loss scheduling
@@ -278,20 +278,20 @@ inference:
 
 # Dataset parameters - SINGLE VIDEO for overfitting
 dataset:
-  sequence_length: 50         # Match window size
+  sequence_length: 10         # Match window size (REDUCED to 10)
   frame_size: [512, 512]
   preextract_audio: true
   cache_audio: true
   hop_length: 10
   max_videos: 1              # REDUCED from 1000 to 50 - use only the best quality videos
-  min_sequence_length: 50    # Minimum sequence length (match window_size)
+  min_sequence_length: 10    # Minimum sequence length (match window_size)
   max_sequence_samples: 1000 # Maximum samples per epoch
   use_identity_image: true    # Use high-quality identity image instead of video frame
   identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image
   # EMO generation settings
-  generate_emo_frames: true   # Generate EMO frames for quality comparison
+  generate_emo_frames: false   # DISABLED - not needed until TDD converges (was true)
   emo_identity_path: "nemo/data/IMG_1.png"  # Same identity image for EMO generation
-  emo_keyframes_per_window: 5  # Generate 5 EMO frames per window for comparison
+  emo_keyframes_per_window: 0  # DISABLED - skip EMO generation (was 5)
   use_single_bucket: true     # Use single-bucket caching for all windows
 
   # Quality filtering
@@ -340,7 +340,7 @@ audio:
 vis:
   save_videos: true
   save_frames: false
-  vis_freq: 5                 # More frequent visualization
+  vis_freq: 50                 # More frequent visualization
   num_vis_samples: 4
 
 # Logging configuration

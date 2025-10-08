@@ -789,12 +789,9 @@ class VASAModel(nn.Module):
             prediction_type="sample"
         )
 
-        # Initial context parameters
+        # Initial context parameters (only theta and expression, no SRT)
         self.start_prev_theta = nn.Parameter(torch.zeros(1, config.motion.context_size, 3, 4))
         self.start_prev_expression = nn.Parameter(torch.zeros(1, config.motion.context_size, config.model.expression_dim))
-        self.start_prev_scale = nn.Parameter(torch.zeros(1, config.motion.context_size, 3))
-        self.start_prev_rotation = nn.Parameter(torch.zeros(1, config.motion.context_size, 3))
-        self.start_prev_translation = nn.Parameter(torch.zeros(1, config.motion.context_size, 3))
 
         # Flag to use derived warps from zdyn via volumetric_avatar.predict_embed
         self.use_derived_warps = config.model.get('use_derived_warps', True)
@@ -817,7 +814,7 @@ class VASAModel(nn.Module):
 
         Args:
             zdyn: [B, T, zdyn_dim] expression dynamics from motion transformer
-            idt_embed: [B, idt_dim] identity embedding from source image
+            idt_embed: [B, idt_dim] OR [B, 1, idt_dim] identity embedding from source image
             theta: [B, T, 3, 4] pose matrices (optional, can use zeros if not needed)
 
         Returns:
@@ -829,9 +826,15 @@ class VASAModel(nn.Module):
         # Flatten for per-frame processing
         zdyn_flat = zdyn.view(B * T, -1)  # [B*T, zdyn_dim]
 
-        # Repeat identity for all frames (detach since it's pre-computed with no_grad)
-        # This prevents gradients flowing to frozen identity embedder
-        idt_embed_flat = idt_embed.detach().unsqueeze(1).repeat(1, T, 1).view(B * T, -1)  # [B*T, idt_dim]
+        # idt_embed should be [B, C, H, W] spatial feature map from idt_embedder_nw
+        # Repeat it for all T frames: [B, C, H, W] -> [B*T, C, H, W]
+        if idt_embed.dim() == 4:
+            # idt_embed is [B, C, H, W], repeat for T frames
+            B_idt, C_idt, H_idt, W_idt = idt_embed.shape
+            idt_spatial = idt_embed.detach().unsqueeze(1).repeat(1, T, 1, 1, 1).view(B * T, C_idt, H_idt, W_idt)
+            logger.info(f"[WARP DEBUG] idt_embed spatial: {idt_embed.shape} -> repeated to {idt_spatial.shape}, zdyn: {zdyn.shape}")
+        else:
+            raise ValueError(f"Expected idt_embed to be 4D spatial [B, C, H, W], got shape {idt_embed.shape}")
 
         # Prepare warp_embed_dict directly without using predict_embed
         # Since predict_embed requires source/target images which we don't have,
@@ -846,8 +849,7 @@ class VASAModel(nn.Module):
             B * T, -1, embed_size, embed_size
         )  # [B*T, C, embed_size, embed_size]
 
-        # Expand identity embed spatially (reuse to avoid recreating)
-        idt_spatial = idt_embed_flat.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, embed_size, embed_size)
+        # idt_spatial is already [B*T, C, embed_size, embed_size] from above
 
         # Combine with identity using warp_embed_head_orig_nw
         if self.volumetric_avatar.args.cat_em:
@@ -860,7 +862,7 @@ class VASAModel(nn.Module):
             )
 
         # Free intermediate tensors
-        del warp_target_embed, idt_spatial, idt_embed_flat
+        del warp_target_embed, idt_spatial
 
         # Create target_warp_embed_dict
         c = warp_embed_orig.shape[1]
@@ -1017,14 +1019,11 @@ class VASAModel(nn.Module):
             else:
                 logger.debug("[INFERENCE] Not applying dropout to conditions")
 
-        # Handle previous context
+        # Handle previous context (only theta, expression, audio - no SRT)
         if prev_context is None:
             prev_context = {
                 'theta': self.start_prev_theta.repeat(B, 1, 1, 1),
                 'expression_embed': self.start_prev_expression.repeat(B, 1, 1),  # Standardized key
-                'scale': self.start_prev_scale.repeat(B, 1, 1),
-                'rotation': self.start_prev_rotation.repeat(B, 1, 1),
-                'translation': self.start_prev_translation.repeat(B, 1, 1),
                 'audio': torch.zeros(B, self.context_size, 768, device=device)
             }
 
@@ -1074,11 +1073,14 @@ class VASAModel(nn.Module):
             if 'expression_embed' in outputs and 'theta' in outputs:
                 if idt_embed is not None:
                     logger.info(f"[DERIVED WARPS] Generating UV warps from zdyn {outputs['expression_embed'].shape} + idt_embed {idt_embed.shape}")
-                    implicit_warps = self.compute_warps_from_zdyn(
-                        zdyn=outputs['expression_embed'],
-                        idt_embed=idt_embed,
-                        theta=outputs['theta']
-                    )
+                    # CRITICAL: Warp generation must be in no_grad() to avoid OOM
+                    # Warps are only for visualization/frame generation, not for training gradients
+                    with torch.no_grad():
+                        implicit_warps = self.compute_warps_from_zdyn(
+                            zdyn=outputs['expression_embed'].detach(),  # Detach to prevent gradient flow
+                            idt_embed=idt_embed,
+                            theta=outputs['theta'].detach()
+                        )
                     outputs['uv_warps'] = implicit_warps
                     outputs['warp_source'] = 'derived'  # Tag for debugging
                     logger.info(f"[DERIVED WARPS] ✅ Generated warps shape: {implicit_warps.shape}")
@@ -1167,13 +1169,10 @@ class VASAModel(nn.Module):
             if 'translation' in initial_pose:
                 full_motion['translation'][:, 0] = initial_pose['translation']
 
-            # Initial context
+            # Initial context (only theta, expression, audio - no SRT)
             prev_context = {
                 'theta': self.start_prev_theta.repeat(B, 1, 1, 1),
                 'expression_embed': self.start_prev_expression.repeat(B, 1, 1),  # Standardized key
-                'scale': self.start_prev_scale.repeat(B, 1, 1),
-                'rotation': self.start_prev_rotation.repeat(B, 1, 1),
-                'translation': self.start_prev_translation.repeat(B, 1, 1),
                 'audio': torch.zeros(B, context_size, 768, device=device)
             }
 

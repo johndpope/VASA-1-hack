@@ -575,26 +575,25 @@ class VASAInference:
         try:
             logger.info("\n=== Starting Audio-Driven Generation ===")
             device = source_params['theta'].device
-            
+
             # Initialize motion data with source params for first frame
+            # Note: Only theta and expression are used - SRT removed from training
             motion_data = {
                 'theta': source_params['theta'],
-                'scale': source_params['scale'],
-                'rotation': source_params['rotation'], 
-                'translation': source_params['translation'],
                 'expression_embed': initial_expression
             }
-            
+
+            # Extract identity embeddings from source params for warp generation
+            idt_embed = source_params['idt_embed']
+            logger.info(f"Identity embeddings extracted: {idt_embed.shape}")
+
             # Track all generated frames and previous motion parameters
             generated_frames = []
             prev_motion = {
                 'expression': None,
-                'scale': None,
                 'theta': None,
-                'rotation': None,
-                'translation': None
             }
-            
+
             # Process each audio window
             for window_idx, window_data in enumerate(audio_windows):
                 logger.info(f"Processing window {window_idx}/{len(audio_windows)}")
@@ -608,7 +607,7 @@ class VASAInference:
                 # Get batch size and sequence length from audio features
                 B = audio_features.shape[0] if audio_features.dim() >= 2 else 1
                 T = audio_features.shape[1] if audio_features.dim() >= 2 else audio_features.shape[0]
-                
+
                 # Ensure audio features have correct shape [B, T, D]
                 if audio_features.dim() == 2:
                     audio_features = audio_features.unsqueeze(0)  # Add batch dimension
@@ -618,24 +617,20 @@ class VASAInference:
                     'audio_features': audio_features.to(device),
                     # Add default values for conditions used in training
                     'gaze': torch.zeros(B, T, 2, device=device),  # [B, T, 2]
-                    'head_distance': torch.zeros(B, T, 1, device=device),  # [B, T, 1] 
+                    'head_distance': torch.zeros(B, T, 1, device=device),  # [B, T, 1]
                     'emotion': torch.zeros(B, T, 2, device=device),  # [B, T, 2]
                     'speed_bucket': torch.ones(B, T, 1, device=device) * 4,  # Middle speed bucket
                 }
 
-                # Generate sequence using the corrected method signature
+                # Generate sequence using the corrected method signature with idt_embed
                 motion_sequence = self.model.generate_sequence(
                     initial_pose=motion_data,
                     initial_dynamics=motion_data['expression_embed'],
                     conditions=cond_signals,
-                    eta=0.5,  # FIXED: Match training config (was 0.0 causing deterministic, janky outputs)
+                    idt_embed=idt_embed,  # FIXED: Pass identity embeddings for warp generation
+                    eta=0.8,  # Match audit config for consistency
                     num_steps=50,
-                    cfg_scales={
-                        'audio': 0.5,      # From config
-                        'gaze': 1.0,       # From config
-                        'head_distance': 0.8,
-                        'emotion': 0.5
-                    }
+                    cfg_scales=None,  # Use default strong audio guidance (20.0) from model
                 )
 
                 # SMOOTHNESS FIX: Apply temporal Gaussian smoothing to pose parameters
@@ -721,12 +716,11 @@ class VASAInference:
                     }
 
                 # Update motion data using the last frame from this window
+                # IMPORTANT: Use [:, -1] not [:, -1:] to remove time dimension
+                # Note: Only theta and expression are used - SRT removed from training
                 motion_data = {
-                    'theta': motion_sequence['theta'][:, -1:],
-                    'rotation': motion_sequence['rotation'][:, -1:],
-                    'scale': motion_sequence['scale'][:, -1:],
-                    'translation': motion_sequence['translation'][:, -1:],
-                    'expression_embed': motion_sequence['expression_embed'][:, -1]
+                    'theta': motion_sequence['theta'][:, -1],  # [B, 3, 4] not [B, 1, 3, 4]
+                    'expression_embed': motion_sequence['expression_embed'][:, -1]  # [B, 128]
                 }
 
             logger.info(f"Total frames generated: {len(generated_frames)}")

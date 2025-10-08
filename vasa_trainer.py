@@ -771,17 +771,14 @@ class VASATrainer:
                 masked_identity = identity_img * identity_mask
 
                 # Extract identity embedding (spatial feature map)
-                idt_embed_spatial = self.model.volumetric_avatar.idt_embedder_nw(masked_identity)
+                # IMPORTANT: Store the SPATIAL map [B, C, H, W], not the pooled vector
+                # compute_warps_from_zdyn needs the spatial features
+                self.idt_embed = self.model.volumetric_avatar.idt_embedder_nw(masked_identity)
 
-                # Convert to vector via global average pooling
-                self.idt_embed = torch.nn.functional.adaptive_avg_pool2d(
-                    idt_embed_spatial, (1, 1)
-                ).squeeze(-1).squeeze(-1)  # [1, 512]
-
-                logger.info(f"✅ Pre-computed identity embedding: {self.idt_embed.shape}")
+                logger.info(f"✅ Pre-computed identity embedding (spatial): {self.idt_embed.shape}")
 
                 # Clean up
-                del identity_img, identity_mask, masked_identity, idt_embed_spatial
+                del identity_img, identity_mask, masked_identity
 
         # Initialize MotionSequenceHandler
         self.motion_handler = MotionSequenceHandler(
@@ -3028,14 +3025,54 @@ class VASATrainer:
             torch.save(checkpoint, save_path)
             logger.info(f"Saved checkpoint to {save_path}")
 
-            # Log saved parameters (count from filtered state dict)
-            total_params = sum(p.numel() for p in unwrapped_model.parameters())
-            saved_params = sum(v.numel() for v in filtered_state_dict.values())
-            excluded_params = sum(v.numel() for k, v in state_dict.items() if k.startswith('volumetric_avatar.'))
+            # Detailed parameter breakdown
+            from collections import defaultdict
+            module_counts = defaultdict(int)
 
-            logger.info(f"Total model parameters: {total_params:,}")
-            logger.info(f"Saved parameters: {saved_params:,}")
-            logger.info(f"Excluded volumetric_avatar parameters: {excluded_params:,}")
+            # Count by top-level module in saved checkpoint
+            for k, v in filtered_state_dict.items():
+                module_name = k.split('.')[0]
+                module_counts[module_name] += v.numel()
+
+            # Total counts
+            total_params = sum(p.numel() for p in unwrapped_model.parameters())
+            vasa_params = sum(v.numel() for v in filtered_state_dict.values())  # VASA-specific (saved)
+            nemo_params = sum(v.numel() for k, v in state_dict.items() if k.startswith('volumetric_avatar.'))
+
+            # Log breakdown
+            logger.info("=" * 80)
+            logger.info("📊 PARAMETER BREAKDOWN")
+            logger.info("=" * 80)
+            logger.info(f"VASA-1 Model (Trainable Components - Saved to Checkpoint):")
+            for module, count in sorted(module_counts.items(), key=lambda x: -x[1]):
+                pct = (count / vasa_params * 100) if vasa_params > 0 else 0
+                logger.info(f"  {module:30s}: {count:12,} ({count/1e6:6.2f}M, {pct:5.1f}%)")
+            logger.info("-" * 80)
+            logger.info(f"  {'TOTAL VASA PARAMS':30s}: {vasa_params:12,} ({vasa_params/1e6:6.2f}M)")
+            logger.info("")
+            logger.info(f"Frozen Components (NOT saved to checkpoint):")
+            logger.info(f"  {'volumetric_avatar (nemo)':30s}: {nemo_params:12,} ({nemo_params/1e6:6.2f}M)")
+            logger.info(f"  {'emo_generator':30s}: {'N/A':>12} (loaded separately)")
+            logger.info("-" * 80)
+            logger.info(f"  {'TOTAL MODEL SIZE':30s}: {total_params:12,} ({total_params/1e6:6.2f}M)")
+            logger.info("=" * 80)
+
+            # Compare to VASA-1 paper target
+            vasa1_target = 29_000_000  # Microsoft VASA-1 paper specification
+            diff = vasa_params - vasa1_target
+            diff_pct = (diff / vasa1_target) * 100
+
+            if abs(diff_pct) < 5:  # Within 5%
+                status = "✅ MATCHES"
+            elif vasa_params < vasa1_target:
+                status = "⚠️  SMALLER"
+            else:
+                status = "⚠️  LARGER"
+
+            logger.info(f"🎯 VASA-1 Paper Target:     {vasa1_target:12,} ({vasa1_target/1e6:6.2f}M)")
+            logger.info(f"📈 Our Implementation:      {vasa_params:12,} ({vasa_params/1e6:6.2f}M)")
+            logger.info(f"{status} Difference:         {diff:12,} ({diff/1e6:+6.2f}M, {diff_pct:+5.1f}%)")
+            logger.info("=" * 80)
 
         except Exception as e:
             logger.error(f"Error saving checkpoint: {str(e)}")

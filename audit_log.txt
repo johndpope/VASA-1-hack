@@ -1,0 +1,133 @@
+[16:42:37] INFO Loading volumetric avatar...
+[16:42:44] INFO Loading VASA model...
+[16:42:44] INFO Initializing EfficientConditionEmbedding: model_dim=512, max_seq_len=60
+[16:42:44] INFO Using JoyVASA-aligned audio projection: single Linear(768 -> 512) without normalization
+[16:42:44] INFO Loading expression database from cache_single_bucket/expression_embeddings.h5
+[16:42:44] INFO Loading expression database from cache_single_bucket/expression_embeddings.h5
+[16:42:44] INFO Database loaded: 2000 embeddings, dim=128
+[16:42:45] INFO Database on cuda: torch.Size([2000, 128]), 0.98 MB
+[16:42:45] INFO Expression database loaded: ExpressionDatabase(2000 embeddings, 128D, device=cuda)
+[16:42:45] INFO ✅ Model loaded successfully
+[16:42:45] INFO 📂 Loading ground truth from cache...
+[16:42:45] INFO Loading ground truth from cache: cache_single_bucket/all_windows_cache.h5
+[16:42:45] INFO Found 40 windows in cache
+[16:42:45] INFO Loaded ground truth: theta torch.Size([1, 2000, 3, 4]), expr torch.Size([1, 2000, 128])
+Hybrid stages [True, True, True]
+bbbbbbbbbbb
+Hybrid stages [True, True, True]
+SN applied to local_encoder_nw
+SN applied to idt_embedder_nw
+SN applied to expression_embedder_nw
+SN applied to xy_generator_nw
+SN applied to uv_generator_nw
+SN applied to warp_embed_head_orig_nw
+SN applied to volume_process_nw
+SN applied to volume_source_nw
+SN applied to decoder_nw
+WS applied to local_encoder_nw
+WS applied to idt_embedder_nw
+WS applied to expression_embedder_nw
+WS applied to xy_generator_nw
+WS applied to uv_generator_nw
+WS applied to warp_embed_head_orig_nw
+WS applied to volume_process_nw
+WS applied to volume_source_nw
+WS applied to decoder_nw
+╭───────────────────── Traceback (most recent call last) ──────────────────────╮
+│ /media/2TB/VASA-1-hack/audit_expressions.py:329 in <module>                  │
+│                                                                              │
+│   326                                                                        │
+│   327                                                                        │
+│   328 if __name__ == "__main__":                                             │
+│ ❱ 329 │   main()                                                             │
+│   330                                                                        │
+│                                                                              │
+│ /media/2TB/VASA-1-hack/audit_expressions.py:308 in main                      │
+│                                                                              │
+│   305 │                                                                      │
+│   306 │   # Extract audio from video                                         │
+│   307 │   from vi import VASAInference                                       │
+│ ❱ 308 │   inference = VASAInference(args.config, args.checkpoint)            │
+│   309 │   _, audio_path = inference.extract_video_assets(args.video, Path('t │
+│   310 │                                                                      │
+│   311 │   # Generate predictions                                             │
+│                                                                              │
+│ /media/2TB/VASA-1-hack/vi.py:75 in __init__                                  │
+│                                                                              │
+│     72 │   │   device: str = 'cuda'                                          │
+│     73 │   ):                                                                │
+│     74 │   │   self.device = device                                          │
+│ ❱   75 │   │   self.config = OmegaConf.load(config_path)                     │
+│     76 │   │                                                                 │
+│     77 │   │                                                                 │
+│     78 │   │   # In your __init__ or setup                                   │
+│                                                                              │
+│ /home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/omegac │
+│ onf/omegaconf.py:190 in load                                                 │
+│                                                                              │
+│    187 │   │                                                                 │
+│    188 │   │   if isinstance(file_, (str, pathlib.Path)):                    │
+│    189 │   │   │   with io.open(os.path.abspath(file_), "r", encoding="utf-8 │
+│ ❱  190 │   │   │   │   obj = yaml.load(f, Loader=get_yaml_loader())          │
+│    191 │   │   elif getattr(file_, "read", None):                            │
+│    192 │   │   │   obj = yaml.load(file_, Loader=get_yaml_loader())          │
+│    193 │   │   else:                                                         │
+│                                                                              │
+│ /home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/yaml/_ │
+│ _init__.py:79 in load                                                        │
+│                                                                              │
+│    76 │   Parse the first YAML document in a stream                          │
+│    77 │   and produce the corresponding Python object.                       │
+│    78 │   """                                                                │
+│ ❱  79 │   loader = Loader(stream)                                            │
+│    80 │   try:                                                               │
+│    81 │   │   return loader.get_single_data()                                │
+│    82 │   finally:                                                           │
+│                                                                              │
+│ /home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/yaml/l │
+│ oader.py:34 in __init__                                                      │
+│                                                                              │
+│   31 class SafeLoader(Reader, Scanner, Parser, Composer, SafeConstructor, Re │
+│   32 │                                                                       │
+│   33 │   def __init__(self, stream):                                         │
+│ ❱ 34 │   │   Reader.__init__(self, stream)                                   │
+│   35 │   │   Scanner.__init__(self)                                          │
+│   36 │   │   Parser.__init__(self)                                           │
+│   37 │   │   Composer.__init__(self)                                         │
+│                                                                              │
+│ /home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/yaml/r │
+│ eader.py:85 in __init__                                                      │
+│                                                                              │
+│    82 │   │   │   self.name = getattr(stream, 'name', "<file>")              │
+│    83 │   │   │   self.eof = False                                           │
+│    84 │   │   │   self.raw_buffer = None                                     │
+│ ❱  85 │   │   │   self.determine_encoding()                                  │
+│    86 │                                                                      │
+│    87 │   def peek(self, index=0):                                           │
+│    88 │   │   try:                                                           │
+│                                                                              │
+│ /home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/yaml/r │
+│ eader.py:124 in determine_encoding                                           │
+│                                                                              │
+│   121 │                                                                      │
+│   122 │   def determine_encoding(self):                                      │
+│   123 │   │   while not self.eof and (self.raw_buffer is None or len(self.ra │
+│ ❱ 124 │   │   │   self.update_raw()                                          │
+│   125 │   │   if isinstance(self.raw_buffer, bytes):                         │
+│   126 │   │   │   if self.raw_buffer.startswith(codecs.BOM_UTF16_LE):        │
+│   127 │   │   │   │   self.raw_decode = codecs.utf_16_le_decode              │
+│                                                                              │
+│ /home/johndpope/miniconda3/envs/actalker/lib/python3.12/site-packages/yaml/r │
+│ eader.py:178 in update_raw                                                   │
+│                                                                              │
+│   175 │   │   │   │   break                                                  │
+│   176 │                                                                      │
+│   177 │   def update_raw(self, size=4096):                                   │
+│ ❱ 178 │   │   data = self.stream.read(size)                                  │
+│   179 │   │   if self.raw_buffer is None:                                    │
+│   180 │   │   │   self.raw_buffer = data                                     │
+│   181 │   │   else:                                                          │
+│ in decode:322                                                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+UnicodeDecodeError: 'utf-8' codec can't decode byte 0x80 in position 64: invalid
+start byte
