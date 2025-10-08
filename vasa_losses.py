@@ -1710,26 +1710,8 @@ class VASALossModule:
                         target['theta']
                     )
 
-            # 2. Scale loss
-            if 'scale' in pred:
-                losses['scale_loss'] = F.mse_loss(
-                    pred['scale'],
-                    comparison_target['scale']
-                )
-
-            # 3. Rotation loss
-            if 'rotation' in pred:
-                losses['rotation_loss'] = F.mse_loss(
-                    pred['rotation'],
-                    comparison_target['rotation']
-                )
-
-            # 4. Translation loss
-            if 'translation' in pred:
-                losses['translation_loss'] = F.mse_loss(
-                    pred['translation'],
-                    comparison_target['translation']
-                )
+            # SRT losses REMOVED - scale/rotation/translation handled by nemo internally
+            # Model only predicts theta + expression_embed, nemo derives warps from these
 
             # 5. Expression loss with variance preservation
             if 'expression_embed' in pred:
@@ -1792,12 +1774,8 @@ class VASALossModule:
                         losses[k] = v.clone().requires_grad_(True)
 
             # Combine into major loss components with proper scaling
-            pose_loss = (
-                losses.get('theta_loss', torch.tensor(0.0, device=device)) +
-                losses.get('scale_loss', torch.tensor(0.0, device=device)) +
-                losses.get('rotation_loss', torch.tensor(0.0, device=device)) +
-                losses.get('translation_loss', torch.tensor(0.0, device=device))
-            ) * self.lambda_pose
+            # Direct theta loss (no wrapper)
+            theta_loss = losses.get('theta_loss', torch.tensor(0.0, device=device)) * self.lambda_pose
 
             # Aggregate all expression-related losses
             expression_total = losses.get('expression_loss', torch.tensor(0.0, device=device))
@@ -1815,18 +1793,14 @@ class VASALossModule:
                 motion_loss = self._compute_motion_smoothness_loss(pred) * self.lambda_temporal
 
             # Combined reconstruction loss
-            reconstruction_loss = pose_loss + dynamics_loss + motion_loss
+            reconstruction_loss = theta_loss + dynamics_loss + motion_loss
 
-            # Return all losses
+            # Return all losses (SRT and pose_loss wrapper removed)
             return {
                 'reconstruction': reconstruction_loss,
-                'pose_loss': pose_loss,
                 'dynamics_loss': dynamics_loss,
                 'motion_loss': motion_loss,
-                'theta_loss': losses.get('theta_loss', torch.tensor(0.0, device=device)),
-                'scale_loss': losses.get('scale_loss', torch.tensor(0.0, device=device)),
-                'rotation_loss': losses.get('rotation_loss', torch.tensor(0.0, device=device)),
-                'translation_loss': losses.get('translation_loss', torch.tensor(0.0, device=device)),
+                'theta_loss': theta_loss,
                 'expression_loss': losses.get('expression_loss', torch.tensor(0.0, device=device))
             }
 
@@ -1835,13 +1809,9 @@ class VASALossModule:
             logger.error(traceback.format_exc())
             return {
                 'reconstruction': torch.tensor(1.0, device=device, requires_grad=True),
-                'pose_loss': torch.tensor(0.0, device=device, requires_grad=True),
                 'dynamics_loss': torch.tensor(0.0, device=device, requires_grad=True),
                 'motion_loss': torch.tensor(0.0, device=device, requires_grad=True),
                 'theta_loss': torch.tensor(0.0, device=device, requires_grad=True),
-                'scale_loss': torch.tensor(0.0, device=device, requires_grad=True),
-                'rotation_loss': torch.tensor(0.0, device=device, requires_grad=True),
-                'translation_loss': torch.tensor(0.0, device=device, requires_grad=True),
                 'expression_loss': torch.tensor(0.0, device=device, requires_grad=True)
             }
         
@@ -1867,34 +1837,31 @@ class VASALossModule:
             
             logger.debug(f"\nMode: {'training' if is_training else 'validation'}")
 
-            # Process predictions and targets
+            # Process predictions and targets (SRT removed - only theta and expression)
             param_dims = {
                 'theta': 12,      # 3x4 matrix flattened
-                'scale': 3,    
-                'rotation': 3,    
-                'translation': 3,
                 'expression_embed': 128
             }
 
             # Initialize losses and logging metrics
             losses = {f'{param}_loss': torch.tensor(0.0, device=device) for param in param_dims.keys()}
             metrics = {}
-            
+
             # Process each parameter and compute losses
             for param, dim in param_dims.items():
                 try:
                     if param == 'theta':
                         pred_flat = pred_motion[param].view(B, -1, 12)
                         target_flat = comparison_target[param].view(B, -1, 12)
-                        
+
                         if not is_training:
                             losses[f'{param}_loss'] = self._compute_pose_matrix_loss(
-                                pred_motion[param], 
+                                pred_motion[param],
                                 comparison_target[param]
                             )
                         else:
                             losses[f'{param}_loss'] = F.mse_loss(pred_flat, target_flat)
-                            
+
                         # Log theta statistics
                         if wandb.run is not None:
                             metrics.update({
@@ -1904,13 +1871,13 @@ class VASALossModule:
                                 f'{mode_prefix}/theta/max': pred_flat.max().item(),
                                 f'{mode_prefix}/theta/loss': losses[f'{param}_loss'].item()
                             })
-                    
+
                     elif param == 'expression_embed':
                         losses['expression_loss'] = F.mse_loss(
                             pred_motion[param],
                             comparison_target[param]
                         )
-                        
+
                         # Log expression statistics
                         if wandb.run is not None:
                             expr_pred = pred_motion[param]
@@ -1921,36 +1888,13 @@ class VASALossModule:
                                 f'{mode_prefix}/expression/max': expr_pred.max().item(),
                                 f'{mode_prefix}/expression/loss': losses['expression_loss'].item()
                             })
-                            
-                    else:
-                        # Handle rotation and translation
-                        losses[f'{param}_loss'] = F.mse_loss(
-                            pred_motion[param],
-                            comparison_target[param]
-                        )
-                        
-                        # Log parameter statistics
-                        if wandb.run is not None:
-                            param_tensor = pred_motion[param]
-                            metrics.update({
-                                f'{mode_prefix}/{param}/mean': param_tensor.mean().item(),
-                                f'{mode_prefix}/{param}/std': param_tensor.std().item(),
-                                f'{mode_prefix}/{param}/min': param_tensor.min().item(),
-                                f'{mode_prefix}/{param}/max': param_tensor.max().item(),
-                                f'{mode_prefix}/{param}/loss': losses[f'{param}_loss'].item()
-                            })
-                            
+
                 except Exception as e:
                     logger.error(f"Error processing {param}: {str(e)}")
                     continue
 
-            # Compute combined losses
-            pose_loss = (
-                losses['theta_loss'] +
-                losses['rotation_loss'] +
-                losses['translation_loss'] +
-                losses['scale_loss']
-            ) * self.lambda_pose
+            # Compute combined losses (direct theta loss, no wrapper)
+            theta_loss = losses['theta_loss'] * self.lambda_pose
 
             # Aggregate all expression-related losses (same as compute_reconstruction_loss)
             expression_total = losses.get('expression_loss', torch.tensor(0.0, device=device))
@@ -1966,21 +1910,21 @@ class VASALossModule:
                 motion_loss = self._compute_motion_smoothness_loss(pred_motion)
 
             # Combined reconstruction loss
-            reconstruction_loss = pose_loss + dynamics_loss + motion_loss
+            reconstruction_loss = theta_loss + dynamics_loss + motion_loss
 
             # Log combined losses and detailed parameter statistics
            # Log combined losses and detailed parameter statistics
             if wandb.run is not None:
                 # Base losses
                 metrics.update({
-                    f'{mode_prefix}/loss/pose': pose_loss.item(),
+                    f'{mode_prefix}/loss/theta': theta_loss.item(),
                     f'{mode_prefix}/loss/dynamics': dynamics_loss.item(),
                     f'{mode_prefix}/loss/motion': motion_loss.item(),
                     f'{mode_prefix}/loss/total': reconstruction_loss.item()
                 })
                 
-                # Add detailed statistics for core motion parameters
-                core_params = ['theta', 'rotation', 'scale', 'translation', 'expression_embed']
+                # Add detailed statistics for core motion parameters (SRT removed)
+                core_params = ['theta', 'expression_embed']
                 for param in core_params:
                     if param in pred_motion and param in comparison_target:
                         try:
@@ -2024,16 +1968,12 @@ class VASALossModule:
                 # Log all metrics to wandb
                 wandb.log(metrics, step=step)
 
-            # Return dictionary of all losses
+            # Return dictionary of all losses (pose_loss removed)
             return {
                 'reconstruction': reconstruction_loss,
-                'pose_loss': pose_loss,
                 'dynamics_loss': dynamics_loss,
                 'motion_loss': motion_loss,
-                'theta_loss': losses['theta_loss'],
-                'rotation_loss': losses['rotation_loss'],
-                'scale_loss': losses['scale_loss'],
-                'translation_loss': losses['translation_loss'],
+                'theta_loss': theta_loss,
                 'expression_loss': losses['expression_loss']
             }
 
@@ -2042,13 +1982,9 @@ class VASALossModule:
             logger.error(traceback.format_exc())
             return {
                 'reconstruction': torch.tensor(1.0, device=device),
-                'pose_loss': torch.tensor(0.0, device=device),
                 'dynamics_loss': torch.tensor(0.0, device=device),
                 'motion_loss': torch.tensor(0.0, device=device),
                 'theta_loss': torch.tensor(0.0, device=device),
-                'rotation_loss': torch.tensor(0.0, device=device),
-                'scale_loss': torch.tensor(0.0, device=device),
-                'translation_loss': torch.tensor(0.0, device=device),
                 'expression_loss': torch.tensor(0.0, device=device)
             }
         
@@ -2067,18 +2003,12 @@ class VASALossModule:
             """
             loss = 0.0
 
-            # Compute velocity (first derivative) - only for components that exist
+            # Compute velocity (first derivative) - only for theta and expression (SRT removed)
             velocities = {}
             accelerations = {}
 
             if 'theta' in pred:
                 velocities['theta'] = torch.diff(pred['theta'], dim=1)
-            if 'rotation' in pred:
-                velocities['rotation'] = torch.diff(pred['rotation'], dim=1)
-            if 'scale' in pred:
-                velocities['scale'] = torch.diff(pred['scale'], dim=1)
-            if 'translation' in pred:
-                velocities['translation'] = torch.diff(pred['translation'], dim=1)
             if 'expression_embed' in pred:
                 velocities['expression'] = torch.diff(pred['expression_embed'], dim=1)
 

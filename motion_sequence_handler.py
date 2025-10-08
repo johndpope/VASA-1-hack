@@ -133,7 +133,11 @@ class MotionSequenceHandler:
             return []
             
     def prepare_motion_data(self, window: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Prepare motion data from window matching H5 cache structure."""
+        """Prepare motion data from window matching H5 cache structure.
+
+        NOTE: SRT (scale/rotation/translation) removed - model only predicts theta + expression.
+        Nemo's volumetric avatar handles SRT internally via warp generation.
+        """
         # Validate that UV warps are present (main warping field from H5 cache)
         if 'uv_warps' not in window:
             raise KeyError(
@@ -143,9 +147,6 @@ class MotionSequenceHandler:
 
         motion_data = {
             'theta': window['theta'],            # [B, T, 3, 4] - pose matrix
-            'scale': window['scale'],            # [B, T, 3] - SRT scale
-            'rotation': window['rotation'],      # [B, T, 3] - SRT rotation
-            'translation': window['translation'], # [B, T, 3] - SRT translation
             'expression_embed': window['expression_embed'],  # [B, T, 128] - aligned expression
             'uv_warps': window['uv_warps'],      # [B, T, 16, 64, 64, 3] - UV warps from H5
         }
@@ -159,13 +160,10 @@ class MotionSequenceHandler:
         return motion_data  
 
     def merge_windows(self, windows, total_frames, device):
-        """Merge overlapping motion sequence windows."""
-        # Initialize output tensors
+        """Merge overlapping motion sequence windows (SRT removed)."""
+        # Initialize output tensors (only theta + expression)
         merged_sequence = {
             'theta': torch.zeros((1, total_frames, 3, 4), device=device),
-            'scale': torch.zeros((1, total_frames, 3), device=device),
-            'rotation': torch.zeros((1, total_frames, 3), device=device),
-            'translation': torch.zeros((1, total_frames, 3), device=device),
             'expression_embed': torch.zeros((1, total_frames, 128), device=device)  # Assuming embed dim is 128
         }
         
