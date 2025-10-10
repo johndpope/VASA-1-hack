@@ -23,6 +23,89 @@ from logger import logger
 logging.basicConfig(level=logging.INFO)
 
 
+def build_from_single_bucket_cache(
+    cache_path: str,
+    output_path: str,
+    frame_stride: int = 5
+):
+    """
+    Build expression database directly from single bucket cache (FAST!).
+
+    Args:
+        cache_path: Path to single bucket cache H5 file (e.g., 'cache_single_bucket/all_windows_cache.h5')
+        output_path: Where to save the expression database H5 file
+        frame_stride: Sample every Nth frame (default: 5, use 1 for all frames)
+    """
+    logger.info(f"🚀 Building expression database from single bucket cache")
+    logger.info(f"Cache: {cache_path}")
+    logger.info(f"Output: {output_path}")
+    logger.info(f"Frame stride: {frame_stride} (every {frame_stride}th frame)")
+
+    cache_path = Path(cache_path)
+    if not cache_path.exists():
+        raise FileNotFoundError(f"Cache file not found: {cache_path}")
+
+    all_embeddings = []
+
+    with h5py.File(cache_path, 'r') as f:
+        num_windows = f.attrs.get('num_windows', 0)
+        logger.info(f"Found {num_windows} windows in cache")
+
+        for i in tqdm(range(num_windows), desc="Extracting expressions"):
+            window_key = f'window_{i}'
+            if window_key not in f:
+                continue
+
+            window_group = f[window_key]
+
+            # Get expression embeddings
+            if 'expression_embed' not in window_group:
+                logger.warning(f"No expression_embed in {window_key}")
+                continue
+
+            expr_embeds = np.array(window_group['expression_embed'])  # [T, 128]
+
+            # Sample every Nth frame
+            sampled_indices = list(range(0, expr_embeds.shape[0], frame_stride))
+            for idx in sampled_indices:
+                expr_embed = expr_embeds[idx]  # [128]
+                if expr_embed.shape == (128,):
+                    all_embeddings.append(expr_embed)
+
+    logger.info(f"Collected {len(all_embeddings)} expression embeddings")
+
+    # Save to H5
+    save_expression_database(all_embeddings, output_path, frame_stride, num_windows)
+
+    return np.stack(all_embeddings, axis=0)
+
+
+def save_expression_database(embeddings_list, output_path, frame_stride, num_windows):
+    """Save expression embeddings to H5 database."""
+    embeddings_array = np.stack(embeddings_list, axis=0)  # [N, 128]
+
+    logger.info(f"Saving {len(embeddings_array)} embeddings to {output_path}...")
+    logger.info(f"Database shape: {embeddings_array.shape}")
+    logger.info(f"Database size: {embeddings_array.nbytes / 1024**2:.2f} MB")
+
+    with h5py.File(output_path, 'w') as f:
+        # Save with compression
+        f.create_dataset(
+            'expression_embeddings',
+            data=embeddings_array,
+            compression='gzip',
+            compression_opts=4
+        )
+
+        # Save metadata
+        f.attrs['num_embeddings'] = len(embeddings_array)
+        f.attrs['embedding_dim'] = 128
+        f.attrs['frame_stride'] = frame_stride
+        f.attrs['num_windows'] = num_windows
+
+    logger.info(f"✅ Expression database saved to {output_path}")
+
+
 def build_expression_database(
     motion_dir: str = "./cache_single_bucket",
     output_path: str = "expression_embeddings.h5",
@@ -30,6 +113,8 @@ def build_expression_database(
 ):
     """
     Build database of expression embeddings from motion_attributes H5 files.
+
+    DEPRECATED: Use build_from_single_bucket_cache() instead for faster builds.
 
     Args:
         motion_dir: Directory containing motion_attributes H5 files
@@ -107,37 +192,15 @@ def build_expression_database(
                 traceback.print_exc()
                 continue
 
-        # Convert to numpy array and save
+        # Save using helper function
         logger.info(f"Converting {len(all_embeddings)} embeddings to array...")
-        embeddings_array = np.stack(all_embeddings, axis=0)  # [N, 128]
+        save_expression_database(all_embeddings, output_path, frame_stride, len(motion_files))
 
-        logger.info(f"Saving to {output_path}...")
-        logger.info(f"Final database shape: {embeddings_array.shape}")
-        logger.info(f"Database size: {embeddings_array.nbytes / 1024**2:.2f} MB")
+        logger.info(f"📊 Statistics:")
+        logger.info(f"  Files processed: {len(motion_files)}")
+        logger.info(f"  Embeddings per file (avg): {len(all_embeddings) / len(motion_files):.1f}")
 
-        # Save with compression
-        f.create_dataset(
-            'expression_embeddings',
-            data=embeddings_array,
-            compression='gzip',
-            compression_opts=4
-        )
-
-        # Save metadata
-        f.attrs['num_embeddings'] = len(all_embeddings)
-        f.attrs['embedding_dim'] = 128
-        f.attrs['frame_stride'] = frame_stride
-        f.attrs['num_files'] = len(motion_files)
-
-    logger.info(f"✅ Database saved to {output_path}")
-    logger.info(f"📊 Statistics:")
-    logger.info(f"  Total embeddings: {len(all_embeddings)}")
-    logger.info(f"  Embedding dimension: 128")
-    logger.info(f"  Frame stride: {frame_stride}")
-    logger.info(f"  Files processed: {len(motion_files)}")
-    logger.info(f"  Embeddings per file (avg): {len(all_embeddings) / len(motion_files):.1f}")
-
-    return embeddings_array
+    return np.stack(all_embeddings, axis=0)
 
 
 def verify_database(db_path: str):

@@ -523,13 +523,17 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         emo_identity_path: str = "nemo/data/IMG_1.png",  # NEW: Identity image for EMO
         emo_keyframes_per_window: int = 5,  # NEW: Number of EMO keyframes to generate
         va_bridge = None,  # NEW: Volumetric avatar bridge for EMO generation
+        auto_rebuild_expression_db: bool = False,  # NEW: Auto-rebuild expression DB after preprocessing
+        expression_db_frame_stride: int = 5,  # NEW: Sample every Nth frame for expression DB
     ):
         VASADatasetMixin.__init__(self)
-        
+
         # Basic initialization
         self.video_folder = Path(video_folder)
         self.emo_model = emo_model
         self.window_size = window_size
+        self.auto_rebuild_expression_db = auto_rebuild_expression_db
+        self.expression_db_frame_stride = expression_db_frame_stride
         self.stride = stride
         self.max_batch_size = max_batch_size
         self.context_size = context_size

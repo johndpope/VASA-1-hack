@@ -218,6 +218,38 @@ def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True):
             logger.info("✅ Cache validation passed!")
         else:
             logger.error(f"❌ Cache validation failed: {issues}")
+
+        # Auto-rebuild expression database if enabled
+        # Read config from dataset (if available) or use default
+        auto_rebuild = getattr(dataset, 'auto_rebuild_expression_db', False)
+        frame_stride = getattr(dataset, 'expression_db_frame_stride', 5)
+
+        if auto_rebuild and len(all_windows) > 0:
+            logger.info("")
+            logger.info("="*80)
+            logger.info("🔨 Auto-rebuilding expression database...")
+            logger.info("="*80)
+
+            try:
+                from build_expression_db import build_from_single_bucket_cache
+
+                cache_file = cache_dir / "all_windows_cache.h5"
+                db_output = cache_dir / "expression_embeddings.h5"
+
+                build_from_single_bucket_cache(
+                    cache_path=str(cache_file),
+                    output_path=str(db_output),
+                    frame_stride=frame_stride
+                )
+
+                logger.info("✅ Expression database rebuild complete!")
+                logger.info(f"   Database location: {db_output}")
+
+            except Exception as e:
+                logger.error(f"❌ Failed to rebuild expression database: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+
     else:
         logger.error("❌ No windows were successfully processed!")
 
@@ -279,7 +311,9 @@ def main():
         generate_emo_frames=True,  # Enable EMO frame generation
         emo_identity_path="nemo/data/IMG_1.png",  # Identity image
         emo_keyframes_per_window=50,  # 50 keyframes per window
-        va_bridge=va_bridge  # Pass the bridge
+        va_bridge=va_bridge,  # Pass the bridge
+        auto_rebuild_expression_db=True,  # Auto-rebuild expression DB
+        expression_db_frame_stride=1  # Sample all frames (use 5 for every 5th)
     )
 
     # Preprocess and cache
