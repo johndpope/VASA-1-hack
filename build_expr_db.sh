@@ -4,7 +4,7 @@
 # Output will be saved in the same directory as input with name expression_embeddings.h5
 
 CACHE_PATH="${1:-./test_cache}"
-STRIDE="${2:-5}"
+STRIDE="1"
 
 # Auto-determine output path - save in same directory as input
 if [ -d "$CACHE_PATH" ]; then

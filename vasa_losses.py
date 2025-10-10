@@ -1697,7 +1697,9 @@ class VASALossModule:
 
 
             # 1. Theta (pose matrix) loss
-            if 'theta' in pred:
+            # Skip if using identity theta (no theta prediction/loss in this mode)
+            use_identity_theta = self.config.dataset.get('use_identity_theta', False)
+            if 'theta' in pred and not use_identity_theta:
                 if is_training:
                     # During training, compare predicted noise to target noise
                     pred_flat = pred['theta'].view(pred['theta'].shape[0], -1, 12)
@@ -1706,7 +1708,7 @@ class VASALossModule:
                 else:
                     # During validation, use pose matrix loss
                     losses['theta_loss'] = self._compute_pose_matrix_loss(
-                        pred['theta'], 
+                        pred['theta'],
                         target['theta']
                     )
 
@@ -1848,9 +1850,17 @@ class VASALossModule:
             metrics = {}
 
             # Process each parameter and compute losses
+            # Skip theta if using identity theta mode
+            use_identity_theta = self.config.dataset.get('use_identity_theta', False)
+
             for param, dim in param_dims.items():
                 try:
                     if param == 'theta':
+                        # Skip theta loss if using identity theta
+                        if use_identity_theta:
+                            losses[f'{param}_loss'] = torch.tensor(0.0, device=device)
+                            continue
+
                         pred_flat = pred_motion[param].view(B, -1, 12)
                         target_flat = comparison_target[param].view(B, -1, 12)
 

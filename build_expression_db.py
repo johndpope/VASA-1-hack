@@ -58,33 +58,41 @@ def build_expression_database(
         # Process each motion file
         for file_idx, motion_file in enumerate(tqdm(motion_files, desc="Processing motion files")):
             try:
+                # Skip if this is the expression_embeddings.h5 file (output file)
+                if motion_file.name == Path(output_path).name:
+                    logger.debug(f"Skipping output file: {motion_file.name}")
+                    continue
+
                 with h5py.File(motion_file, 'r') as motion_h5:
-                    # Get total frames in this file
-                    num_frames = len(motion_h5.keys())
+                    # Get all window keys
+                    window_keys = [k for k in motion_h5.keys() if k.startswith('window_')]
 
-                    # Sample every Nth frame
-                    sampled_frames = list(range(0, num_frames, frame_stride))
+                    logger.debug(f"File {file_idx}: {motion_file.name}, {len(window_keys)} windows")
 
-                    logger.debug(f"File {file_idx}: {motion_file.name}, {num_frames} frames, sampling {len(sampled_frames)} frames")
+                    # Process each window
+                    for window_key in window_keys:
+                        window_data = motion_h5[window_key]
 
-                    # Extract embeddings for sampled frames
-                    for frame_idx in sampled_frames:
-                        frame_key = str(frame_idx)
-                        if frame_key not in motion_h5:
+                        # Get expression embeddings from window
+                        if 'expression_embed' not in window_data:
+                            logger.warning(f"No expression_embed in {window_key}")
                             continue
 
-                        frame_data = motion_h5[frame_key]
+                        expr_embeds = np.array(window_data['expression_embed'])  # [T, 128]
 
-                        # Get expression embedding (target_pose_embed in H5)
-                        if 'target_pose_embed' in frame_data:
-                            expr_embed = np.array(frame_data['target_pose_embed'])  # [128]
+                        # Sample every Nth frame from this window
+                        num_frames = expr_embeds.shape[0]
+                        sampled_indices = list(range(0, num_frames, frame_stride))
+
+                        for idx in sampled_indices:
+                            expr_embed = expr_embeds[idx]  # [128]
 
                             # Validate shape
                             if expr_embed.shape == (128,):
                                 all_embeddings.append(expr_embed)
                                 total_frames += 1
                             else:
-                                logger.warning(f"Invalid shape for {motion_file.name} frame {frame_idx}: {expr_embed.shape}")
+                                logger.warning(f"Invalid shape for {motion_file.name} {window_key} frame {idx}: {expr_embed.shape}")
 
                 # Periodically log progress
                 if (file_idx + 1) % 10 == 0:
@@ -165,11 +173,11 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Build expression embedding database")
-    parser.add_argument('--motion-dir', type=str, default='/media/12TB/VASA/motion_attributes',
+    parser.add_argument('--motion-dir', type=str, default='/media/2TB/VASA-1-hack/cache_single_bucket',
                        help='Directory containing motion_attributes H5 files')
     parser.add_argument('--output', type=str, default='expression_embeddings.h5',
                        help='Output H5 file path')
-    parser.add_argument('--frame-stride', type=int, default=5,
+    parser.add_argument('--frame-stride', type=int, default=1,
                        help='Sample every Nth frame (default: 5)')
     parser.add_argument('--verify', action='store_true',
                        help='Verify existing database instead of building')

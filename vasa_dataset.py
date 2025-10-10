@@ -2832,98 +2832,101 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         # For built-in cache, use the original save method
                         self._save_window_to_cache(video_path, window['window_idx'], window_data)
 
-                    # Generate EMO frames if enabled
+                    # Generate EMO frames if enabled AND not already in window_data (from cache)
                     if self.generate_emo_frames and self.va_bridge is not None and self.emo_identity_image is not None:
-                        try:
-                            with torch.no_grad():
-                                # Clear VA bridge cache to ensure fresh embeddings for EMO identity
-                                if hasattr(self.va_bridge, 'clear_cache'):
-                                    self.va_bridge.clear_cache()
+                        if 'emo_frames' in window_data:
+                            logger.debug(f"✅ Using cached EMO frames for window {idx} ({len(window_data['emo_frames'])} keyframes)")
+                        else:
+                            try:
+                                with torch.no_grad():
+                                    # Clear VA bridge cache to ensure fresh embeddings for EMO identity
+                                    if hasattr(self.va_bridge, 'clear_cache'):
+                                        self.va_bridge.clear_cache()
 
-                                # Select keyframe indices
-                                T = window_data['theta'].shape[0]
-                                keyframe_indices = np.linspace(0, T-1, self.emo_keyframes_per_window, dtype=int)
+                                    # Select keyframe indices
+                                    T = window_data['theta'].shape[0]
+                                    keyframe_indices = np.linspace(0, T-1, self.emo_keyframes_per_window, dtype=int)
 
-                                emo_frames = []
-                                for frame_idx in keyframe_indices:
-                                    # Extract motion for this frame and ensure all on same device
-                                    frame_motion = {
-                                        'theta': window_data['theta'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device),  # [1, 1, 3, 4]
-                                        'expression_embed': window_data['expression_embed'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device),  # [1, 1, 128]
-                                        'uv_warps': window_data['uv_warps'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device) if 'uv_warps' in window_data else None,  # [1, 1, 16, 64, 64, 3]
-                                    }
+                                    emo_frames = []
+                                    for frame_idx in keyframe_indices:
+                                        # Extract motion for this frame and ensure all on same device
+                                        frame_motion = {
+                                            'theta': window_data['theta'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device),  # [1, 1, 3, 4]
+                                            'expression_embed': window_data['expression_embed'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device),  # [1, 1, 128]
+                                            'uv_warps': window_data['uv_warps'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device) if 'uv_warps' in window_data else None,  # [1, 1, 16, 64, 64, 3]
+                                        }
 
-                                    # Check if we have uv_warps (required for EMO generation)
-                                    if frame_motion['uv_warps'] is None:
-                                        logger.debug(f"Skipping EMO frame {frame_idx}: uv_warps not available")
-                                        emo_frames.append(torch.zeros(3, 512, 512, device=self.device))
-                                        continue
+                                        # Check if we have uv_warps (required for EMO generation)
+                                        if frame_motion['uv_warps'] is None:
+                                            logger.debug(f"Skipping EMO frame {frame_idx}: uv_warps not available")
+                                            emo_frames.append(torch.zeros(3, 512, 512, device=self.device))
+                                            continue
 
-                                    # Generate EMO frame using va_bridge
-                                    # Output will be [1, 1, C, H, W]
-                                    emo_identity = self.emo_identity_image.to(self.device)
+                                        # Generate EMO frame using va_bridge
+                                        # Output will be [1, 1, C, H, W]
+                                        emo_identity = self.emo_identity_image.to(self.device)
 
-                                    # DEBUG: Save identity image once to verify it's correct
-                                    if frame_idx == 0 and idx % 100 == 0:
-                                        import torchvision
-                                        torchvision.utils.save_image(emo_identity[0], f'debug_emo_identity_window_{idx}.png')
-                                        logger.info(f"Saved debug EMO identity image for window {idx}")
+                                        # DEBUG: Save identity image once to verify it's correct
+                                        if frame_idx == 0 and idx % 100 == 0:
+                                            import torchvision
+                                            torchvision.utils.save_image(emo_identity[0], f'debug_emo_identity_window_{idx}.png')
+                                            logger.info(f"Saved debug EMO identity image for window {idx}")
 
-                                    emo_output, _ = self.va_bridge.generate_frames_from_motion(
-                                        motion_outputs=frame_motion,
-                                        source_img=emo_identity,
-                                        use_black_background=True  # Use black background to ensure clean EMO render
-                                    )
+                                        emo_output, _ = self.va_bridge.generate_frames_from_motion(
+                                            motion_outputs=frame_motion,
+                                            source_img=emo_identity,
+                                            use_black_background=True  # Use black background to ensure clean EMO render
+                                        )
 
-                                    if emo_output is not None:
-                                        # Extract the single frame [1, 1, C, H, W] -> [C, H, W]
-                                        frame = emo_output[0, 0]
-                                        emo_frames.append(frame)
-                                    else:
-                                        # Add blank frame if generation failed
-                                        emo_frames.append(torch.zeros(3, 512, 512, device=self.device))
+                                        if emo_output is not None:
+                                            # Extract the single frame [1, 1, C, H, W] -> [C, H, W]
+                                            frame = emo_output[0, 0]
+                                            emo_frames.append(frame)
+                                        else:
+                                            # Add blank frame if generation failed
+                                            emo_frames.append(torch.zeros(3, 512, 512, device=self.device))
 
-                                # Stack EMO frames [num_keyframes, C, H, W]
-                                if len(emo_frames) == 0:
-                                    raise RuntimeError(f"EMO generation is enabled but produced no frames for window {idx}")
+                                    # Stack EMO frames [num_keyframes, C, H, W]
+                                    if len(emo_frames) == 0:
+                                        raise RuntimeError(f"EMO generation is enabled but produced no frames for window {idx}")
 
-                                window_data['emo_frames'] = torch.stack(emo_frames, dim=0)
-                                window_data['emo_keyframe_indices'] = torch.tensor(keyframe_indices, dtype=torch.long)
-                                logger.info(f"✅ Generated {len(emo_frames)} EMO frames for window {idx}")
+                                    window_data['emo_frames'] = torch.stack(emo_frames, dim=0)
+                                    window_data['emo_keyframe_indices'] = torch.tensor(keyframe_indices, dtype=torch.long)
+                                    logger.info(f"✅ Generated {len(emo_frames)} EMO frames for window {idx}")
 
-                                # QUALITY CHECK: Detect bad UV warps immediately after generation
-                                if 'uv_warps' in window_data:
-                                    uv_magnitude = window_data['uv_warps'].abs().mean().item()
-                                    uv_std = window_data['uv_warps'].std().item()
+                                    # QUALITY CHECK: Detect bad UV warps immediately after generation
+                                    if 'uv_warps' in window_data:
+                                        uv_magnitude = window_data['uv_warps'].abs().mean().item()
+                                        uv_std = window_data['uv_warps'].std().item()
 
-                                    # Check for collapsed/bad UV warps
-                                    if uv_magnitude < 0.15 or uv_std < 0.01:
-                                        logger.error(f"❌ BAD UV WARPS detected for window {idx} from video {video_path}")
-                                        logger.error(f"   UV magnitude: {uv_magnitude:.6f} (threshold: 0.15)")
-                                        logger.error(f"   UV std: {uv_std:.6f} (threshold: 0.01)")
+                                        # Check for collapsed/bad UV warps
+                                        if uv_magnitude < 0.15 or uv_std < 0.01:
+                                            logger.error(f"❌ BAD UV WARPS detected for window {idx} from video {video_path}")
+                                            logger.error(f"   UV magnitude: {uv_magnitude:.6f} (threshold: 0.15)")
+                                            logger.error(f"   UV std: {uv_std:.6f} (threshold: 0.01)")
 
-                                        # Dispatch event to mark video as bad
-                                        self.tracker.dispatch(VideoEventData(
-                                            video_path=video_path,
-                                            event_type=VideoEvent.BAD_UV_WARPS,
-                                            details={
-                                                "window_idx": idx,
-                                                "uv_magnitude": uv_magnitude,
-                                                "uv_std": uv_std,
-                                                "reason": f"UV warps collapsed (magnitude={uv_magnitude:.4f}, std={uv_std:.6f})"
-                                            }
-                                        ))
+                                            # Dispatch event to mark video as bad
+                                            self.tracker.dispatch(VideoEventData(
+                                                video_path=video_path,
+                                                event_type=VideoEvent.BAD_UV_WARPS,
+                                                details={
+                                                    "window_idx": idx,
+                                                    "uv_magnitude": uv_magnitude,
+                                                    "uv_std": uv_std,
+                                                    "reason": f"UV warps collapsed (magnitude={uv_magnitude:.4f}, std={uv_std:.6f})"
+                                                }
+                                            ))
 
-                                        # Return zero sample to skip this window
-                                        logger.warning(f"⚠️ Returning zero sample for window {idx} due to bad UV warps")
-                                        return self._get_zero_sample()
+                                            # Return zero sample to skip this window
+                                            logger.warning(f"⚠️ Returning zero sample for window {idx} due to bad UV warps")
+                                            return self._get_zero_sample()
 
-                        except Exception as e:
-                            logger.error(f"❌ FAILED to generate EMO frames for window {idx}: {e}")
-                            import traceback
-                            logger.error(traceback.format_exc())
-                            # EMO frames are REQUIRED - re-raise the exception
-                            raise RuntimeError(f"EMO frame generation is mandatory but failed: {e}") from e
+                            except Exception as e:
+                                logger.error(f"❌ FAILED to generate EMO frames for window {idx}: {e}")
+                                import traceback
+                                logger.error(traceback.format_exc())
+                                # EMO frames are REQUIRED - re-raise the exception
+                                raise RuntimeError(f"EMO frame generation is mandatory but failed: {e}") from e
 
                     # Return the single window data directly
                     return window_data

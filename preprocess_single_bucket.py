@@ -224,7 +224,7 @@ def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True):
 
 def main():
     parser = argparse.ArgumentParser(description='Preprocess windows for single-bucket cache')
-    parser.add_argument('--video_folder', type=str, default='junk',
+    parser.add_argument('--video_folder', type=str, default='junk2',
                         help='Path to video folder')
     parser.add_argument('--cache_dir', type=str, default='cache_single_bucket',
                         help='Cache directory')

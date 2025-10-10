@@ -758,6 +758,8 @@ class VASATrainer:
 
         # Pre-compute identity embedding once for derived warps (MEMORY OPTIMIZATION)
         self.idt_embed = None
+        self.use_identity_theta = config.dataset.get('use_identity_theta', False)
+
         if self.use_derived_warps and self.identity_image is not None:
             with torch.no_grad():
                 identity_img = self.identity_image.to(self.accelerator.device)
@@ -776,6 +778,9 @@ class VASATrainer:
                 self.idt_embed = self.model.volumetric_avatar.idt_embedder_nw(masked_identity)
 
                 logger.info(f"✅ Pre-computed identity embedding (spatial): {self.idt_embed.shape}")
+
+                if self.use_identity_theta:
+                    logger.info(f"✅ Identity theta mode enabled: will use first frame theta from each video")
 
                 # Clean up
                 del identity_img, identity_mask, masked_identity
@@ -820,17 +825,13 @@ class VASATrainer:
         self.current_epoch = 0
         self.global_step = 0
         self.best_val_loss = float('inf')
-        
+
         # Set up metrics tracker
         self.train_metrics = MetricsTracker()
         self.val_metrics = MetricsTracker()
         self.training_state = TrainingState(config)
         self.worker_state = WorkerState.get_instance()
 
-      
-
-
-    
     def get_layer_wise_learning_rates(self, model: VASAModel) -> List[Dict[str, Any]]:
         """
         Get learning rate parameters with separate learning rates for each motion component.
@@ -1197,6 +1198,14 @@ class VASATrainer:
                                          for k, v in motion_data.items()}
 
                             B = motion_data['theta'].shape[0]
+                            T = motion_data['theta'].shape[1]
+
+                            # Replace theta with first frame theta if enabled
+                            if self.use_identity_theta:
+                                # Use first frame theta for all frames [B, T, 3, 4]
+                                first_frame_theta = motion_data['theta'][:, 0:1, :, :]  # [B, 1, 3, 4]
+                                motion_data['theta'] = first_frame_theta.expand(B, T, -1, -1)
+                                logger.debug(f"[IDENTITY THETA] Using first frame theta for all {T} frames")
 
                             # In train_epoch:
                             if self.config.train.turn_off_noise:

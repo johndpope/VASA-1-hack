@@ -6,7 +6,7 @@ defaults:
 model:
   hidden_dim: 512
   n_heads: 8
-  n_layers: 2                 # Reduced to 1 for ultra-fast training (change to 2 or more for better quality)
+  n_layers: 8                 # Reduced to 1 for ultra-fast training (change to 2 or more for better quality)
   dim_feedforward: 2048
   dropout: 0.05
   expression_dim: 128  # Expression embedding dimension from volumetric avatar
@@ -84,7 +84,7 @@ train:
 
   windows_per_batch: 2          # Reduced from 14 to 4 for better sequence diversity
   gradient_accumulation_steps: 4  # Increase effective batch size to break plateau
-  num_epochs: 1000            # Reduced for quick testing
+  num_epochs: 2000            # Reduced for quick testing
 
   beta1: 0.9
   beta2: 0.999
@@ -244,7 +244,7 @@ loss:
   
   # Frame generation for disentanglement losses and visualization
   use_sparse_frames: false    # If true, only generate first and last frame (saves 90% memory)
-  enable_frame_generation: false  # DISABLED - control losses not needed until TDD (expression DB) converges
+  enable_frame_generation: true  # DISABLED - control losses not needed until TDD (expression DB) converges
   save_debug_frames: false  
   warmup_epochs: 0            # No warmup for overfitting
   
@@ -288,10 +288,11 @@ dataset:
   max_sequence_samples: 1000 # Maximum samples per epoch
   use_identity_image: true    # Use high-quality identity image instead of video frame
   identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image
+  use_identity_theta: false   # Use theta from identity image for all frames (no theta prediction/loss)
   # EMO generation settings
-  generate_emo_frames: false   # DISABLED - not needed until TDD converges (was true)
+  generate_emo_frames: true   # DISABLED - not needed until TDD converges (was true)
   emo_identity_path: "nemo/data/IMG_1.png"  # Same identity image for EMO generation
-  emo_keyframes_per_window: 0  # DISABLED - skip EMO generation (was 5)
+  emo_keyframes_per_window: 50  # DISABLED - skip EMO generation (was 5)
   use_single_bucket: true     # Use single-bucket caching for all windows
 
   # Quality filtering

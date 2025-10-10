@@ -760,6 +760,9 @@ class VASAModel(nn.Module):
         self.condition_embedding = self.motion_transformer.cond_emb
         self.device = device
 
+        # Identity theta mode - use fixed theta from identity image
+        self.use_identity_theta = config.dataset.get('use_identity_theta', False)
+
         # Cosine embedding head for expression database lookup
         # Normalizes predictions before comparing to database
         expression_dim = config.model.expression_dim
@@ -1035,6 +1038,12 @@ class VASAModel(nn.Module):
             cond_emb=cond_emb,
             prev_context=prev_context
         )
+
+        # When using identity theta, replace predicted theta with input theta
+        # This bypasses theta prediction entirely
+        if self.use_identity_theta:
+            outputs['theta'] = motion_data['theta']  # Use the identity theta we set earlier
+            logger.debug(f"[IDENTITY THETA] Using fixed identity theta instead of prediction")
 
         # Cosine embedding loss with expression database
         # Apply AFTER motion_transformer but BEFORE warp generation
