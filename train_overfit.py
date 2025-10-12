@@ -108,7 +108,10 @@ def main():
         max_videos=config.dataset.max_videos,
         cache_dir=config.paths.cache_dir,
         device=config.device,
-        use_single_bucket=use_single_bucket
+        use_single_bucket=use_single_bucket,
+        cache_frames_to_disk=config.dataset.get('cache_frames_to_disk', True),
+        cache_emo_frames_to_disk=config.dataset.get('cache_emo_frames_to_disk', True),
+        frame_format=config.dataset.get('frame_format', 'png')
     )
 
     # Check if single-bucket cache exists, preprocess if needed

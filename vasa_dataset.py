@@ -730,12 +730,12 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 
         # Filter to valid videos
         valid_videos = [
-            v for v in self.video_paths 
-            if isinstance(self.audio_status.get(v), dict) and 
+            v for v in self.video_paths
+            if isinstance(self.audio_status.get(v), dict) and
             self.audio_status[v].get('has_audio', False)
         ]
         self.video_paths = valid_videos
-        
+
         logger.info(f"Found {len(self.video_paths)} videos with valid audio")
         
         # Extract audio if requested
@@ -978,39 +978,46 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             return 0.0, 0.0
         
 
-    def _get_emotion(self, face_crop: np.ndarray) -> np.ndarray:
-        """Get emotion VA (valence-arousal) values using HSEmotion MTL model"""
+    def _get_emotion(self, face_crop: np.ndarray) -> tuple:
+        """Get emotion label and VA (valence-arousal) values using HSEmotion MTL model
+
+        Returns:
+            tuple: (emotion_label: str, va_values: np.ndarray) where va_values is shape (2,) for [valence, arousal]
+        """
         try:
             # Ensure face crop is the right size
             if face_crop.shape[0] < 64 or face_crop.shape[1] < 64:
                 face_crop = cv2.resize(face_crop, (64, 64))
-            
+
             # Get predictions - returns (label, scores) where scores includes VA values
             labels, scores = self.emotion_recognizer.predict_emotions(face_crop, logits=True)
-            
+
             # logger.debug(f"Emotion scores: {scores}")
             # logger.debug(f"Emotion labels: {labels}")
-            
+
+            # Extract emotion label
+            emotion_label = labels if isinstance(labels, str) else "neutral"
+
             # Extract VA values (last two values in scores)
             if isinstance(scores, np.ndarray) and scores.size >= 2:
                 va_values = scores[-2:]  # Get last two values (valence, arousal)
                 va_values = np.array(va_values, dtype=np.float32)
-                
+
                 # Ensure correct shape
                 if va_values.shape != (2,):
                     logger.warning(f"Unexpected VA shape: {va_values.shape}")
-                    return np.zeros(2, dtype=np.float32)
-                    
+                    return emotion_label, np.zeros(2, dtype=np.float32)
+
                 # Apply tanh to ensure values are in [-1, 1] range
                 va_values = np.tanh(va_values)
-                
-                return va_values
-                
-            return np.zeros(2, dtype=np.float32)
-                
+
+                return emotion_label, va_values
+
+            return emotion_label, np.zeros(2, dtype=np.float32)
+
         except Exception as e:
             logger.error(f"Error in emotion VA extraction: {str(e)}")
-            return np.zeros(2, dtype=np.float32)  # [valence, arousal]
+            return "neutral", np.zeros(2, dtype=np.float32)  # [label, valence-arousal]
         
             
     def _compute_main_gaze_direction(self, frames: List[np.ndarray]) -> Tuple[float, float]:
@@ -1112,12 +1119,12 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         
         for video_path in self.video_paths:
             logger.debug(f"\nProcessing video: {video_path}")
-            
+
             # Skip if no audio
             if not self.audio_status.get(video_path, {}).get('has_audio', False):
                 logger.debug(f"Skipping - no audio available")
                 continue
-            
+
             # Check video length
             video_info = self._check_video_length(video_path)
             if video_info is None:
@@ -1721,7 +1728,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             # Check if video has audio
             has_audio = self.audio_status.get(video_path, {}).get('has_audio', False)
             logger.debug(f"Audio status for video: has_audio={has_audio}")
-            
+
             if not has_audio:
                 logger.warning(f"No audio in video: {video_path}")
                 return (
@@ -2121,11 +2128,12 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             distance = np.array([face_size], dtype=np.float32)
 
             # Get emotion using existing emotion recognizer
-            emotion_logits = self._get_emotion(face_crop)
+            emotion_label, emotion_va = self._get_emotion(face_crop)
 
             return {
                 'landmarks': landmarks_68,
-                'emotion': emotion_logits,
+                'emotion': emotion_va,  # VA values [valence, arousal]
+                'emotion_label': emotion_label,  # String label like "sad", "happy", etc.
                 'gaze': gaze,  # L2CS gaze results
                 'head_distance': distance,
                 'bbox': bbox
@@ -2667,7 +2675,13 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         )
                         if frames is not None:
                             cached_data['frames'] = frames
-                            logger.debug(f"📀 Loaded frames from disk cache for window {idx}")
+                            logger.info(f"📀 Loaded frames from disk cache for window {idx}")
+                        else:
+                            logger.warning(f"❌ Failed to load frames from disk for window {idx}, video: {video_path}, window_idx: {window['window_idx']}")
+                            logger.warning(f"   Frames should be at: {self.frame_cache.get_window_dir(video_path, window['window_idx'])}")
+                    elif 'frames' not in cached_data:
+                        logger.error(f"❌ CRITICAL: frames not in cached_data and frame loading disabled!")
+                        logger.error(f"   cache_frames_to_disk={self.cache_frames_to_disk}, frame_cache={self.frame_cache is not None}")
 
                     # Load emo_frames from disk cache if enabled and not in H5
                     if self.cache_emo_frames_to_disk and self.emo_frame_cache and 'emo_frames' not in cached_data:
@@ -2746,6 +2760,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     # Process face attributes
                     gaze_angles = []
                     emotion_logits = []
+                    emotion_labels = []  # Store emotion labels (e.g., "sad", "happy")
                     distances = []
                     landmarks_list = []
                     speed_buckets = []
@@ -2785,6 +2800,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                                 # Store basic attributes
                                 gaze_angles.append(attrs['gaze'])
                                 emotion_logits.append(attrs['emotion'])
+                                emotion_labels.append(attrs.get('emotion_label', 'neutral'))  # Store label
                                 distances.append(attrs['head_distance'])
                                 
                                 # Store landmarks in correct order
@@ -2809,6 +2825,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                                 # Add zero-filled arrays for missing data
                                 gaze_angles.append(np.zeros(2, dtype=np.float32))
                                 emotion_logits.append(np.zeros(2, dtype=np.float32))
+                                emotion_labels.append('neutral')  # Default label
                                 distances.append(np.array([0.5], dtype=np.float32))
                                 speed_buckets.append(4)  # Middle bucket
                                 
@@ -2836,9 +2853,9 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
                     # Create window data with correct key names
                     # Squeeze batch dimension from EMO features (they come as [1, T, ...])
-                    # NOTE: We DON'T cache frames - they'll be loaded from video on demand
+                    # NOTE: Frames will be saved to disk cache and excluded from H5 cache
                     window_data = {
-                        # 'frames': torch.stack(frames),  # DISABLED: 150 MB per window, loaded on-the-fly instead
+                        'frames': torch.stack(frames),  # Include frames so they can be saved to disk cache
                         'theta': emo_features['theta'].squeeze(0),  # [1, T, 3, 4] -> [T, 3, 4]
                         'scale': emo_features['scale'].squeeze(0),  # [1, T, 3] -> [T, 3]
                         'rotation': emo_features['rotation'].squeeze(0),  # [1, T, 3] -> [T, 3]
@@ -2850,6 +2867,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         'audio_mel_spec': mel_spec.squeeze(0),  # [1, T, 128] -> [T, 128] - mel spectrogram for Synchformer
                         'gaze': torch.tensor(np.stack(gaze_angles), dtype=torch.float32),
                         'emotion': torch.tensor(np.stack(emotion_logits), dtype=torch.float32),
+                        'emotion_label': emotion_labels,  # List of strings like ["sad", "happy", "neutral", ...]
                         'head_distance': torch.tensor(np.stack(distances), dtype=torch.float32),
                         'speed_bucket': torch.tensor(speed_buckets, dtype=torch.long).unsqueeze(-1),
 

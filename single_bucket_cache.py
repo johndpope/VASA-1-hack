@@ -533,9 +533,9 @@ class SingleBucketCache:
                     if window_key not in f:
                         issues.append(f"Missing window {i}")
                     else:
-                        # Check essential keys
+                        # Check essential keys (identity_frame is optional when frames are cached to disk)
                         window = f[window_key]
-                        essential_keys = ['identity_frame', 'audio_features', 'gaze', 'emotion']
+                        essential_keys = ['audio_features', 'gaze', 'emotion']
                         for key in essential_keys:
                             if key not in window:
                                 issues.append(f"Window {i} missing key: {key}")

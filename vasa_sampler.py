@@ -273,9 +273,15 @@ def create_window_sequence_collate_fn(context_size: int = 10):
             
         # Create batched dictionary
         batched = {}
+
+        # Debug: Log what keys are available in the first window
+        logger.info(f"🔍 Keys available in first processed window: {sorted([k for k in processed_windows[0].keys() if not k.startswith('metadata')])}")
+
         keys_to_stack = [
             'frames', 'theta', 'scale', 'rotation', 'translation',
-            'expression_embed', 'audio_features', 'audio_mfcc',
+            'expression_embed', 'audio_features', 'audio_mfcc', 'audio_mel_spec',
+            # NOTE: audio_waveform excluded - too large for batching (26k samples), causes OOM
+            # Synchformer uses audio_mel_spec instead
             'gaze', 'emotion', 'head_distance', 'speed_bucket',
             'lips', 'right_eye', 'left_eye', 'jaw', 'nose',
             'lip_motion', 'blink_state',
@@ -286,7 +292,7 @@ def create_window_sequence_collate_fn(context_size: int = 10):
             # EMO (Volumetric Avatar) generated frames for comparison
             'emo_frames', 'emo_keyframe_indices'
         ]
-        
+
         for key in keys_to_stack:
             if key in processed_windows[0]:
                 try:
@@ -295,6 +301,9 @@ def create_window_sequence_collate_fn(context_size: int = 10):
                     batched[key] = torch.stack(tensors_to_stack)
                 except Exception as e:
                     logger.warning(f"Could not stack {key}: {e}")
+            else:
+                if key in ['audio_mel_spec', 'audio_mfcc']:  # Log missing audio keys
+                    logger.warning(f"⚠️ Key '{key}' not found in processed windows")
 
         # Handle lip_metrics separately as it's a dictionary of tensors
         if 'lip_metrics' in processed_windows[0]:
@@ -309,7 +318,11 @@ def create_window_sequence_collate_fn(context_size: int = 10):
 
         # Handle metadata separately (don't stack)
         batched['metadata'] = [w['metadata'] for w in processed_windows]
-        
+
+        # Handle emotion_label separately (list of strings, don't stack)
+        if 'emotion_label' in processed_windows[0]:
+            batched['emotion_label'] = [w['emotion_label'] for w in processed_windows]
+
         return batched
     
     return collate_fn

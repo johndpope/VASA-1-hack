@@ -155,9 +155,14 @@ class MotionSequenceHandler:
 
         # Include audio features for sync loss and other audio-related losses
         if 'audio_features' in window:
-            motion_data['audio_features'] = window['audio_features']  # Should be [B, T, D]
+            motion_data['audio_features'] = window['audio_features']  # wav2vec features [B, T, 768]
+        if 'audio_mel_spec' in window:
+            motion_data['audio_mel_spec'] = window['audio_mel_spec']  # Mel spectrogram [B, T, 128] - for Synchformer
+        if 'audio_mfcc' in window:
+            motion_data['audio_mfcc'] = window['audio_mfcc']  # MFCC features [B, T, 13]
+        # Legacy key support
         if 'mfcc' in window:
-            motion_data['mfcc'] = window['mfcc']  # MFCC features for SyncNet
+            motion_data['mfcc'] = window['mfcc']
 
         return motion_data  
 

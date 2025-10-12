@@ -286,9 +286,9 @@ dataset:
   max_videos: 10              # REDUCED from 1000 to 50 - use only the best quality videos
   min_sequence_length: 10    # Minimum sequence length (match window_size)
   max_sequence_samples: 1000 # Maximum samples per epoch
-  use_identity_image: true    # Use high-quality identity image instead of video frame
+  use_identity_image: true    # UNSTABLE - Use high-quality identity image instead of video frame
   identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image
-  use_identity_theta: true   # Use theta from identity image for all frames (no theta prediction/loss)
+  use_identity_theta: false   # Use theta from identity image for all frames (no theta prediction/loss)
 
   # Frame caching options (MD5-indexed disk storage)
   cache_frames_to_disk: true        # Save original frames to disk (default: true)

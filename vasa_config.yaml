@@ -292,6 +292,12 @@ dataset:
   use_identity_theta: false 
 
 
+  # Frame caching options (MD5-indexed disk storage)
+  cache_frames_to_disk: true        # Save original frames to disk (default: true)
+  cache_emo_frames_to_disk: true    # Save EMO frames to disk (default: true)
+  frame_format: 'png'               # Image format for cached frames ('png' or 'jpg')
+
+
     # Expression database settings
   auto_rebuild_expression_db: true  # Auto-rebuild expression DB after preprocessing
   expression_db_frame_stride: 1     # Sample every Nth frame for DB (1=all frames, 5=every 5th)
