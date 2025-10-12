@@ -10,4 +10,5 @@
 	url = https://github.com/ibug-group/face_detection.git
 [submodule "Synchformer"]
 	path = Synchformer
-	url = https://github.com/v-iashin/Synchformer.git
+	url = https://github.com/johndpope/Synchformer.git
+	branch = main
