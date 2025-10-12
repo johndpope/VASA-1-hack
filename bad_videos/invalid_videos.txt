@@ -1,12 +1,67 @@
 # Failed Videos Report
 
 
-junk/sameid_female_0.mp4:
-  2025-10-06 13:48:57 - processing_error: {'error': 'Face attribute error: CUDA out of memory. Tried to allocate 256.00 MiB. GPU 0 has a total capacity of 31.35 GiB of which 324.38 MiB is free. Process 3123082 has 222.98 MiB memory in use. Process 1539696 has 146.11 MiB memory in use. Process 1245366 has 23.59 GiB memory in use. Including non-PyTorch memory, this process has 4.35 GiB memory in use. Of the allocated memory 3.13 GiB is allocated by PyTorch, and 551.28 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)'}
-  2025-10-06 13:48:58 - processing_error: {'error': 'Face attribute error: CUDA out of memory. Tried to allocate 256.00 MiB. GPU 0 has a total capacity of 31.35 GiB of which 324.38 MiB is free. Process 3123082 has 222.98 MiB memory in use. Process 1539696 has 146.11 MiB memory in use. Process 1245366 has 23.59 GiB memory in use. Including non-PyTorch memory, this process has 4.35 GiB memory in use. Of the allocated memory 3.13 GiB is allocated by PyTorch, and 551.41 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)'}
-  2025-10-06 13:48:58 - processing_error: {'error': 'Face attribute error: CUDA out of memory. Tried to allocate 256.00 MiB. GPU 0 has a total capacity of 31.35 GiB of which 324.38 MiB is free. Process 3123082 has 222.98 MiB memory in use. Process 1539696 has 146.11 MiB memory in use. Process 1245366 has 23.59 GiB memory in use. Including non-PyTorch memory, this process has 4.35 GiB memory in use. Of the allocated memory 3.13 GiB is allocated by PyTorch, and 551.52 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)'}
-  2025-10-06 13:48:58 - processing_error: {'error': 'Face attribute error: CUDA out of memory. Tried to allocate 256.00 MiB. GPU 0 has a total capacity of 31.35 GiB of which 324.38 MiB is free. Process 3123082 has 222.98 MiB memory in use. Process 1539696 has 146.11 MiB memory in use. Process 1245366 has 23.59 GiB memory in use. Including non-PyTorch memory, this process has 4.35 GiB memory in use. Of the allocated memory 3.12 GiB is allocated by PyTorch, and 552.11 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)'}
-  2025-10-06 13:48:59 - processing_error: {'error': 'Face attribute error: CUDA out of memory. Tried to allocate 256.00 MiB. GPU 0 has a total capacity of 31.35 GiB of which 322.38 MiB is free. Process 3123082 has 222.98 MiB memory in use. Process 1539696 has 146.11 MiB memory in use. Process 1245366 has 23.59 GiB memory in use. Including non-PyTorch memory, this process has 4.35 GiB memory in use. Of the allocated memory 3.13 GiB is allocated by PyTorch, and 553.64 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)'}
-  2025-10-06 13:48:59 - processing_error: {'error': 'Face attribute error: CUDA out of memory. Tried to allocate 256.00 MiB. GPU 0 has a total capacity of 31.35 GiB of which 322.38 MiB is free. Process 3123082 has 222.98 MiB memory in use. Process 1539696 has 146.11 MiB memory in use. Process 1245366 has 23.59 GiB memory in use. Including non-PyTorch memory, this process has 4.35 GiB memory in use. Of the allocated memory 3.13 GiB is allocated by PyTorch, and 552.68 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)'}
-  2025-10-06 13:49:00 - processing_error: {'error': 'Face attribute error: CUDA out of memory. Tried to allocate 256.00 MiB. GPU 0 has a total capacity of 31.35 GiB of which 322.38 MiB is free. Process 3123082 has 222.98 MiB memory in use. Process 1539696 has 146.11 MiB memory in use. Process 1245366 has 23.59 GiB memory in use. Including non-PyTorch memory, this process has 4.35 GiB memory in use. Of the allocated memory 3.13 GiB is allocated by PyTorch, and 553.71 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)'}
-  2025-10-06 13:49:00 - processing_error: {'error': 'Face attribute error: CUDA out of memory. Tried to allocate 256.00 MiB. GPU 0 has a total capacity of 31.35 GiB of which 322.38 MiB is free. Process 3123082 has 222.98 MiB memory in use. Process 1539696 has 146.11 MiB memory in use. Process 1245366 has 23.59 GiB memory in use. Including non-PyTorch memory, this process has 4.35 GiB memory in use. Of the allocated memory 3.13 GiB is allocated by PyTorch, and 552.43 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)'}
+junk2/11.mp4:
+  2025-10-12 08:02:46 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:02:47 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:02:48 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:02:49 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:02:49 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:02:50 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:02:51 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:02:51 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:02:58 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:02:59 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:00 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:00 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:02 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:03 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:12 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:13 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:16 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+
+junk2/videovideo-hOQAsNg8aw-scene3_scene3.mp4:
+  2025-10-12 08:02:52 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:02:53 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:07 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:08 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+
+junk2/videovideoeI2V8Bd5X9s-scene6_scene1.mp4:
+  2025-10-12 08:02:53 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:02:54 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:15 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:16 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+
+junk2/videovideozqKyByqbSs8-scene18_scene2.mp4:
+  2025-10-12 08:02:54 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:02:55 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:10 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:11 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+
+junk2/videovideo_0MTaef81jQQ-scene23_scene4.mp4:
+  2025-10-12 08:02:56 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:02:56 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:11 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:12 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+
+junk2/videovideokUUhJtbrIwU-scene241_scene6.mp4:
+  2025-10-12 08:02:57 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:02:58 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+
+junk2/videovideoIfai_9UFDSU-scene1_scene7.mp4:
+  2025-10-12 08:03:01 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:02 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:09 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:09 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+
+junk2/videovideo_dvrizT3014o-scene1_scene20.mp4:
+  2025-10-12 08:03:04 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:04 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:06 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:07 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+
+junk2/videovideoAl5MFMZvpY4-scene2_scene1.mp4:
+  2025-10-12 08:03:05 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:05 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:14 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+  2025-10-12 08:03:14 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}

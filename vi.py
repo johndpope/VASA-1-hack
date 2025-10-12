@@ -406,8 +406,76 @@ class VASAInference:
 
                 # Extract source parameters
                 source_params = self.extract_source_params(source_tensor)
-                
-                # Generate frames with exact length match
+
+                # DIAGNOSTIC: Test with silence to verify audio is guiding expressions
+                logger.info("\n=== SILENCE TEST - Verifying Audio Guidance ===")
+                silence_windows = []
+                for window in audio_windows:
+                    silence_window = {
+                        'audio_features': torch.zeros_like(window['audio_features']),  # Zero audio
+                        'gaze': window.get('gaze', torch.zeros(1, self.window_size, 2, device=self.device)),
+                        'emotion': window.get('emotion', torch.zeros(1, self.window_size, 2, device=self.device)),
+                        'blink': window.get('blink', torch.zeros(1, self.window_size, 3, device=self.device)),
+                    }
+                    silence_windows.append(silence_window)
+
+                # Generate with silence
+                silence_frames = self.generate_frames_from_audio(
+                    source_params=source_params,
+                    audio_windows=silence_windows,
+                    initial_expression=source_params['expression_embed']
+                )
+
+                # Analyze silence output
+                silence_frames_tensor = silence_frames  # [T, C, H, W]
+                logger.info(f"Silence frames shape: {silence_frames_tensor.shape}")
+
+                # Check expression variance in silence (should be LOW if audio guides properly)
+                # We can't directly access expression_embed, but we can check visual variance
+                frame_diffs = []
+                for i in range(1, len(silence_frames_tensor)):
+                    diff = (silence_frames_tensor[i] - silence_frames_tensor[i-1]).abs().mean().item()
+                    frame_diffs.append(diff)
+
+                silence_variance = torch.tensor(frame_diffs).var().item() if frame_diffs else 0.0
+                silence_mean_diff = torch.tensor(frame_diffs).mean().item() if frame_diffs else 0.0
+
+                logger.info(f"Silence test results:")
+                logger.info(f"  Mean frame-to-frame diff: {silence_mean_diff:.6f}")
+                logger.info(f"  Frame diff variance: {silence_variance:.6f}")
+
+                if silence_mean_diff > 0.01:
+                    logger.warning("⚠️  HIGH MOTION IN SILENCE! Audio may not be guiding expressions.")
+                    logger.warning("   Model is generating motion from noise/pose instead of audio.")
+                    logger.warning("   Consider increasing audio CFG scale (currently using default 20.0)")
+                else:
+                    logger.info("✅ Low motion in silence - audio guidance is working")
+
+                # Save silence test video for inspection (without audio)
+                silence_output_path = str(output_path).replace('.mp4', '_silence_test.mp4')
+                logger.info(f"Saving silence test to: {silence_output_path}")
+
+                # Save frames without audio (silence test)
+                frames_np = silence_frames_tensor.cpu().numpy().transpose(0, 2, 3, 1)
+                if frames_np.max() <= 1.0:
+                    frames_np = (frames_np * 255).astype(np.uint8)
+
+                import cv2
+                writer = cv2.VideoWriter(
+                    silence_output_path,
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    fps,
+                    (frames_np.shape[2], frames_np.shape[1])
+                )
+
+                for frame in frames_np:
+                    writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                writer.release()
+                logger.info(f"✅ Saved silence test video: {silence_output_path}")
+
+                logger.info("=== End Silence Test ===\n")
+
+                # Generate frames with actual audio (normal inference)
                 frames = self.generate_frames_from_audio(
                     source_params=source_params,
                     audio_windows=audio_windows,

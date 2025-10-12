@@ -290,6 +290,12 @@ dataset:
   use_identity_image: true    # Use high-quality identity image instead of video frame
   identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image
   use_identity_theta: false 
+
+
+    # Expression database settings
+  auto_rebuild_expression_db: true  # Auto-rebuild expression DB after preprocessing
+  expression_db_frame_stride: 1     # Sample every Nth frame for DB (1=all frames, 5=every 5th)
+  
   # EMO generation settings
   generate_emo_frames: false   # DISABLED - not needed until TDD converges (was true)
   emo_identity_path: "nemo/data/IMG_1.png"  # Same identity image for EMO generation

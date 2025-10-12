@@ -54,6 +54,15 @@ except ImportError:
     SingleBucketCache = None
     USE_SINGLE_BUCKET = False
     logger.info("SingleBucketCache not available")
+
+try:
+    from frame_disk_cache import FrameDiskCache
+    USE_FRAME_DISK_CACHE = True
+    logger.info("FrameDiskCache available for MD5-indexed frame storage")
+except ImportError:
+    FrameDiskCache = None
+    USE_FRAME_DISK_CACHE = False
+    logger.info("FrameDiskCache not available")
 from torchvision.utils import save_image
 from datetime import datetime
 import hashlib
@@ -525,6 +534,9 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         va_bridge = None,  # NEW: Volumetric avatar bridge for EMO generation
         auto_rebuild_expression_db: bool = False,  # NEW: Auto-rebuild expression DB after preprocessing
         expression_db_frame_stride: int = 5,  # NEW: Sample every Nth frame for expression DB
+        cache_frames_to_disk: bool = False,  # NEW: Load frames from disk cache
+        cache_emo_frames_to_disk: bool = False,  # NEW: Load EMO frames from disk cache
+        frame_format: str = 'png',  # NEW: Frame format for disk cache
     ):
         VASADatasetMixin.__init__(self)
 
@@ -574,6 +586,20 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         self.cache_dir = Path(cache_dir) if cache_dir else Path(video_folder) / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.use_single_bucket = use_single_bucket
+
+        # Initialize frame disk caches if enabled
+        self.frame_cache = None
+        self.emo_frame_cache = None
+        self.cache_frames_to_disk = cache_frames_to_disk
+        self.cache_emo_frames_to_disk = cache_emo_frames_to_disk
+
+        if cache_frames_to_disk and USE_FRAME_DISK_CACHE and FrameDiskCache:
+            self.frame_cache = FrameDiskCache(self.cache_dir, frame_type='frames')
+            logger.info(f"✅ Frame disk cache enabled for loading at {self.frame_cache.root}")
+
+        if cache_emo_frames_to_disk and USE_FRAME_DISK_CACHE and FrameDiskCache:
+            self.emo_frame_cache = FrameDiskCache(self.cache_dir, frame_type='emo_frames')
+            logger.info(f"✅ EMO frame disk cache enabled for loading at {self.emo_frame_cache.root}")
 
         # Choose cache implementation based on preference
         if use_single_bucket and USE_SINGLE_BUCKET and SingleBucketCache:
@@ -737,10 +763,16 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             
             # Create windows
             self.windows = self._create_window_indices()
+
+            # NOTE: emo_frames filtering disabled because emo_frames are generated on-the-fly
+            # and not always saved back to cache. Filtering would incorrectly exclude valid windows.
+            # If needed in future, ensure emo_frames are saved to cache after generation.
+            logger.info(f"Using all {len(self.windows)} windows (emo_frames will be generated on-the-fly if needed)")
+
             self.video_windows = defaultdict(list)
             for window in self.windows:
                 self.video_windows[window['video_path']].append(window)
-            
+
             logger.info(f"Created {len(self.windows)} total windows across {len(self.video_paths)} videos")
         else:
             logger.warning("No valid videos found with audio!")
@@ -1813,16 +1845,57 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 # Return zero tensor with correct shape
                 mfcc_features = torch.zeros(1, self.window_size, 13, device=audio_segment.device)
                 logger.debug(f"Returning zero tensor with shape: {mfcc_features.shape}")
-            
 
-            return features, mfcc_features
+            # Extract mel spectrogram for Synchformer (128 mel bins, 50 time frames)
+            logger.debug("\n=== Processing Mel Spectrogram for Synchformer ===")
+            try:
+                mel_transform = torchaudio.transforms.MelSpectrogram(
+                    sample_rate=sample_rate,
+                    n_fft=1024,
+                    hop_length=audio_segment.shape[-1] // self.window_size,  # Ensure 50 frames
+                    n_mels=128,  # Standard for Synchformer
+                    f_min=0.0,
+                    f_max=8000.0
+                )
+
+                mel_spec = mel_transform(audio_segment)  # [1, n_mels, T]
+
+                # Ensure exactly window_size (50) time frames
+                if mel_spec.shape[-1] != self.window_size:
+                    # Interpolate to exact window_size
+                    mel_spec = F.interpolate(
+                        mel_spec.unsqueeze(0),  # [1, 1, n_mels, T]
+                        size=(128, self.window_size),
+                        mode='bilinear',
+                        align_corners=False
+                    ).squeeze(0)  # [1, n_mels, T]
+
+                # Convert to log scale
+                mel_spec = torch.log(mel_spec + 1e-8)
+
+                # Transpose to [1, T, n_mels] for consistency
+                mel_spec = mel_spec.transpose(1, 2)  # [1, window_size, 128]
+
+                logger.debug(f"Mel spectrogram shape: {mel_spec.shape}")
+                logger.debug(f"Mel spectrogram range: [{mel_spec.min():.3f}, {mel_spec.max():.3f}]")
+
+            except Exception as e:
+                logger.error(f"Error in mel spectrogram processing: {str(e)}")
+                logger.error(traceback.format_exc())
+                mel_spec = torch.zeros(1, self.window_size, 128, device=audio_segment.device)
+
+            return features, mfcc_features, audio_segment, mel_spec
 
         except Exception as e:
             logger.error(f"Error extracting audio features: {str(e)}")
             logger.error(traceback.format_exc())
+            # Return zero tensors including audio waveform and mel spec
+            samples_needed = int(self.window_size * sample_rate / fps)
             return (
                 torch.zeros((1, self.window_size, 384 if use_whisper else 768)),
-                torch.zeros((1, self.window_size, 13))
+                torch.zeros((1, self.window_size, 13)),
+                torch.zeros((1, samples_needed)),  # audio_segment with correct shape
+                torch.zeros((1, self.window_size, 128))  # mel_spec [1, 50, 128]
             )
                     
     def _preextract_all_audio(self):
@@ -2584,6 +2657,29 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         'fps': window.get('fps', 30),
                         'has_context': window.get('has_context', False)
                     })
+
+                    # Load frames from disk cache if enabled and not in H5
+                    if self.cache_frames_to_disk and self.frame_cache and 'frames' not in cached_data:
+                        frames = self.frame_cache.load_frames(
+                            video_path=video_path,
+                            window_idx=window['window_idx'],
+                            as_tensor=True
+                        )
+                        if frames is not None:
+                            cached_data['frames'] = frames
+                            logger.debug(f"📀 Loaded frames from disk cache for window {idx}")
+
+                    # Load emo_frames from disk cache if enabled and not in H5
+                    if self.cache_emo_frames_to_disk and self.emo_frame_cache and 'emo_frames' not in cached_data:
+                        emo_frames = self.emo_frame_cache.load_frames(
+                            video_path=video_path,
+                            window_idx=window['window_idx'],
+                            as_tensor=True
+                        )
+                        if emo_frames is not None:
+                            cached_data['emo_frames'] = emo_frames
+                            logger.debug(f"📀 Loaded emo_frames from disk cache for window {idx}")
+
                     return cached_data
             elif self.cache_type == 'chunked':
                 # For chunked cache (WindowCache), load from chunk
@@ -2639,8 +2735,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     if not emo_features:
                         return self._get_zero_sample()
 
-                    # Extract both types of audio features
-                    wav2vec_features, mfcc_features = self._extract_audio_features(
+                    # Extract both types of audio features + mel spectrogram
+                    wav2vec_features, mfcc_features, audio_segment, mel_spec = self._extract_audio_features(
                         video_path,
                         start_time=window['start_frame'] / window['fps'],
                         duration=self.window_size / window['fps']
@@ -2740,8 +2836,9 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
                     # Create window data with correct key names
                     # Squeeze batch dimension from EMO features (they come as [1, T, ...])
+                    # NOTE: We DON'T cache frames - they'll be loaded from video on demand
                     window_data = {
-                        'frames': torch.stack(frames),
+                        # 'frames': torch.stack(frames),  # DISABLED: 150 MB per window, loaded on-the-fly instead
                         'theta': emo_features['theta'].squeeze(0),  # [1, T, 3, 4] -> [T, 3, 4]
                         'scale': emo_features['scale'].squeeze(0),  # [1, T, 3] -> [T, 3]
                         'rotation': emo_features['rotation'].squeeze(0),  # [1, T, 3] -> [T, 3]
@@ -2749,6 +2846,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         'expression_embed': emo_features['expression_embed'].squeeze(0),  # [1, T, 128] -> [T, 128]
                         'audio_features': wav2vec_features.squeeze(0) if wav2vec_features.ndim == 3 else wav2vec_features,  # [1, T, 768] -> [T, 768]
                         'audio_mfcc': mfcc_features.squeeze(0) if mfcc_features.ndim == 3 else mfcc_features,  # [1, T, 13] -> [T, 13]
+                        'audio_waveform': audio_segment.squeeze(0),  # [1, samples] -> [samples] - raw audio for legacy
+                        'audio_mel_spec': mel_spec.squeeze(0),  # [1, T, 128] -> [T, 128] - mel spectrogram for Synchformer
                         'gaze': torch.tensor(np.stack(gaze_angles), dtype=torch.float32),
                         'emotion': torch.tensor(np.stack(emotion_logits), dtype=torch.float32),
                         'head_distance': torch.tensor(np.stack(distances), dtype=torch.float32),
@@ -2862,7 +2961,12 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
                                         # Check if we have uv_warps (required for EMO generation)
                                         if frame_motion['uv_warps'] is None:
-                                            logger.debug(f"Skipping EMO frame {frame_idx}: uv_warps not available")
+                                            if frame_idx == 0:  # Log once per window
+                                                logger.error(f"❌ Window {idx}: uv_warps is None - EMO frames will be black!")
+                                                logger.error(f"   'uv_warps' in window_data: {'uv_warps' in window_data}")
+                                                if 'uv_warps' in window_data:
+                                                    logger.error(f"   uv_warps shape: {window_data['uv_warps'].shape}")
+                                                    logger.error(f"   uv_warps range: [{window_data['uv_warps'].min():.6f}, {window_data['uv_warps'].max():.6f}]")
                                             emo_frames.append(torch.zeros(3, 512, 512, device=self.device))
                                             continue
 
@@ -2989,6 +3093,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             'translation': torch.zeros((self.sequence_length, 3)),
             'audio_features': torch.zeros((self.sequence_length, 768)),   # wav2vec - no batch dim
             'audio_mfcc': torch.zeros((self.sequence_length, 13)),       # mfcc for syncnet - no batch dim
+            'audio_waveform': torch.zeros(self.sequence_length * 640),    # raw audio at 16kHz, ~40ms per frame
+            'audio_mel_spec': torch.zeros((self.sequence_length, 128)),   # mel spectrogram for Synchformer
             'gaze': torch.zeros((self.sequence_length, 2)),
             'head_distance': torch.zeros((self.sequence_length, 1)),
             'emotion': torch.zeros((self.sequence_length, 2)),

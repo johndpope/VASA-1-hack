@@ -237,6 +237,17 @@ class EfficientConditionEmbedding(nn.Module):
                 audio = audio.squeeze(1)
             audio = self._ensure_float_tensor(audio, dtype)
 
+            # Align audio sequence length with other conditions (T)
+            # Audio may be longer (e.g., 60 frames) while video is shorter (e.g., 20 frames)
+            audio_T = audio.shape[1]
+            if audio_T != T:
+                logger.warning(f"Audio sequence length ({audio_T}) doesn't match video ({T}), interpolating...")
+                # Permute to [B, D, T] for interpolation, then back to [B, T, D]
+                audio = audio.permute(0, 2, 1)  # [B, 768, T]
+                audio = F.interpolate(audio, size=T, mode='linear', align_corners=False)
+                audio = audio.permute(0, 2, 1)  # [B, T, 768]
+                logger.debug(f"Audio interpolated to match T={T}: {audio.shape}")
+
             # JoyVASA approach: Direct projection without normalization
             # This preserves the variance signal that distinguishes silent vs speech
             audio_projected = self.audio_proj(audio)

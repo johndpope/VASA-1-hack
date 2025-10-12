@@ -9,6 +9,7 @@ from pathlib import Path
 import logging
 from vasa_dataset import VASAIntegratedDataset
 from single_bucket_cache import SingleBucketCache
+from frame_disk_cache import FrameDiskCache
 import argparse
 import gc
 import traceback
@@ -17,13 +18,18 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True):
+def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True,
+                         cache_frames: bool = True, cache_emo_frames: bool = True,
+                         frame_format: str = 'png'):
     """Preprocess all windows and save to single-bucket cache.
 
     Args:
         dataset: The VASA dataset
         cache_dir: Directory to save cache
         resume: If True, resume from existing partial cache
+        cache_frames: If True, save original frames to disk
+        cache_emo_frames: If True, save emo frames to disk
+        frame_format: Image format for saved frames ('png' or 'jpg')
     """
 
     cache = SingleBucketCache(
@@ -32,6 +38,18 @@ def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True):
         compression='gzip',
         compression_level=4
     )
+
+    # Initialize frame disk caches if enabled
+    frame_cache = None
+    emo_frame_cache = None
+
+    if cache_frames:
+        frame_cache = FrameDiskCache(cache_dir, frame_type='frames')
+        logger.info(f"✅ Frame disk cache enabled at {frame_cache.root}")
+
+    if cache_emo_frames:
+        emo_frame_cache = FrameDiskCache(cache_dir, frame_type='emo_frames')
+        logger.info(f"✅ EMO frame disk cache enabled at {emo_frame_cache.root}")
 
     # Check if we can resume from existing cache
     existing_windows = []
@@ -139,9 +157,72 @@ def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True):
                         logger.info(f"⚠️ Filtered {quality_filtered_count} low-quality windows so far...")
                     continue  # Skip caching this window
 
+                # Get video path and window index for frame caching
+                video_path = None
+                window_idx_in_video = None
+                if 'metadata' in window_data:
+                    video_path = window_data['metadata'].get('video_path')
+                    window_idx_in_video = window_data['metadata'].get('window_idx', idx)
+
+                # DEBUG: Log what keys are in window_data
+                if idx == 0:
+                    logger.info(f"🔑 Window {idx} keys: {list(window_data.keys())}")
+                    logger.info(f"   'frames' in window_data: {'frames' in window_data}")
+                    logger.info(f"   'emo_frames' in window_data: {'emo_frames' in window_data}")
+
+                # Save frames to disk if enabled
+                if frame_cache and video_path and 'frames' in window_data:
+                    try:
+                        frame_cache.save_frames(
+                            video_path=video_path,
+                            window_idx=window_idx_in_video,
+                            frames=window_data['frames'],
+                            format=frame_format
+                        )
+                        if idx % 50 == 0:
+                            logger.debug(f"💾 Saved frames for window {idx} to disk")
+                    except Exception as e:
+                        logger.warning(f"Failed to save frames for window {idx}: {e}")
+
+                # Save emo_frames to disk if enabled
+                if emo_frame_cache and video_path and 'emo_frames' in window_data:
+                    try:
+                        # DEBUG: Check EMO frame values before saving
+                        emo_frames = window_data['emo_frames']
+                        if isinstance(emo_frames, torch.Tensor):
+                            emo_min, emo_max = emo_frames.min().item(), emo_frames.max().item()
+                            emo_mean = emo_frames.mean().item()
+
+                            if idx % 10 == 0:  # Log every 10th window
+                                logger.info(f"🎨 Window {idx} EMO frames: shape={emo_frames.shape}, range=[{emo_min:.3f}, {emo_max:.3f}], mean={emo_mean:.3f}")
+
+                            if emo_max == 0:
+                                logger.error(f"❌ Window {idx}: EMO frames are all zeros BEFORE saving!")
+                            elif emo_max < 0.01:
+                                logger.warning(f"⚠️ Window {idx}: EMO frames are very dark (max={emo_max:.6f})")
+
+                        emo_frame_cache.save_frames(
+                            video_path=video_path,
+                            window_idx=window_idx_in_video,
+                            frames=window_data['emo_frames'],
+                            format=frame_format,
+                            remove_green_background=True,  # Make green chroma key transparent
+                            green_threshold=0.4  # Lower = more aggressive keying (remove more green)
+                        )
+                        if idx % 50 == 0:
+                            logger.debug(f"💾 Saved emo_frames for window {idx} to disk")
+                    except Exception as e:
+                        logger.warning(f"Failed to save emo_frames for window {idx}: {e}")
+
                 # Convert tensors to CPU and detach to avoid memory accumulation
                 window_data_cpu = {}
                 for key, value in window_data.items():
+                    # Skip frames and emo_frames if they're being cached to disk
+                    if cache_frames and key == 'frames':
+                        continue
+                    if cache_emo_frames and key == 'emo_frames':
+                        continue
+
                     if isinstance(value, torch.Tensor):
                         # Move to CPU and detach from computation graph
                         window_data_cpu[key] = value.detach().cpu()
@@ -212,6 +293,23 @@ def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True):
         if failed_indices:
             logger.warning(f"   ❌ Failed to process {len(failed_indices)} windows: {failed_indices[:10]}...")
 
+        # Log frame cache statistics
+        if frame_cache:
+            frame_stats = frame_cache.get_cache_stats()
+            logger.info(f"📊 Frame disk cache stats:")
+            logger.info(f"   Videos: {frame_stats['total_videos']}")
+            logger.info(f"   Windows: {frame_stats['total_windows']}")
+            logger.info(f"   Frames: {frame_stats['total_frames']}")
+            logger.info(f"   Size: {frame_stats['total_size_gb']:.2f} GB")
+
+        if emo_frame_cache:
+            emo_stats = emo_frame_cache.get_cache_stats()
+            logger.info(f"📊 EMO frame disk cache stats:")
+            logger.info(f"   Videos: {emo_stats['total_videos']}")
+            logger.info(f"   Windows: {emo_stats['total_windows']}")
+            logger.info(f"   Frames: {emo_stats['total_frames']}")
+            logger.info(f"   Size: {emo_stats['total_size_gb']:.2f} GB")
+
         # Validate cache
         is_valid, issues = cache.validate_cache()
         if is_valid:
@@ -256,7 +354,7 @@ def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True):
 
 def main():
     parser = argparse.ArgumentParser(description='Preprocess windows for single-bucket cache')
-    parser.add_argument('--video_folder', type=str, default='junk2',
+    parser.add_argument('--video_folder', type=str, default='junk',
                         help='Path to video folder')
     parser.add_argument('--cache_dir', type=str, default='cache_single_bucket',
                         help='Cache directory')
@@ -268,6 +366,16 @@ def main():
                         help='Stride between windows')
     parser.add_argument('--no-resume', action='store_true',
                         help='Start fresh instead of resuming from existing cache')
+    parser.add_argument('--cache-frames', action='store_true', default=True,
+                        help='Cache original frames to disk (default: True)')
+    parser.add_argument('--no-cache-frames', action='store_false', dest='cache_frames',
+                        help='Disable caching original frames to disk')
+    parser.add_argument('--cache-emo-frames', action='store_true', default=True,
+                        help='Cache EMO frames to disk (default: True)')
+    parser.add_argument('--no-cache-emo-frames', action='store_false', dest='cache_emo_frames',
+                        help='Disable caching EMO frames to disk')
+    parser.add_argument('--frame-format', type=str, default='png', choices=['png', 'jpg'],
+                        help='Image format for cached frames (default: png)')
     args = parser.parse_args()
 
     # Load EMO model
@@ -317,7 +425,14 @@ def main():
     )
 
     # Preprocess and cache
-    preprocess_and_cache(dataset, Path(args.cache_dir), resume=not args.no_resume)
+    preprocess_and_cache(
+        dataset,
+        Path(args.cache_dir),
+        resume=not args.no_resume,
+        cache_frames=args.cache_frames,
+        cache_emo_frames=args.cache_emo_frames,
+        frame_format=args.frame_format
+    )
 
 
 if __name__ == "__main__":

@@ -128,10 +128,10 @@ class SingleBucketCache:
                                     )
 
                         elif isinstance(value, torch.Tensor):
-                            # Handle frames specially - only save first frame as identity_frame
+                            # Handle frames: prioritize emo_frames, fallback to identity frame
                             if key == 'frames':
                                 if len(value) > 0:
-                                    # Save only the first frame as identity_frame
+                                    # Save only the first frame as identity_frame (for fallback)
                                     ds = window_group.create_dataset(
                                         'identity_frame',
                                         data=value[0].cpu().numpy(),  # Just the first frame
@@ -140,6 +140,18 @@ class SingleBucketCache:
                                     )
                                     ds.attrs['dtype'] = str(value.dtype)
                                     ds.attrs['shape'] = value[0].shape
+                            elif key == 'emo_frames':
+                                # Save EMO-generated identity-transferred driving frames
+                                # These are used for Synchformer sync loss
+                                ds = window_group.create_dataset(
+                                    'emo_frames',
+                                    data=value.cpu().numpy(),
+                                    compression=self.compression,
+                                    compression_opts=self.compression_level
+                                )
+                                ds.attrs['dtype'] = str(value.dtype)
+                                ds.attrs['shape'] = value.shape
+                                logger.debug(f"Saved emo_frames with shape {value.shape}")
                             else:
                                 # Save other tensor data normally
                                 ds = window_group.create_dataset(
@@ -197,9 +209,32 @@ class SingleBucketCache:
                 window_data = {}
 
                 # Load all data from window
+                # First check if we have emo_frames (priority for Synchformer)
+                has_emo_frames = 'emo_frames' in window_group
+
                 for key in window_group.keys():
-                    if key == 'identity_frame':
-                        # Load identity frame and expand to full frames tensor
+                    if key == 'emo_frames':
+                        # Load EMO-generated driving frames with identity transferred
+                        # These are used for Synchformer sync loss
+                        dataset = window_group[key]
+                        emo_frames_data = dataset[()]
+                        emo_frames = torch.from_numpy(emo_frames_data)
+
+                        # Restore original dtype if stored
+                        if 'dtype' in dataset.attrs:
+                            dtype_str = dataset.attrs['dtype']
+                            if 'float32' in dtype_str:
+                                emo_frames = emo_frames.float()
+                            elif 'float16' in dtype_str:
+                                emo_frames = emo_frames.half()
+
+                        # Use emo_frames as the main 'frames' for training
+                        window_data['frames'] = emo_frames
+                        window_data['emo_frames'] = emo_frames  # Keep for reference
+                        logger.debug(f"Loaded emo_frames as main frames: {emo_frames.shape}")
+
+                    elif key == 'identity_frame' and not has_emo_frames:
+                        # Fallback: Load identity frame only if emo_frames not available
                         dataset = window_group[key]
                         identity_frame_data = dataset[()]
                         identity_frame = torch.from_numpy(identity_frame_data)
@@ -215,6 +250,7 @@ class SingleBucketCache:
                         # Duplicate identity frame for all frame positions (assuming window_size=50)
                         # This ensures compatibility with models expecting full frame sequences
                         window_data['frames'] = identity_frame.unsqueeze(0).repeat(50, 1, 1, 1)
+                        logger.debug(f"Loaded duplicated identity_frame as fallback frames")
 
                     elif key == 'metadata':
                         # Load metadata
@@ -327,12 +363,27 @@ class SingleBucketCache:
 
                     # Save each tensor/data in the window
                     for key, value in window_data.items():
-                        if key == 'frames':
-                            # Store only identity frame to save space
+                        if key == 'emo_frames':
+                            # Store EMO-generated driving frames for Synchformer
+                            tensor_data = value.cpu().numpy() if (isinstance(value, torch.Tensor) and value.is_cuda) else (value.numpy() if isinstance(value, torch.Tensor) else value)
+                            dataset = window_group.create_dataset(
+                                'emo_frames',
+                                data=tensor_data,
+                                compression='gzip',
+                                compression_opts=1
+                            )
+                            if isinstance(value, torch.Tensor):
+                                dataset.attrs['dtype'] = str(value.dtype)
+                                dataset.attrs['shape'] = value.shape
+                            logger.debug(f"Appended emo_frames with shape {value.shape if isinstance(value, torch.Tensor) else 'N/A'}")
+
+                        elif key == 'frames':
+                            # Store only identity frame to save space (fallback)
                             identity_frame = value[0] if value.ndim == 4 else value
+                            tensor_data = identity_frame.cpu().numpy() if (isinstance(identity_frame, torch.Tensor) and identity_frame.is_cuda) else (identity_frame.numpy() if isinstance(identity_frame, torch.Tensor) else identity_frame)
                             dataset = window_group.create_dataset(
                                 'identity_frame',
-                                data=identity_frame.numpy() if isinstance(identity_frame, torch.Tensor) else identity_frame,
+                                data=tensor_data,
                                 compression='gzip',
                                 compression_opts=1
                             )
@@ -362,9 +413,10 @@ class SingleBucketCache:
                             lip_group = window_group.create_group('lip_metrics')
                             for metric_key, metric_value in value.items():
                                 if isinstance(metric_value, torch.Tensor):
+                                    tensor_data = metric_value.cpu().numpy() if metric_value.is_cuda else metric_value.numpy()
                                     lip_group.create_dataset(
                                         metric_key,
-                                        data=metric_value.numpy(),
+                                        data=tensor_data,
                                         compression='gzip'
                                     )
 
@@ -381,12 +433,14 @@ class SingleBucketCache:
                             dataset.attrs['shape'] = value.shape
 
                 # Update the total window count
+                new_total = int(current_num_windows + len(new_windows))
+                f.attrs['num_windows'] = new_total
+
+                # Also update metadata dict for consistency
                 if 'metadata' not in f.attrs:
                     f.attrs['metadata'] = json.dumps({})
-
                 metadata = json.loads(f.attrs.get('metadata', '{}'))
-                # Ensure the count is a Python int, not numpy int64
-                metadata['num_windows'] = int(current_num_windows + len(new_windows))
+                metadata['num_windows'] = new_total
                 f.attrs['metadata'] = json.dumps(metadata)
 
             logger.info(f"Appended {len(new_windows)} windows, total: {current_num_windows + len(new_windows)}")

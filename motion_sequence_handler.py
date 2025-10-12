@@ -138,17 +138,19 @@ class MotionSequenceHandler:
         NOTE: SRT (scale/rotation/translation) removed - model only predicts theta + expression.
         Nemo's volumetric avatar handles SRT internally via warp generation.
         """
-        # Validate that UV warps are present (main warping field from H5 cache)
+        # UV warps are optional - if not cached, use zeros (will be derived from Nemo networks)
         if 'uv_warps' not in window:
-            raise KeyError(
-                f"CRITICAL: Missing required UV warps field. "
-                f"Dataset must provide this field. Available keys: {list(window.keys())}"
-            )
+            logger.debug("UV warps not in cache, using zeros (will be derived from Nemo)")
+            B, T = window['theta'].shape[0], window['theta'].shape[1]
+            device = window['theta'].device
+            uv_warps = torch.zeros((B, T, 16, 64, 64, 3), device=device)
+        else:
+            uv_warps = window['uv_warps']
 
         motion_data = {
             'theta': window['theta'],            # [B, T, 3, 4] - pose matrix
             'expression_embed': window['expression_embed'],  # [B, T, 128] - aligned expression
-            'uv_warps': window['uv_warps'],      # [B, T, 16, 64, 64, 3] - UV warps from H5
+            'uv_warps': uv_warps,      # [B, T, 16, 64, 64, 3] - UV warps (zeros if not cached, derived during forward)
         }
 
         # Include audio features for sync loss and other audio-related losses

@@ -601,14 +601,26 @@ class VASALossModule:
                 # 1.6 Audio-Expression Direct Coupling - Force expression to follow audio energy
                 audio_key = 'audio_features' if 'audio_features' in conditions else 'audio' if 'audio' in conditions else None
                 if audio_key is not None:
-                    audio = conditions[audio_key]  # [B, T, 768]
+                    audio = conditions[audio_key]  # [B, T_audio, 768]
+
+                    # Align audio sequence length with expression sequence length
+                    B_expr, T_expr, D_expr = expr.shape
+                    B_audio, T_audio, D_audio = audio.shape
+
+                    if T_audio != T_expr:
+                        logger.debug(f"  Interpolating audio from {T_audio} to {T_expr} frames for audio-expr coupling")
+                        # Permute to [B, D, T] for interpolation, then back to [B, T, D]
+                        audio = audio.permute(0, 2, 1)  # [B, 768, T]
+                        audio = F.interpolate(audio, size=T_expr, mode='linear', align_corners=False)
+                        audio = audio.permute(0, 2, 1)  # [B, T_expr, 768]
+
                     # Compute audio energy/magnitude
-                    audio_energy = torch.norm(audio, dim=-1, keepdim=True)  # [B, T, 1]
+                    audio_energy = torch.norm(audio, dim=-1, keepdim=True)  # [B, T_expr, 1]
                     # Normalize to [0, 1]
                     audio_energy_norm = (audio_energy - audio_energy.min()) / (audio_energy.max() - audio_energy.min() + 1e-8)
 
                     # Compute expression magnitude
-                    expr_magnitude = torch.norm(expr, dim=-1, keepdim=True)  # [B, T, 1]
+                    expr_magnitude = torch.norm(expr, dim=-1, keepdim=True)  # [B, T_expr, 1]
                     # Normalize to [0, 1]
                     expr_magnitude_norm = (expr_magnitude - expr_magnitude.min()) / (expr_magnitude.max() - expr_magnitude.min() + 1e-8)
 
@@ -1225,6 +1237,9 @@ class VASALossModule:
         # If using Synchformer, it can directly predict offsets
         if isinstance(self.syncnet, SynchformerInstance):
             # Get offset predictions from Synchformer
+            logger.info(f"[_compute_temporal_offset] About to call compute_sync_score")
+            logger.info(f"[_compute_temporal_offset] generated_frames.shape: {generated_frames.shape}")
+            logger.info(f"[_compute_temporal_offset] audio_features.shape: {audio_features.shape}")
             with torch.no_grad():
                 logits = self.syncnet.compute_sync_score(
                     generated_frames, audio_features, return_logits=True
@@ -1307,25 +1322,41 @@ class VASALossModule:
         - t_p, t_gt: timestamps where misalignment occurs
         """
         try:
-            # Get audio features - check multiple possible keys
-            if 'mfcc' in targets:
+            logger.info(f"[_compute_sync_loss] Entry: generated_frames.shape = {generated_frames.shape}")
+            logger.info(f"[_compute_sync_loss] Available audio keys in targets: {[k for k in targets.keys() if 'audio' in k.lower()]}")
+
+            # Get audio features - prioritize mel spectrogram for Synchformer (50 frames x 128 mel bins)
+            if 'audio_mel_spec' in targets:
+                audio_features = targets['audio_mel_spec']
+                logger.info(f"✅ Using mel spectrogram for sync loss: {audio_features.shape}")
+            elif 'audio_waveform' in targets:
+                audio_features = targets['audio_waveform']
+                logger.warning(f"⚠️ Using raw audio waveform (will need conversion): {audio_features.shape}")
+            elif 'mfcc' in targets:
                 audio_features = targets['mfcc']
-                logger.debug("Using MFCC features for sync loss")
+                logger.warning(f"Using MFCC features for sync loss (not ideal for Synchformer): {audio_features.shape}")
             elif 'audio_mfcc' in targets:
                 audio_features = targets['audio_mfcc']
-                logger.debug("Using audio_mfcc features for sync loss")
+                logger.warning(f"Using audio_mfcc features for sync loss (not ideal for Synchformer): {audio_features.shape}")
             elif 'audio_features' in targets:
-                audio_features = targets['audio_features']
-                logger.debug("Using audio_features (wav2vec) for sync loss")
-            else:
-                logger.warning(f"No audio features in targets, returning zero sync loss. Available keys: {list(targets.keys())}")
+                # wav2vec features - not usable with Synchformer
+                logger.warning(f"❌ Only wav2vec features available (shape: {targets['audio_features'].shape}), but Synchformer needs raw audio. Skipping sync loss.")
+                logger.warning(f"   Available keys: {list(targets.keys())}")
                 return torch.tensor(0.0, device=generated_frames.device)
+            else:
+                logger.warning(f"❌ No audio features in targets, returning zero sync loss. Available keys: {list(targets.keys())}")
+                return torch.tensor(0.0, device=generated_frames.device)
+
+            logger.info(f"[_compute_sync_loss] Using audio with shape = {audio_features.shape}")
 
             # Get ground truth frames if available
             gt_frames = targets.get('frames', None)
+            if gt_frames is not None:
+                logger.info(f"[_compute_sync_loss] gt_frames.shape = {gt_frames.shape}")
 
             # Ensure proper shapes
             B, T = generated_frames.shape[:2]
+            logger.info(f"[_compute_sync_loss] Extracted B={B}, T={T} from generated_frames")
 
             # Only compute sync loss if we have enough frames
             if T < 5:

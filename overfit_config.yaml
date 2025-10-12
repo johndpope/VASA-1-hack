@@ -84,7 +84,7 @@ train:
 
   windows_per_batch: 2          # Reduced from 14 to 4 for better sequence diversity
   gradient_accumulation_steps: 4  # Increase effective batch size to break plateau
-  num_epochs: 2000            # Reduced for quick testing
+  num_epochs: 4000            # Reduced for quick testing
 
   beta1: 0.9
   beta2: 0.999
@@ -134,8 +134,8 @@ loss:
   use_adaptive_weighting: true
   adaptive_update_freq: 100   # Update weights every N steps  # Minimum weight for least important dimensions
     
-  use_sync_loss: false  # SyncNet is for evaluation only (per VASA-1 paper)
-  use_synchformer: false  # Use Synchformer instead of SyncNet for sync loss
+  use_sync_loss: true  # SyncNet is for evaluation only (per VASA-1 paper)
+  use_synchformer: true  # Use Synchformer instead of SyncNet for sync loss
   use_verification: false     # Disabled for faster training
   lambda_verification: 0
 
@@ -185,7 +185,7 @@ loss:
 
   # Stage 6: Lip Sync (unlocks at epoch 45 if emotion < 0.3)
   lambda_lips: 2.0            # INCREASED from 0.1 to force better mouth movement
-  lambda_sync: 0.0            # SyncNet for evaluation only, audio conditioning handles training
+  lambda_sync: 2.0            # SyncNet for evaluation only, audio conditioning handles training
   
   # Other losses
   lambda_nonlip: 0.0          # DISABLED until TDD converges (was 0.1)
@@ -278,17 +278,22 @@ inference:
 
 # Dataset parameters - SINGLE VIDEO for overfitting
 dataset:
-  sequence_length: 10         # Match window size (REDUCED to 10)
+  sequence_length: 50         # Match window size (REDUCED to 10)
   frame_size: [512, 512]
   preextract_audio: true
   cache_audio: true
   hop_length: 10
-  max_videos: 1              # REDUCED from 1000 to 50 - use only the best quality videos
+  max_videos: 10              # REDUCED from 1000 to 50 - use only the best quality videos
   min_sequence_length: 10    # Minimum sequence length (match window_size)
   max_sequence_samples: 1000 # Maximum samples per epoch
   use_identity_image: true    # Use high-quality identity image instead of video frame
   identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image
-  use_identity_theta: false   # Use theta from identity image for all frames (no theta prediction/loss)
+  use_identity_theta: true   # Use theta from identity image for all frames (no theta prediction/loss)
+
+  # Frame caching options (MD5-indexed disk storage)
+  cache_frames_to_disk: true        # Save original frames to disk (default: true)
+  cache_emo_frames_to_disk: true    # Save EMO frames to disk (default: true)
+  frame_format: 'png'               # Image format for cached frames ('png' or 'jpg')
 
   # Expression database settings
   auto_rebuild_expression_db: true  # Auto-rebuild expression DB after preprocessing
