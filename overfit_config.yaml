@@ -208,6 +208,7 @@ loss:
   lambda_velocity: 0.0        # DISABLED to allow maximum expression variance
   lambda_smoothness: 0.0      # DISABLED to allow maximum expression variance
   lambda_audio_lip: 3.0       # REDUCED from 5.0 to 3.0 - balance with lip landmark loss (2.0)
+  lambda_mouth_openness: 10.0  # Direct mouth openness to audio energy supervision weight
 
   # Expression-specific losses (CRITICAL FOR PREVENTING COLLAPSE)
   lambda_expression_l1: 0.0   # DISABLED - conflicts with L2, too weak (was 0.1)
@@ -279,13 +280,12 @@ inference:
 
 # Dataset parameters - SINGLE VIDEO for overfitting
 dataset:
-  sequence_length: 50         # Match window size (REDUCED to 10)
+  sequence_length: 50       
   frame_size: [512, 512]
   preextract_audio: true
   cache_audio: true
   hop_length: 10
   max_videos: 10              # REDUCED from 1000 to 50 - use only the best quality videos
-  min_sequence_length: 10    # Minimum sequence length (match window_size)
   max_sequence_samples: 1000 # Maximum samples per epoch
   use_identity_image: true    # UNSTABLE - Use high-quality identity image instead of video frame
   identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image

@@ -347,12 +347,16 @@ class EfficientConditionEmbedding(nn.Module):
 
 class AudioCrossDecoderLayer(nn.Module):
     """
-    Custom decoder layer with FUSED audio cross-attention and Flash Attention optimized causal masking.
+    Custom decoder layer with FUSED audio cross-attention and causal masking on ALL attention mechanisms.
 
     OPTIMIZATION: Removed separate audio_cross_attn head - reuses cross_attn for both conditions and audio.
     This saves ~1.05M parameters per layer with no behavioral change.
 
-    Uses F.scaled_dot_product_attention with is_causal=True for efficient causal self-attention.
+    CAUSAL MASKING:
+    - Self-attention: Uses is_causal=True for efficient causal masking (prevents future motion leakage)
+    - Audio cross-attention: Uses explicit causal mask (prevents future audio leakage)
+    - Ensures frame t can ONLY attend to frames 0..t-1 in BOTH motion and audio
+
     Overrides LayerNorms with DynamicTanh for full DyT integration.
     """
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, **kwargs):
@@ -432,12 +436,25 @@ class AudioCrossDecoderLayer(nn.Module):
             need_weights=False)[0]
         tgt = tgt + self.dropout2(tgt2)
 
-        # 3. FUSED audio cross-attention - reuses cross_attn for audio (saves ~1M params)
+        # 3. FUSED audio cross-attention with CAUSAL MASKING - prevents future audio leakage
+        # Generate causal mask for audio cross-attention
+        # This ensures frame t can only attend to audio from frames 0..t (not future frames)
         tgt_normed = self.norm3(tgt)
+        seq_len = tgt_normed.size(1)
+        audio_seq_len = audio_memory.size(1)
+
+        # Create causal mask: [seq_len, audio_seq_len] where position (i, j) is -inf if j > i
+        # This prevents frame i from attending to audio from frame j where j > i
+        audio_causal_mask = torch.triu(
+            torch.ones(seq_len, audio_seq_len, device=tgt_normed.device) * float('-inf'),
+            diagonal=1
+        )
+
         audio_attn, _ = self.cross_attn(
             tgt_normed,
             audio_memory,  # Key/value both from audio
             audio_memory,
+            attn_mask=audio_causal_mask,  # Apply causal mask to prevent future audio leakage
             key_padding_mask=None,
             need_weights=False
         )
@@ -687,8 +704,10 @@ class MotionTransformer(nn.Module):
         if C > 0:
             audio_memory = audio_memory[:, C:]  # Remove context frames, keep only current T
 
-        # Apply Flash Attention optimized causal masking (is_causal=True)
-        # Ensures frame t can only attend to frames 0..t-1 (not future frames)
+        # Apply causal masking to BOTH self-attention and audio cross-attention
+        # Self-attention: is_causal=True prevents future motion leakage
+        # Audio cross-attention: explicit causal mask prevents future audio leakage
+        # Result: frame t can ONLY see motion AND audio from frames 0..t-1
         out = tgt
         for layer in self.decoder_layers:
             # Pass cached audio_memory (not recomputed)
@@ -696,7 +715,7 @@ class MotionTransformer(nn.Module):
                 out,
                 cond_emb,
                 audio_memory=audio_memory,  # Cached - no recomputation
-                is_causal=True  # Flash Attention optimization
+                is_causal=True  # Enables causal masking for both self-attn and audio cross-attn
             )
 
         out = self.decoder_norm(out)

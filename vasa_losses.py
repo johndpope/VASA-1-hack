@@ -222,6 +222,7 @@ class VASALossModule:
 
         # Audio-lip correlation loss weight
         self.lambda_audio_lip = getattr(config.loss, 'lambda_audio_lip', 2.0)
+        self.lambda_mouth_openness = getattr(config.loss, 'lambda_mouth_openness', 10.0)
 
         # L1 regularization for UV warps to prevent collapse
         self.lambda_warp_l1 = getattr(config.loss, 'lambda_warp_l1', 0.1)
@@ -2859,10 +2860,10 @@ class VASALossModule:
 
                     # 2b. Direct mouth openness supervision (using extracted lips)
                     # Direct supervision: mouth should be open when audio is strong
-                    mouth_openness_loss = F.mse_loss(lip_openness_norm, audio_energy_norm) * 10.0  # Strong weight
+                    mouth_openness_loss = F.mse_loss(lip_openness_norm, audio_energy_norm) * self.lambda_mouth_openness
                     losses['mouth_openness_direct'] = mouth_openness_loss
                     total_loss = total_loss + mouth_openness_loss
-                    logger.debug(f"  Mouth openness direct loss: {mouth_openness_loss.item():.6f}")
+                    logger.debug(f"  Mouth openness direct loss: {mouth_openness_loss.item():.6f} (lambda={self.lambda_mouth_openness})")
 
                 except Exception as e:
                     logger.warning(f"Could not compute audio-lip correlation from extracted features: {e}")

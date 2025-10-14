@@ -208,6 +208,7 @@ loss:
   lambda_velocity: 0.0        # DISABLED to allow maximum expression variance
   lambda_smoothness: 0.0      # DISABLED to allow maximum expression variance
   lambda_audio_lip: 3.0       # REDUCED from 5.0 to 3.0 - balance with lip landmark loss (2.0)
+  lambda_mouth_openness: 10.0  # Direct mouth openness to audio energy supervision weight
 
   # Expression-specific losses (CRITICAL FOR PREVENTING COLLAPSE)
   lambda_expression_l1: 0.0   # DISABLED - conflicts with L2, too weak (was 0.1)
