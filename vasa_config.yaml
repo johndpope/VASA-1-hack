@@ -168,6 +168,7 @@ loss:
   # Foundation losses (always active)
   lambda_reconstruction: 2.0   # Increased for better reconstruction
   lambda_dynamics: 10.0        # INCREASED to 10.0 to force expression matching
+  lambda_expression_cosine: 5.0  # NEW: Direct GT expression matching via cosine similarity (lower than overfit for generalization)
   lambda_pose: 5.0  # Increased from 1.0 to enforce better head pose learning
 
   # Progressive losses (unlock based on thresholds)
@@ -366,6 +367,14 @@ logging:
     save_predictions: true
     compute_fid: false        # Disabled for speed
     compute_kid: false        # Disabled for speed
+
+  # Loss visualization (ASCII graphs showing trend toward target)
+  loss_visualization:
+    enabled: true             # Show loss graphs in summary
+    history_size: 50          # Number of samples to track
+    graph_width: 50           # Graph width in characters
+    graph_height: 6           # Graph height in lines
+    show_freq: 100            # Show visualization every N steps
 
   # Validation
   validation:

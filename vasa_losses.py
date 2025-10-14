@@ -631,6 +631,33 @@ class VASALossModule:
                     logger.debug(f"  Audio-Expression coupling loss: {audio_expr_coupling_loss.item():.6f}")
                 logger.debug(f"  Motion diversity loss: {diversity_loss.item():.6f}")
 
+                # 1.7 Direct GT Expression Matching Loss - CRITICAL for overfitting
+                if 'expression_embed' in targets:
+                    gt_expr = targets['expression_embed']  # [B, T, D]
+                    pred_expr = outputs['expression_embed']  # [B, T, D]
+
+                    # Normalize both for cosine similarity
+                    pred_expr_norm = F.normalize(pred_expr, p=2, dim=-1)  # [B, T, D]
+                    gt_expr_norm = F.normalize(gt_expr, p=2, dim=-1)  # [B, T, D]
+
+                    # Cosine similarity loss: minimize 1 - cosine_similarity
+                    # Higher cosine similarity = better match (closer to 1)
+                    cosine_sim = (pred_expr_norm * gt_expr_norm).sum(dim=-1).mean()  # Scalar
+                    expression_cosine_loss = 1.0 - cosine_sim
+
+                    # Weight and add to losses
+                    lambda_expression_cosine = getattr(self.config.loss, 'lambda_expression_cosine', 0.0)
+                    if lambda_expression_cosine > 0:
+                        losses['expression_cosine'] = expression_cosine_loss * lambda_expression_cosine
+                        logger.debug(f"  Direct GT expression cosine loss: {expression_cosine_loss.item():.6f} (weighted: {(expression_cosine_loss * lambda_expression_cosine).item():.6f})")
+                        logger.debug(f"  Cosine similarity: {cosine_sim.item():.6f}")
+
+                        # Also compute L2 distance for monitoring
+                        l2_dist = (pred_expr - gt_expr).pow(2).sum(dim=-1).sqrt().mean()
+                        metrics['expression_gt/l2_distance'] = l2_dist.item()
+                        metrics['expression_gt/cosine_similarity'] = cosine_sim.item()
+                        logger.debug(f"  L2 distance to GT: {l2_dist.item():.6f}")
+
                 # Also compute standard deviation as a metric
                 expr_std = expr.std(dim=-1).mean()
                 losses['expression_std'] = expr_std  # Just for monitoring

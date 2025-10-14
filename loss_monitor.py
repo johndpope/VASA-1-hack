@@ -62,6 +62,12 @@ class LossRangeMonitor:
             'critical': 0.5,
             'description': 'Expression temporal variation'
         },
+        'expression_cosine': {
+            'healthy': (0.0, 0.1),
+            'warning': 0.2,
+            'critical': 0.5,
+            'description': 'Direct GT expression cosine similarity loss (1.0 - cosine_sim). Low loss = high similarity = good GT matching'
+        },
 
         # Warp losses
         'uv_warp_loss': {
@@ -196,18 +202,21 @@ class LossRangeMonitor:
         }
     }
 
-    def __init__(self, enable_warnings: bool = True, enable_critical: bool = True):
+    def __init__(self, enable_warnings: bool = True, enable_critical: bool = True, history_size: int = 50):
         """
         Initialize loss monitor.
 
         Args:
             enable_warnings: Log warning when loss exceeds warning threshold
             enable_critical: Log critical error when loss exceeds critical threshold
+            history_size: Number of recent loss values to track for trend visualization
         """
         self.enable_warnings = enable_warnings
         self.enable_critical = enable_critical
         self.warning_counts = {}
         self.critical_counts = {}
+        self.history_size = history_size
+        self.loss_history = {}  # Dict[loss_name, List[float]]
 
     def check_loss(
         self,
@@ -288,6 +297,9 @@ class LossRangeMonitor:
                 f"     - Gradient flow (check for vanishing/exploding gradients)"
             )
             self.critical_counts[loss_name] = self.critical_counts.get(loss_name, 0) + 1
+
+        # Track loss history for visualization
+        self._track_loss_history(loss_name, loss_value)
 
         # Log warnings
         if status == 'too_low':
@@ -399,3 +411,232 @@ class LossRangeMonitor:
         """Reset warning/critical counts."""
         self.warning_counts = {}
         self.critical_counts = {}
+
+    def _track_loss_history(self, loss_name: str, loss_value: float):
+        """Track loss value in history for trend visualization."""
+        if loss_name not in self.loss_history:
+            self.loss_history[loss_name] = []
+
+        self.loss_history[loss_name].append(loss_value)
+
+        # Keep only recent history
+        if len(self.loss_history[loss_name]) > self.history_size:
+            self.loss_history[loss_name] = self.loss_history[loss_name][-self.history_size:]
+
+    def _generate_ascii_graph(self, loss_name: str, width: int = 60, height: int = 8) -> str:
+        """
+        Generate ASCII line graph showing loss trend toward target.
+
+        Args:
+            loss_name: Name of loss to visualize
+            width: Graph width in characters
+            height: Graph height in lines
+
+        Returns:
+            ASCII art string showing the graph
+        """
+        if loss_name not in self.loss_history or len(self.loss_history[loss_name]) < 2:
+            return f"No history for {loss_name}"
+
+        if loss_name not in self.LOSS_RANGES:
+            return f"No range defined for {loss_name}"
+
+        history = self.loss_history[loss_name]
+        config = self.LOSS_RANGES[loss_name]
+        healthy_min, healthy_max = config['healthy']
+        warning_thresh = config['warning']
+        critical_thresh = config['critical']
+
+        # Determine value range for y-axis
+        min_val = min(history + [healthy_min])
+        max_val = max(history + [critical_thresh])
+
+        # Add 10% padding
+        range_padding = (max_val - min_val) * 0.1
+        y_min = max(0, min_val - range_padding)
+        y_max = max_val + range_padding
+
+        # Initialize graph grid
+        graph = [[' ' for _ in range(width)] for _ in range(height)]
+
+        # Draw target zones as background
+        def value_to_y(val):
+            if y_max == y_min:
+                return height // 2
+            normalized = (val - y_min) / (y_max - y_min)
+            return int((1 - normalized) * (height - 1))
+
+        # Mark healthy zone
+        healthy_min_y = value_to_y(healthy_min)
+        healthy_max_y = value_to_y(healthy_max)
+        for y in range(height):
+            if healthy_max_y <= y <= healthy_min_y:
+                for x in range(width):
+                    if graph[y][x] == ' ':
+                        graph[y][x] = '░'
+
+        # Draw loss trend line
+        points_per_x = max(1, len(history) / width)
+        for x in range(width):
+            idx = int(x * points_per_x)
+            if idx < len(history):
+                val = history[idx]
+                y = value_to_y(val)
+                if 0 <= y < height:
+                    # Use different symbols based on status
+                    if val <= healthy_max:
+                        graph[y][x] = '●'  # Healthy
+                    elif val <= warning_thresh:
+                        graph[y][x] = '◆'  # Warning
+                    else:
+                        graph[y][x] = '■'  # Critical
+
+        # Build graph string
+        lines = []
+        lines.append(f"\n{loss_name} Trend (last {len(history)} samples)")
+        lines.append(f"{'─' * (width + 10)}")
+
+        # Y-axis labels and graph
+        for y in range(height):
+            # Calculate y-axis value
+            if height > 1:
+                y_val = y_max - (y / (height - 1)) * (y_max - y_min)
+            else:
+                y_val = (y_max + y_min) / 2
+
+            # Format y-axis label
+            label = f"{y_val:6.3f}"
+
+            # Mark threshold lines
+            threshold_marker = ""
+            if abs(y_val - critical_thresh) < (y_max - y_min) * 0.05:
+                threshold_marker = " 🔴 CRITICAL"
+            elif abs(y_val - warning_thresh) < (y_max - y_min) * 0.05:
+                threshold_marker = " ⚠️  WARNING"
+            elif abs(y_val - healthy_max) < (y_max - y_min) * 0.05:
+                threshold_marker = " ✅ TARGET"
+
+            line = label + " │" + ''.join(graph[y]) + threshold_marker
+            lines.append(line)
+
+        # X-axis
+        lines.append("       └" + "─" * width)
+        lines.append(f"        {'oldest':<{width//2}}{'latest':>{width//2}}")
+
+        # Current value and status
+        current = history[-1]
+        if current <= healthy_max:
+            status = "✅ HEALTHY"
+        elif current <= warning_thresh:
+            status = "⚠️  WARNING"
+        elif current <= critical_thresh:
+            status = "🔶 HIGH"
+        else:
+            status = "🔴 CRITICAL"
+
+        lines.append(f"\nCurrent: {current:.6f} {status}")
+        lines.append(f"Target range: {healthy_min:.3f} - {healthy_max:.3f}")
+        lines.append(f"Legend: ● healthy  ◆ warning  ■ critical  ░ target zone")
+
+        return '\n'.join(lines)
+
+    def visualize_loss(self, loss_name: str) -> str:
+        """
+        Generate visualization for a specific loss.
+
+        Args:
+            loss_name: Name of loss to visualize
+
+        Returns:
+            ASCII art visualization
+        """
+        return self._generate_ascii_graph(loss_name)
+
+    def visualize_summary(
+        self,
+        loss_names: Optional[list] = None,
+        show_graphs: bool = True,
+        graph_width: int = 50,
+        graph_height: int = 6
+    ) -> str:
+        """
+        Generate summary visualization for multiple losses.
+
+        Args:
+            loss_names: List of loss names to visualize (None = all with warnings/criticals)
+            show_graphs: Whether to include ASCII graphs
+            graph_width: Width of each graph
+            graph_height: Height of each graph
+
+        Returns:
+            Formatted summary string
+        """
+        # Determine which losses to visualize
+        if loss_names is None:
+            # Show losses that have warnings or criticals
+            loss_names = []
+            for name in self.loss_history.keys():
+                if name in self.warning_counts or name in self.critical_counts:
+                    loss_names.append(name)
+
+            # If none have warnings, show all tracked losses
+            if not loss_names:
+                loss_names = list(self.loss_history.keys())
+
+        if not loss_names:
+            return "No loss history to visualize"
+
+        lines = []
+        lines.append("\n" + "=" * 80)
+        lines.append("LOSS VISUALIZATION SUMMARY")
+        lines.append("=" * 80)
+
+        for loss_name in loss_names:
+            if loss_name not in self.loss_history:
+                continue
+
+            history = self.loss_history[loss_name]
+            if len(history) < 2:
+                continue
+
+            # Get current status
+            current = history[-1]
+            if loss_name in self.LOSS_RANGES:
+                config = self.LOSS_RANGES[loss_name]
+                healthy_min, healthy_max = config['healthy']
+                warning_thresh = config['warning']
+
+                if current <= healthy_max:
+                    status = "✅ HEALTHY"
+                elif current <= warning_thresh:
+                    status = "⚠️  WARNING"
+                else:
+                    status = "🔴 CRITICAL"
+
+                # Compute trend
+                if len(history) >= 10:
+                    recent_avg = sum(history[-10:]) / 10
+                    older_avg = sum(history[-20:-10]) / 10 if len(history) >= 20 else recent_avg
+                    if recent_avg < older_avg * 0.95:
+                        trend = "📉 IMPROVING"
+                    elif recent_avg > older_avg * 1.05:
+                        trend = "📈 WORSENING"
+                    else:
+                        trend = "➡️  STABLE"
+                else:
+                    trend = "➡️  TRACKING"
+
+                lines.append(f"\n{loss_name}")
+                lines.append(f"  Status: {status}  |  Trend: {trend}")
+                lines.append(f"  Current: {current:.6f}  |  Target: {healthy_min:.3f} - {healthy_max:.3f}")
+
+                # Show ASCII graph if requested
+                if show_graphs:
+                    graph = self._generate_ascii_graph(loss_name, width=graph_width, height=graph_height)
+                    # Indent graph
+                    for line in graph.split('\n'):
+                        lines.append("  " + line)
+
+        lines.append("\n" + "=" * 80)
+
+        return '\n'.join(lines)

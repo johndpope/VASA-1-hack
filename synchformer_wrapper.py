@@ -340,42 +340,42 @@ class SynchformerWrapper(nn.Module):
         Returns:
             frames: [B, S, Tv, C, H, W] - segmented video frames
         """
-        logger.info(f"[preprocess_video] Input shape: {frames.shape}, dtype: {frames.dtype}, device: {frames.device}")
+        logger.debug(f"[preprocess_video] Input shape: {frames.shape}, dtype: {frames.dtype}, device: {frames.device}")
 
         # Ensure frames are in [B, T, C, H, W] format
         if frames.dim() == 5:
-            logger.info(f"[preprocess_video] Input is 5D: shape[1]={frames.shape[1]}, shape[-1]={frames.shape[-1]}")
+            logger.debug(f"[preprocess_video] Input is 5D: shape[1]={frames.shape[1]}, shape[-1]={frames.shape[-1]}")
             if frames.shape[1] == 3:  # [B, C, T, H, W]
-                logger.info(f"[preprocess_video] Detected [B, C, T, H, W] format, permuting to [B, T, C, H, W]")
+                logger.debug(f"[preprocess_video] Detected [B, C, T, H, W] format, permuting to [B, T, C, H, W]")
                 frames = frames.permute(0, 2, 1, 3, 4)  # -> [B, T, C, H, W]
             elif frames.shape[-1] == 3:  # [B, T, H, W, C] - channels last (from emo_frames)
-                logger.info(f"[preprocess_video] Detected [B, T, H, W, C] format, permuting to [B, T, C, H, W]")
+                logger.debug(f"[preprocess_video] Detected [B, T, H, W, C] format, permuting to [B, T, C, H, W]")
                 frames = frames.permute(0, 1, 4, 2, 3)  # -> [B, T, C, H, W]
 
-        logger.info(f"[preprocess_video] After permutation: {frames.shape}")
+        logger.debug(f"[preprocess_video] After permutation: {frames.shape}")
         B, T, C, H, W = frames.shape
-        logger.info(f"[preprocess_video] Extracted dimensions: B={B}, T={T}, C={C}, H={H}, W={W}")
+        logger.debug(f"[preprocess_video] Extracted dimensions: B={B}, T={T}, C={C}, H={H}, W={W}")
 
         # Resize to expected input size if needed
         if H != self.input_size or W != self.input_size:
-            logger.info(f"[preprocess_video] Resizing from {H}x{W} to {self.input_size}x{self.input_size}")
+            logger.debug(f"[preprocess_video] Resizing from {H}x{W} to {self.input_size}x{self.input_size}")
             frames = F.interpolate(
                 frames.view(B * T, C, H, W),
                 size=(self.input_size, self.input_size),
                 mode='bilinear',
                 align_corners=False
             ).view(B, T, C, self.input_size, self.input_size)
-            logger.info(f"[preprocess_video] After resize: {frames.shape}")
+            logger.debug(f"[preprocess_video] After resize: {frames.shape}")
 
         # Normalize to [-1, 1] range expected by MotionFormer
         if frames.max() > 1.0:  # Assume [0, 255] range
-            logger.info(f"[preprocess_video] Normalizing from [0, 255] to [0, 1] (max={frames.max():.2f})")
+            logger.debug(f"[preprocess_video] Normalizing from [0, 255] to [0, 1] (max={frames.max():.2f})")
             frames = frames / 255.0
 
         # Apply MotionFormer normalization
-        logger.info(f"[preprocess_video] Applying MotionFormer normalization")
-        logger.info(f"[preprocess_video] frames.shape before norm: {frames.shape}")
-        logger.info(f"[preprocess_video] visual_mean.shape: {self.visual_mean.shape}, visual_std.shape: {self.visual_std.shape}")
+        logger.debug(f"[preprocess_video] Applying MotionFormer normalization")
+        logger.debug(f"[preprocess_video] frames.shape before norm: {frames.shape}")
+        logger.debug(f"[preprocess_video] visual_mean.shape: {self.visual_mean.shape}, visual_std.shape: {self.visual_std.shape}")
 
         self.visual_mean = self.visual_mean.to(frames.device)
         self.visual_std = self.visual_std.to(frames.device)
@@ -386,43 +386,43 @@ class SynchformerWrapper(nn.Module):
         visual_mean_btchw = self.visual_mean.view(1, 1, 3, 1, 1)
         visual_std_btchw = self.visual_std.view(1, 1, 3, 1, 1)
 
-        logger.info(f"[preprocess_video] Reshaped visual_mean to: {visual_mean_btchw.shape}, visual_std to: {visual_std_btchw.shape}")
-        logger.info(f"[preprocess_video] About to compute: (frames - visual_mean) / visual_std")
-        logger.info(f"[preprocess_video] frames.shape: {frames.shape}, visual_mean.shape: {visual_mean_btchw.shape}")
+        logger.debug(f"[preprocess_video] Reshaped visual_mean to: {visual_mean_btchw.shape}, visual_std to: {visual_std_btchw.shape}")
+        logger.debug(f"[preprocess_video] About to compute: (frames - visual_mean) / visual_std")
+        logger.debug(f"[preprocess_video] frames.shape: {frames.shape}, visual_mean.shape: {visual_mean_btchw.shape}")
 
         frames = (frames - visual_mean_btchw) / visual_std_btchw
-        logger.info(f"[preprocess_video] After normalization: {frames.shape}")
+        logger.debug(f"[preprocess_video] After normalization: {frames.shape}")
 
         # Segment video into chunks
         # We need S segments of Tv frames each
         S = self.n_segments
         Tv = self.segment_size_vframes
 
-        logger.info(f"[preprocess_video] Segmentation: S={S}, Tv={Tv}, min_frames needed={S * Tv}")
-        logger.info(f"[preprocess_video] Current T={T}, will pad/truncate to {S * Tv}")
+        logger.debug(f"[preprocess_video] Segmentation: S={S}, Tv={Tv}, min_frames needed={S * Tv}")
+        logger.debug(f"[preprocess_video] Current T={T}, will pad/truncate to {S * Tv}")
 
         # Ensure we have enough frames
         min_frames = S * Tv
         if T < min_frames:
             # Pad with last frame if needed
             pad_frames = min_frames - T
-            logger.info(f"[preprocess_video] Padding: adding {pad_frames} frames")
+            logger.debug(f"[preprocess_video] Padding: adding {pad_frames} frames")
             last_frame = frames[:, -1:].expand(-1, pad_frames, -1, -1, -1)
             frames = torch.cat([frames, last_frame], dim=1)
             T = min_frames
         elif T > min_frames:
             # Truncate if too many frames
-            logger.info(f"[preprocess_video] Truncating: removing {T - min_frames} frames")
+            logger.debug(f"[preprocess_video] Truncating: removing {T - min_frames} frames")
             frames = frames[:, :min_frames]
             T = min_frames
 
-        logger.info(f"[preprocess_video] After pad/truncate: {frames.shape}")
-        logger.info(f"[preprocess_video] About to reshape to [B={B}, S={S}, Tv={Tv}, C={C}, H={self.input_size}, W={self.input_size}]")
+        logger.debug(f"[preprocess_video] After pad/truncate: {frames.shape}")
+        logger.debug(f"[preprocess_video] About to reshape to [B={B}, S={S}, Tv={Tv}, C={C}, H={self.input_size}, W={self.input_size}]")
 
         # Reshape to segments: [B, S*Tv, C, H, W] -> [B, S, Tv, C, H, W]
         frames = frames.view(B, S, Tv, C, self.input_size, self.input_size)
 
-        logger.info(f"[preprocess_video] Final output shape: {frames.shape}")
+        logger.debug(f"[preprocess_video] Final output shape: {frames.shape}")
         return frames
 
     def preprocess_audio(self, audio_features: torch.Tensor) -> torch.Tensor:
@@ -435,7 +435,7 @@ class SynchformerWrapper(nn.Module):
         Returns:
             spec: [B, S, 1, F, Ta] - segmented audio spectrograms
         """
-        logger.info(f"[preprocess_audio] Input shape: {audio_features.shape}, dtype: {audio_features.dtype}")
+        logger.debug(f"[preprocess_audio] Input shape: {audio_features.shape}, dtype: {audio_features.dtype}")
 
         B = audio_features.shape[0]
         device = audio_features.device
