@@ -1,0 +1,1898 @@
+import torch
+import torchaudio
+from pathlib import Path
+from omegaconf import OmegaConf
+import importlib
+from PIL import Image
+import numpy as np
+from torchvision import transforms
+from vasa_model import VASAModel
+from motion_sequence_handler import MotionSequenceHandler
+import cv2
+import subprocess
+import imageio
+from typing import *
+from transformers import Wav2Vec2Processor
+from wav2vec_module import AlignedWav2Vec2Model
+from logger import logger
+from tqdm import tqdm
+import torch.nn.functional as F
+import traceback
+from PIL import Image
+from vis_helper import save_expression_embed
+from torchvision.utils import save_image
+import torchvision
+import torch.nn as nn
+from repos.MODNet.src.models.modnet import MODNet
+import traceback
+from PIL import Image
+import h5py
+from expression_db import ExpressionDatabase
+
+
+to_512 = lambda x: x.resize((512, 512), Image.LANCZOS)
+
+def temporal_smooth(tensor, kernel_size=5, sigma=1.5):
+    """Apply 1D Gaussian smoothing across time dimension to reduce jankiness.
+
+    Args:
+        tensor: Input tensor of shape [B, T, ...] to smooth across time
+        kernel_size: Size of Gaussian kernel (default: 5 frames)
+        sigma: Standard deviation of Gaussian (default: 1.5)
+
+    Returns:
+        Smoothed tensor of same shape as input
+
+    Note:
+        - Only smooths temporal dimension (dim=1)
+        - Preserves expression dynamics while smoothing pose parameters
+        - Uses replicate padding to avoid edge artifacts
+    """
+    x = torch.arange(kernel_size, dtype=tensor.dtype, device=tensor.device) - kernel_size // 2
+    kernel = torch.exp(-x**2 / (2 * sigma**2))
+    kernel = kernel / kernel.sum()
+
+    B, T, *dims = tensor.shape
+    tensor_flat = tensor.reshape(B, T, -1).permute(0, 2, 1)  # [B, features, T]
+
+    # Pad temporal dimension with replicate mode to preserve edges
+    padding = kernel_size // 2
+    tensor_padded = F.pad(tensor_flat, (padding, padding), mode='replicate')
+
+    # Apply 1D convolution along time dimension
+    kernel = kernel.unsqueeze(0).unsqueeze(0)  # [1, 1, kernel_size]
+    smoothed = F.conv1d(tensor_padded, kernel.repeat(tensor_flat.shape[1], 1, 1),
+                       groups=tensor_flat.shape[1])
+
+    return smoothed.permute(0, 2, 1).reshape(B, T, *dims)
+
+class VASAInference:
+    def __init__(
+        self,
+        checkpoint_path: str,
+        config_path: str,
+        device: str = 'cuda',
+        expression_db_path: str = None
+    ):
+        self.device = device
+        self.config = OmegaConf.load(config_path)
+
+        # Load expression database for clamping predicted expressions
+        self.expression_db = None
+        if expression_db_path is not None:
+            logger.info(f"Loading expression database for stability clamping from {expression_db_path}")
+            self.expression_db = ExpressionDatabase(expression_db_path, device=device)
+            logger.info(f"Expression database loaded: {self.expression_db}")
+        
+
+        # In your __init__ or setup
+        self.debug_dir = Path("debug_outputs")
+        self.debug_dir.mkdir(exist_ok=True)
+
+        # Add asset extraction directory
+        self.asset_dir = Path("./data")
+        self.asset_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize transforms
+        self.transform = transforms.Compose([
+            transforms.Resize((512, 512)),
+            transforms.ToTensor(),
+            # transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        
+        # Initialize audio processors with aligned wav2vec
+        logger.info("Initializing aligned audio processors...")
+        self.audio_processor = Wav2Vec2Processor.from_pretrained('facebook/wav2vec2-base')
+        self.audio_model = AlignedWav2Vec2Model(
+            'facebook/wav2vec2-base',
+            freeze_feature_extractor=True
+        ).to(device).eval()
+        
+        # Load EMO model with proper initialization
+        logger.info("Loading EMO model...")
+        model_path = './logs/Retrain_with_17_V1_New_rand_MM_SEC_4_drop_02_stm_10_CV_05_1_1/checkpoints/328_model.pth'
+        emo_config = OmegaConf.load('./models/stage_1/volumetric_avatar/va.yaml')
+        self.volumetric_avatar = importlib.import_module(
+            'models.stage_1.volumetric_avatar.va'
+        ).Model(emo_config, training=False)
+        
+        # Load EMO weights with proper error handling
+        try:
+            model_dict = torch.load(model_path, map_location='cuda', weights_only=False)
+            self.volumetric_avatar.load_state_dict(model_dict, strict=False)
+            self.volumetric_avatar = self.volumetric_avatar.cuda()
+            self.volumetric_avatar.eval()
+        except Exception as e:
+            logger.error(f"Error loading EMO model: {str(e)}")
+            raise
+            
+
+
+        # Initialize VASA model
+        logger.info("Loading VASA model...")
+        self.model = VASAModel(
+            config=self.config,
+            volumetric_avatar=self.volumetric_avatar,
+            device=device
+        ).to(device)
+        
+        # Load VASA checkpoint with proper handling
+        try:
+            logger.info(f"Loading checkpoint from {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+            
+            # Get current state dict
+            model_state = self.model.state_dict()
+            
+            # Load only matching keys from checkpoint
+            checkpoint_state = checkpoint['model_state_dict']
+            matched_state_dict = {}
+            
+            for key in model_state.keys():
+                # Skip volumetric_avatar parameters
+                if key.startswith('volumetric_avatar.'):
+                    matched_state_dict[key] = model_state[key]
+                # Load other parameters from checkpoint if they exist
+                elif key in checkpoint_state:
+                    matched_state_dict[key] = checkpoint_state[key]
+                else:
+                    logger.warning(f"Parameter {key} not found in checkpoint, using initialization")
+                    matched_state_dict[key] = model_state[key]
+                    
+            # Load state dict with strict=False to handle missing volumetric_avatar parameters
+            self.model.load_state_dict(matched_state_dict, strict=False)
+            logger.info("Successfully loaded checkpoint")
+            
+        except Exception as e:
+            logger.error(f"Error loading checkpoint: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+            
+        self.model.eval()
+        
+     
+            
+        # Run EMO sanity check
+        logger.info("Running EMO sanity check...")
+        try:
+            # Load and preprocess test image
+            test_img = Image.open("./data/A.png").convert('RGB')
+            test_tensor = self.transform(test_img).unsqueeze(0).to(device)
+            emo_check = self.sanity_check_emo_pipeline(test_tensor)
+            logger.info("EMO sanity check passed!")
+        except Exception as e:
+            logger.error(f"EMO sanity check failed: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+
+        # Initialize motion sequence handler
+        self.motion_handler = MotionSequenceHandler(
+            window_size=self.config.motion.window_size,
+            stride=self.config.motion.stride,
+            context_size=self.config.motion.context_size
+        )
+        self.window_size = self.config.motion.window_size
+        self.stride = self.config.motion.stride
+
+   
+    # def generate_motion_sequence(self, source_params, audio_windows, fps=25.0):
+    #     """Generate motion sequence from source parameters and audio."""
+    #     try:
+    #         device = source_params['theta'].device
+    #         logger.info("\n=== Starting Motion Generation ===")
+            
+    #         # Initialize motion from first frame
+    #         motion_data = {
+    #             'theta': source_params['theta'],
+    #             'rotation': source_params['rotation'],
+    #             'translation': source_params['translation'],
+    #             'expression_embed': source_params['expression_embed']
+    #         }
+            
+    #         # Keep track of generated sequence
+    #         generated_sequence = {k: [] for k in motion_data.keys()}
+            
+    #         num_windows = len(audio_windows)
+    #         logger.info(f"Processing {num_windows} windows")
+            
+    #         for window_idx, audio_window in enumerate(audio_windows):
+    #             logger.info(f"Window {window_idx+1}/{num_windows}")
+                
+    #             # Prepare conditions
+    #             conditions = {
+    #                 'audio_features': audio_window['audio_features'],
+    #                 'speed_bucket': torch.ones(1, self.window_size, 1, device=device) * 4
+    #             }
+                
+    #             # Generate window sequence
+    #             motion_sequence = self.model.generate_sequence_inference(
+    #                 initial_pose=motion_data,
+    #                 initial_dynamics=motion_data['expression_embed'],
+    #                 conditions=conditions,
+    #                 num_steps=self.config.inference.get('num_inference_steps', 50)  
+    #             )
+                
+    #             # For subsequent windows, only keep the non-overlapping portion
+    #             if window_idx > 0:
+    #                 # Skip overlapped frames
+    #                 for k in generated_sequence:
+    #                     start_idx = self.motion_handler.overlap_size
+    #                     sequence = motion_sequence[k][:, start_idx:]
+    #                     generated_sequence[k].append(sequence)
+    #             else:
+    #                 # Keep full first window
+    #                 for k in generated_sequence:
+    #                     generated_sequence[k].append(motion_sequence[k])
+                
+    #             # Update motion data for next window using last frame
+    #             motion_data = {
+    #                 k: v[:, -1:] for k, v in motion_sequence.items()
+    #             }
+            
+    #         # Concatenate all sequences
+    #         final_sequence = {
+    #             k: torch.cat(v, dim=1) for k, v in generated_sequence.items()
+    #         }
+            
+    #         logger.info("Motion generation complete")
+    #         for k, v in final_sequence.items():
+    #             logger.info(f"{k} shape: {v.shape}")
+                
+    #         return final_sequence
+                
+    #     except Exception as e:
+    #         logger.error(f"Error in motion generation: {str(e)}")
+    #         logger.error(traceback.format_exc())
+    #         raise
+
+
+    # def generate_sequence(
+    #     self,
+    #     source_image_path: str,
+    #     audio_path: str,
+    #     output_path: str,
+    #     fps: float = 25.0
+    # ):
+    #     """Generate animated sequence from source image and audio file."""
+    #     try:
+    #         with torch.no_grad():
+    #             # Load source image
+    #             source_img = Image.open(source_image_path).convert('RGB')
+    #             source_tensor = self.transform(source_img).unsqueeze(0).to(self.device)
+
+    #             # Load and process audio
+    #             waveform, sr = torchaudio.load(audio_path)
+    #             if sr != 16000:
+    #                 resampler = torchaudio.transforms.Resample(sr, 16000)
+    #                 waveform = resampler(waveform)
+    #             if waveform.shape[0] > 1:
+    #                 waveform = waveform.mean(dim=0, keepdim=True)
+
+    #             # Calculate exact number of frames needed
+    #             audio_length_seconds = waveform.shape[1] / 16000
+    #             total_frames = int(audio_length_seconds * fps)
+    #             logger.info(f"Audio length: {audio_length_seconds:.2f} seconds")
+    #             logger.info(f"Required frames at {fps} fps: {total_frames}")
+                
+    #             # Process audio into windows
+    #             audio_windows = self.process_audio(waveform, sr=16000, fps=fps)
+    #             logger.info(f"Number of audio windows: {len(audio_windows)}")
+
+    #             # Extract source parameters
+    #             source_params = self.extract_emo_parameters(source_tensor)
+                
+    #             # Generate motion sequence
+    #             motion_sequence = self.generate_motion_sequence(
+    #                 source_params=source_params,
+    #                 audio_windows=audio_windows,
+    #                 fps=fps
+    #             )
+                
+    #             # Generate frames with motion applied
+    #             frames = self.generate_frames_from_audio(
+    #                 source_params=source_params,
+    #                 audio_windows=audio_windows,
+    #                 initial_expression=source_params['expression_embed']
+    #             )
+                
+    #             # Convert to list for processing
+    #             frames = list(frames.unbind(0))
+                
+    #             # Save frames to video
+    #             video_frames = []
+    #             for frame in frames:
+    #                 # Convert tensor to PIL image
+    #                 frame_img = transforms.ToPILImage()(frame.cpu())
+    #                 # Convert to numpy array for video writer
+    #                 frame_np = np.array(frame_img)
+    #                 video_frames.append(frame_np)
+                
+    #             # Create video using imageio
+    #             import imageio
+    #             writer = imageio.get_writer(output_path, fps=fps)
+    #             for frame in video_frames:
+    #                 writer.append_data(frame)
+    #             writer.close()
+                
+    #             # Add audio to video using ffmpeg
+    #             temp_video = output_path.replace('.mp4', '_temp.mp4')
+    #             os.rename(output_path, temp_video)
+                
+    #             ffmpeg_cmd = [
+    #                 'ffmpeg', '-y',
+    #                 '-i', temp_video,
+    #                 '-i', audio_path,
+    #                 '-c:v', 'copy',
+    #                 '-c:a', 'aac',
+    #                 '-strict', 'experimental',
+    #                 output_path
+    #             ]
+    #             subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
+    #             os.remove(temp_video)
+                
+    #             logger.info(f"✅ Generated video with audio saved to {output_path}")
+                
+    #     except Exception as e:
+    #         logger.error(f"Error in generate_sequence: {e}")
+    #         logger.error(traceback.format_exc())
+    #         raise
+
+    def load_gt_theta_from_h5(self, h5_path: str):
+        """Load cached GT theta/SRT from H5 file."""
+        logger.info(f"Loading GT theta from H5: {h5_path}")
+
+        with h5py.File(h5_path, 'r') as f:
+            gt_params = {
+                'theta': torch.from_numpy(f['theta'][:]).to(self.device),
+                'scale': torch.from_numpy(f['scale'][:]).to(self.device),
+                'rotation': torch.from_numpy(f['rotation'][:]).to(self.device),
+                'translation': torch.from_numpy(f['translation'][:]).to(self.device)
+            }
+
+            # Log metadata
+            logger.info(f"  Video: {f.attrs['video_path']}")
+            logger.info(f"  Frames: {f.attrs['num_frames']}")
+            logger.info(f"  FPS: {f.attrs['video_fps']:.2f} -> {f.attrs['target_fps']:.2f}")
+            logger.info(f"  Theta shape: {gt_params['theta'].shape}")
+
+        return gt_params
+
+    def generate_from_video(
+        self,
+        input_video: str,
+        output_path: str,
+        fps: float = 25.0,
+        target_image: str = None,
+        gt_theta_h5: str = None
+    ):
+        """Generate animated sequence from input video with background preservation.
+
+        Args:
+            input_video: Path to input video (audio will be extracted)
+            output_path: Path to save output video
+            fps: Frame rate for output video
+            target_image: Path to target identity image (if None, uses first frame from video)
+            gt_theta_h5: Path to cached GT theta H5 file (if provided, uses GT theta instead of predicted)
+        """
+        try:
+            with torch.no_grad():  # No gradients needed for inference
+                # Load GT theta cache if provided
+                gt_params = None
+                if gt_theta_h5:
+                    logger.info("\n" + "="*80)
+                    logger.info("USING GROUND TRUTH THETA FROM CACHE")
+                    logger.info("="*80)
+                    gt_params = self.load_gt_theta_from_h5(gt_theta_h5)
+
+                # Extract audio from video (always needed)
+                _, audio_path = self.extract_video_assets(
+                    input_video,
+                    self.asset_dir
+                )
+
+                # Load source image - use target_image if provided, otherwise extract from video
+                if target_image is not None:
+                    logger.info(f"Using target image: {target_image}")
+                    source_image_path = target_image
+                else:
+                    logger.info("No target image provided, extracting first frame from video")
+                    source_image_path, _ = self.extract_video_assets(
+                        input_video,
+                        self.asset_dir
+                    )
+
+                source_img = Image.open(source_image_path).convert('RGB')
+                source_img = to_512(source_img)
+
+                source_tensor = self.transform(source_img).unsqueeze(0).to(self.device)
+
+                # Load and process audio first to determine frame count
+                waveform, sr = torchaudio.load(audio_path)
+                if sr != 16000:
+                    resampler = torchaudio.transforms.Resample(sr, 16000)
+                    waveform = resampler(waveform)
+                # if waveform.shape[0] > 1:
+                #     waveform = waveform.mean(dim=0, keepdim=True)
+
+                # Calculate exact number of frames needed
+                audio_length_seconds = waveform.shape[1] / sr
+                total_frames = int(audio_length_seconds * fps)
+                logger.info(f"Audio length: {audio_length_seconds:.2f} seconds")
+                logger.info(f"Required frames at {fps} fps: {total_frames}")
+                
+                # Process audio into windows
+                audio_windows = self.process_audio(waveform, sr=16000, fps=fps)
+                logger.info(f"Number of audio windows: {len(audio_windows)}")
+
+                # Extract source parameters
+                source_params = self.extract_source_params(source_tensor)
+
+                # DIAGNOSTIC: Test with silence to verify audio is guiding expressions
+                logger.info("\n=== SILENCE TEST - Verifying Audio Guidance ===")
+                silence_windows = []
+                for window in audio_windows:
+                    silence_window = {
+                        'audio_features': torch.zeros_like(window['audio_features']),  # Zero audio
+                        'gaze': window.get('gaze', torch.zeros(1, self.window_size, 2, device=self.device)),
+                        'emotion': window.get('emotion', torch.zeros(1, self.window_size, 2, device=self.device)),
+                        'blink': window.get('blink', torch.zeros(1, self.window_size, 3, device=self.device)),
+                    }
+                    silence_windows.append(silence_window)
+
+                # Generate with silence
+                silence_frames = self.generate_frames_from_audio(
+                    source_params=source_params,
+                    audio_windows=silence_windows,
+                    initial_expression=source_params['expression_embed'],
+                    gt_params=gt_params  # Use GT theta for silence test too
+                )
+
+                # Analyze silence output
+                silence_frames_tensor = silence_frames  # [T, C, H, W]
+                logger.info(f"Silence frames shape: {silence_frames_tensor.shape}")
+
+                # Check expression variance in silence (should be LOW if audio guides properly)
+                # We can't directly access expression_embed, but we can check visual variance
+                frame_diffs = []
+                for i in range(1, len(silence_frames_tensor)):
+                    diff = (silence_frames_tensor[i] - silence_frames_tensor[i-1]).abs().mean().item()
+                    frame_diffs.append(diff)
+
+                silence_variance = torch.tensor(frame_diffs).var().item() if frame_diffs else 0.0
+                silence_mean_diff = torch.tensor(frame_diffs).mean().item() if frame_diffs else 0.0
+
+                logger.info(f"Silence test results:")
+                logger.info(f"  Mean frame-to-frame diff: {silence_mean_diff:.6f}")
+                logger.info(f"  Frame diff variance: {silence_variance:.6f}")
+
+                if silence_mean_diff > 0.01:
+                    logger.warning("⚠️  HIGH MOTION IN SILENCE! Audio may not be guiding expressions.")
+                    logger.warning("   Model is generating motion from noise/pose instead of audio.")
+                    logger.warning("   Consider increasing audio CFG scale (currently using default 20.0)")
+                else:
+                    logger.info("✅ Low motion in silence - audio guidance is working")
+
+                # Apply background compositing to silence test frames (same as normal test)
+                logger.info("Compositing silence test frames with background...")
+                silence_frames_list = list(silence_frames_tensor.unbind(0))
+
+                # Load MODNet for background compositing
+                modnet_silence = MODNet(backbone_pretrained=False)
+                modnet_silence = nn.DataParallel(modnet_silence).cuda() if torch.cuda.is_available() else modnet_silence
+                modnet_silence.load_state_dict(torch.load('repos/MODNet/pretrained/modnet_photographic_portrait_matting.ckpt', map_location=self.device, weights_only=False))
+                modnet_silence.eval()
+                modnet_silence = modnet_silence.to(self.device)
+
+                # Get background using source image (same as normal test)
+                source_mask_silence = self._get_modnet_mask(source_tensor, modnet_silence)
+
+                lama_silence = torch.jit.load('repos/jit_lama.pt')
+                lama_silence = lama_silence.to(self.device)
+
+                # Use cv2 already imported at top of file
+                kernel_back = np.ones((21, 21), np.uint8)
+                mask_silence = (source_mask_silence >= 0.8).float()
+                mask_silence = mask_silence[0].permute(1, 2, 0)
+                dilate_mask_silence = cv2.dilate(mask_silence.cpu().numpy(), kernel_back, iterations=2)
+                dilate_mask_silence = torch.FloatTensor(dilate_mask_silence).unsqueeze(0).unsqueeze(0).to(self.device)
+
+                background_silence = lama_silence(source_tensor, dilate_mask_silence)
+                background_img_silence = transforms.ToPILImage()(background_silence[0].cpu())
+                background_tensor_silence = self.transform(background_img_silence).to(self.device)
+
+                # Clear unused memory
+                del lama_silence, source_mask_silence, mask_silence, dilate_mask_silence, background_silence
+                torch.cuda.empty_cache()
+
+                # Composite silence frames with background
+                composited_silence_frames = []
+                num_silence_frames = len(silence_frames_list)
+
+                for i in tqdm(range(num_silence_frames)):
+                    try:
+                        # Process single frame
+                        frame_silence = silence_frames_list[i].unsqueeze(0).to(self.device)
+
+                        # Get mask for current frame
+                        frame_mask_silence = self._get_modnet_mask(frame_silence, modnet_silence)
+                        frame_mask_silence = torch.where(frame_mask_silence > 0.3, frame_mask_silence, frame_mask_silence * 0) ** 8
+
+                        # Composite frame
+                        composited_silence = frame_mask_silence * frame_silence + (1 - frame_mask_silence) * background_tensor_silence
+                        composited_silence_frames.append(composited_silence.squeeze(0).cpu())
+
+                        # Clear memory after each frame
+                        del frame_silence, frame_mask_silence
+                        torch.cuda.empty_cache()
+
+                    except Exception as e:
+                        logger.error(f"Error processing silence frame {i}: {str(e)}")
+                        raise
+
+                    if i % 50 == 0:
+                        logger.info(f"Processed {i}/{num_silence_frames} silence frames")
+
+                logger.info(f"Stacking {len(composited_silence_frames)} composited silence frames...")
+                composited_silence_frames = torch.stack(composited_silence_frames)
+                logger.info(f"Final composited silence frames shape: {composited_silence_frames.shape}")
+
+                # Clear MODNet model
+                del modnet_silence
+                torch.cuda.empty_cache()
+
+                # Save silence test video with composited frames (without audio)
+                silence_output_path = str(output_path).replace('.mp4', '_silence_test.mp4')
+                logger.info(f"Saving composited silence test to: {silence_output_path}")
+
+                frames_np = composited_silence_frames.cpu().numpy().transpose(0, 2, 3, 1)
+                if frames_np.max() <= 1.0:
+                    frames_np = (frames_np * 255).astype(np.uint8)
+
+                writer = cv2.VideoWriter(
+                    silence_output_path,
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    fps,
+                    (frames_np.shape[2], frames_np.shape[1])
+                )
+
+                for frame in frames_np:
+                    writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                writer.release()
+                logger.info(f"✅ Saved composited silence test video: {silence_output_path}")
+
+                logger.info("=== End Silence Test ===\n")
+
+                # Generate frames with actual audio (normal inference)
+                frames = self.generate_frames_from_audio(
+                    source_params=source_params,
+                    audio_windows=audio_windows,
+                    initial_expression=source_params['expression_embed'],
+                    gt_params=gt_params  # Pass GT theta if available
+                )
+
+                # Convert frames tensor to list for individual processing
+                frames = list(frames.unbind(0))
+
+                # Extract background once
+                logger.info("Extracting background...")
+                modnet = MODNet(backbone_pretrained=False)
+                modnet = nn.DataParallel(modnet).cuda() if torch.cuda.is_available() else modnet
+                modnet.load_state_dict(torch.load('repos/MODNet/pretrained/modnet_photographic_portrait_matting.ckpt', map_location=self.device, weights_only=False))
+                modnet.eval()
+                modnet = modnet.to(self.device)
+
+                # Get background using first frame
+                source_mask = self._get_modnet_mask(source_tensor, modnet)
+                
+                lama = torch.jit.load('repos/jit_lama.pt')
+                lama = lama.to(self.device)
+
+                kernel_back = np.ones((21, 21), 'uint8')
+                mask = (source_mask >= 0.8).float()
+                mask = mask[0].permute(1, 2, 0)
+                dilate_mask = cv2.dilate(mask.cpu().numpy(), kernel_back, iterations=2)
+                dilate_mask = torch.FloatTensor(dilate_mask).unsqueeze(0).unsqueeze(0).to(self.device)
+                
+                background = lama(source_tensor, dilate_mask)
+                background_img = transforms.ToPILImage()(background[0].cpu())
+                background_tensor = self.transform(background_img).to(self.device)
+
+                # Clear unused memory
+                del lama, source_mask, mask, dilate_mask, background
+                torch.cuda.empty_cache()
+
+                # Process frames one at a time
+                logger.info("Compositing frames with background...")
+                composited_frames = []
+                num_frames = len(frames)
+
+                for i in tqdm(range(num_frames)):
+                    try:
+                        # Process single frame
+                        frame = frames[i].unsqueeze(0).to(self.device)
+                        
+                        # Get mask for current frame
+                        frame_mask = self._get_modnet_mask(frame, modnet)
+                        frame_mask = torch.where(frame_mask > 0.3, frame_mask, frame_mask * 0) ** 8
+                        
+                        # Composite frame
+                        composited = frame_mask * frame + (1 - frame_mask) * background_tensor
+                        composited_frames.append(composited.squeeze(0).cpu())
+
+                        # Clear memory after each frame
+                        del frame, frame_mask
+                        torch.cuda.empty_cache()
+
+                    except Exception as e:
+                        logger.error(f"Error processing frame {i}: {str(e)}")
+                        raise
+
+                    if i % 50 == 0:
+                        logger.info(f"Processed {i}/{num_frames} frames")
+
+                logger.info(f"Stacking {len(composited_frames)} composited frames...")
+                composited_frames = torch.stack(composited_frames)
+                logger.info(f"Final composited frames shape: {composited_frames.shape}")
+                
+                # Save video with audio
+                self._save_video({'frames': composited_frames}, audio_path, output_path, fps)
+                logger.info(f"Successfully generated animation: {output_path}")
+            
+        except Exception as e:
+            logger.error(f"Error in generate_from_video: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+        
+
+    def _get_modnet_mask(self, img: torch.Tensor, modnet: nn.Module) -> torch.Tensor:
+        """Get foreground mask using MODNet."""
+        # Normalize image for MODNet
+        im_transform = transforms.Compose([
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
+        im = im_transform(img)
+        
+        # Get dimensions
+        ref_size = 512
+        im_b, im_c, im_h, im_w = im.shape
+        
+        # Resize if needed
+        if max(im_h, im_w) < ref_size or min(im_h, im_w) > ref_size:
+            if im_w >= im_h:
+                im_rh = ref_size
+                im_rw = int(im_w / im_h * ref_size)
+            elif im_w < im_h:
+                im_rw = ref_size
+                im_rh = int(im_h / im_w * ref_size)
+        else:
+            im_rh = im_h
+            im_rw = im_w
+
+        im_rw = im_rw - im_rw % 32
+        im_rh = im_rh - im_rh % 32
+        im = F.interpolate(im, size=(im_rh, im_rw), mode='area')
+        
+        # Get mask from MODNet
+        _, _, matte = modnet(im.to(self.device), True)
+        
+        # Resize mask back to original size
+        matte = F.interpolate(matte, size=(im_h, im_w), mode='area')
+        
+        return matte
+        
+    def _get_modnet_mask_batch(self, batch_frames: torch.Tensor, modnet: nn.Module) -> torch.Tensor:
+        """Get foreground masks for a batch of frames using MODNet."""
+        
+        # Normalize images for MODNet
+        im_transform = transforms.Compose([
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
+        im = im_transform(batch_frames)
+        
+        # Get dimensions
+        ref_size = 512
+        im_b, im_c, im_h, im_w = im.shape
+        
+        # Resize if needed
+        if max(im_h, im_w) < ref_size or min(im_h, im_w) > ref_size:
+            if im_w >= im_h:
+                im_rh = ref_size
+                im_rw = int(im_w / im_h * ref_size)
+            elif im_w < im_h:
+                im_rw = ref_size
+                im_rh = int(im_h / im_w * ref_size)
+        else:
+            im_rh = im_h
+            im_rw = im_w
+
+        im_rw = im_rw - im_rw % 32
+        im_rh = im_rh - im_rh % 32
+        im = F.interpolate(im, size=(im_rh, im_rw), mode='area')
+        
+        # Get masks from MODNet (in chunks if batch is too large)
+        max_chunk_size = 4  # Adjust based on your GPU memory
+        mattes = []
+        
+        for j in range(0, im_b, max_chunk_size):
+            chunk = im[j:j + max_chunk_size]
+            with torch.cuda.amp.autocast():
+                _, _, matte = modnet(chunk, True)
+            mattes.append(matte)
+            
+        matte = torch.cat(mattes, dim=0)
+        
+        # Resize masks back to original size
+        matte = F.interpolate(matte, size=(im_h, im_w), mode='area')
+        
+        return matte
+        
+    def generate_frames_from_audio(self, source_params, audio_windows, initial_expression, gt_params=None):
+        """Generate frames using audio features to drive expressions.
+
+        Args:
+            gt_params: Optional GT theta/SRT from H5 cache. If provided, replaces predicted theta.
+        """
+        try:
+            logger.info("\n=== Starting Audio-Driven Generation ===")
+            if gt_params:
+                logger.info("🎯 Using cached GT theta instead of predictions")
+            device = source_params['theta'].device
+
+            # Initialize motion data with source params for first frame
+            # Note: Only theta and expression are used - SRT removed from training
+            motion_data = {
+                'theta': source_params['theta'],
+                'expression_embed': initial_expression
+            }
+
+            # Extract identity embeddings from source params for warp generation
+            idt_embed = source_params['idt_embed']
+            logger.info(f"Identity embeddings extracted: {idt_embed.shape}")
+
+            # Track all generated frames and previous motion parameters
+            generated_frames = []
+            prev_motion = {
+                'expression': None,
+                'theta': None,
+            }
+
+            # Track frame counter for GT theta indexing
+            frame_counter = 0
+
+            # Process each audio window
+            for window_idx, window_data in enumerate(audio_windows):
+                logger.info(f"Processing window {window_idx}/{len(audio_windows)}")
+
+                # Debug: Check audio feature variation
+                audio_features = window_data['audio_features']
+                audio_var = audio_features.var(dim=1).mean().item()  # Variation across time
+                audio_mean = audio_features.mean().item()
+                logger.info(f"Window {window_idx} audio stats: mean={audio_mean:.4f}, variance={audio_var:.6f}")
+
+                # Get batch size and sequence length from audio features
+                B = audio_features.shape[0] if audio_features.dim() >= 2 else 1
+                T = audio_features.shape[1] if audio_features.dim() >= 2 else audio_features.shape[0]
+
+                # Ensure audio features have correct shape [B, T, D]
+                if audio_features.dim() == 2:
+                    audio_features = audio_features.unsqueeze(0)  # Add batch dimension
+
+                # Prepare conditions for the model - match training conditions
+                cond_signals = {
+                    'audio_features': audio_features.to(device),
+                    # Add default values for conditions used in training
+                    'gaze': torch.zeros(B, T, 2, device=device),  # [B, T, 2]
+                    'head_distance': torch.zeros(B, T, 1, device=device),  # [B, T, 1]
+                    'emotion': torch.zeros(B, T, 2, device=device),  # [B, T, 2]
+                    'speed_bucket': torch.ones(B, T, 1, device=device) * 4,  # Middle speed bucket
+                }
+
+                # Generate sequence using the corrected method signature with idt_embed
+                motion_sequence = self.model.generate_sequence(
+                    initial_pose=motion_data,
+                    initial_dynamics=motion_data['expression_embed'],
+                    conditions=cond_signals,
+                    idt_embed=idt_embed,  # FIXED: Pass identity embeddings for warp generation
+                    eta=0.8,  # Match audit config for consistency
+                    num_steps=50,
+                    cfg_scales=None,  # Use default strong audio guidance (20.0) from model
+                )
+
+                # SMOOTHNESS FIX: Apply temporal Gaussian smoothing to pose parameters
+                # Only smooth theta/rotation/translation (NOT expression - keep expression dynamics perfect)
+                logger.info("Applying temporal smoothing to pose parameters...")
+                motion_sequence['theta'] = temporal_smooth(motion_sequence['theta'], kernel_size=5, sigma=1.5)
+                motion_sequence['rotation'] = temporal_smooth(motion_sequence['rotation'], kernel_size=5, sigma=1.5)
+                motion_sequence['translation'] = temporal_smooth(motion_sequence['translation'], kernel_size=5, sigma=1.5)
+                # Note: NOT smoothing expression_embed to preserve perfect expression dynamics
+
+                # EXPRESSION STABILITY FIX: Clamp expressions to nearest valid expression in database
+                if self.expression_db is not None:
+                    logger.info("🔒 Clamping expressions to nearest valid expressions in database...")
+                    original_expr = motion_sequence['expression_embed'].clone()
+
+                    # Clamp to nearest valid expression from database
+                    motion_sequence['expression_embed'] = self.expression_db.get_closest(
+                        motion_sequence['expression_embed']  # [B, T, 128]
+                    )
+
+                    # Log how much clamping changed expressions
+                    expr_change = (motion_sequence['expression_embed'] - original_expr).abs().mean().item()
+                    logger.info(f"  Expression change from clamping: {expr_change:.6f}")
+                    if expr_change < 0.001:
+                        logger.info("  ✅ Expressions were already close to valid embeddings")
+                    else:
+                        logger.info(f"  📌 Expressions clamped to valid embeddings (avg change: {expr_change:.6f})")
+
+                logger.info(f"Generated sequence shape: {motion_sequence['expression_embed'].shape}")
+                
+                # Debug: Check motion parameter variation
+                expr_var = motion_sequence['expression_embed'].var(dim=1).mean().item()
+                theta_var = motion_sequence['theta'].var(dim=1).mean().item()
+                rot_var = motion_sequence['rotation'].var(dim=1).mean().item()
+                logger.info(f"Motion variation - Expression: {expr_var:.6f}, Theta: {theta_var:.6f}, Rotation: {rot_var:.6f}")
+
+                # Generate frames for this window
+                # Skip overlapping frames for windows after the first
+                start_idx = 0 if window_idx == 0 else self.stride
+                for t in range(start_idx, motion_sequence['expression_embed'].size(1)):
+                    # Get current motion parameters
+                    curr_expression = motion_sequence['expression_embed'][:, t]
+
+                    # INJECT GT THETA if provided, otherwise use predicted
+                    if gt_params:
+                        # Use GT theta from cache
+                        gt_frame_idx = min(frame_counter, gt_params['theta'].shape[0] - 1)
+                        curr_theta = gt_params['theta'][gt_frame_idx].unsqueeze(0)  # [1, 3, 4]
+                        curr_scale = gt_params['scale'][gt_frame_idx]  # [3]
+                        curr_rotation = gt_params['rotation'][gt_frame_idx]  # [3]
+                        curr_translation = gt_params['translation'][gt_frame_idx]  # [3]
+
+                        if frame_counter % 25 == 0:
+                            logger.info(f"[GT THETA] Frame {frame_counter}: Using cached GT")
+                    else:
+                        # Use predicted theta from model
+                        curr_theta = motion_sequence['theta'][:, t]
+                        curr_scale = motion_sequence['scale'][:, t].squeeze(0)  # Remove batch dim to get [3]
+                        curr_rotation = motion_sequence['rotation'][:, t].squeeze(0)  # Remove batch dim to get [3]
+                        curr_translation = motion_sequence['translation'][:, t].squeeze(0)  # Remove batch dim to get [3]
+
+                    # CRITICAL: Get UV warps from VASA model predictions
+                    curr_uv_warps = motion_sequence['uv_warps'][:, t]  # [B, 16, 64, 64, 3]
+
+                    # Calculate and log differences if previous values exist
+                    if prev_motion['expression'] is not None:
+                        expr_diff = (curr_expression - prev_motion['expression']).abs().mean().item()
+                        theta_diff = (curr_theta - prev_motion['theta']).abs().mean().item()
+                        rot_diff = (curr_rotation - prev_motion['rotation']).abs().mean().item()
+                        scale_diff = (curr_scale - prev_motion['scale']).abs().mean().item()
+                        trans_diff = (curr_translation - prev_motion['translation']).abs().mean().item()
+                        
+                        logger.info(f"Frame {window_idx * 50 + t} differences:")
+                        logger.info(f"  Expression diff: {expr_diff:.6f}")
+                        logger.info(f"  Theta diff: {theta_diff:.6f}")
+                        logger.info(f"  Rotation diff: {rot_diff:.6f}")
+                        logger.info(f"  Scale diff: {scale_diff:.6f}")
+                        logger.info(f"  Translation diff: {trans_diff:.6f}")
+                        
+                        # Check if motion is too static
+                        total_motion = expr_diff + theta_diff + rot_diff + scale_diff + trans_diff
+                        if total_motion < 1e-4:
+                            logger.warning(f"Very low motion detected! Total motion: {total_motion:.8f}")
+                            logger.warning("This may result in static output")
+                    else:
+                        logger.info(f"First frame of window {window_idx}")
+
+                    # Generate the frame with UV warps from VASA model
+                    frame = self._generate_frame(
+                        source_params,
+                        curr_expression,
+                        curr_theta,
+                        curr_rotation,
+                        curr_scale,
+                        curr_translation,
+                        device,
+                        uv_warps=curr_uv_warps  # Pass VASA-predicted UV warps
+                    )
+                    
+                    # Debug: Check frame differences
+                    if generated_frames:
+                        prev_frame = generated_frames[-1]
+                        frame_diff = (frame - prev_frame).abs().mean().item()
+                        logger.info(f"Frame {window_idx * 50 + t} visual difference: {frame_diff:.6f}")
+                        if frame_diff < 1e-4:
+                            logger.warning("Generated frame is nearly identical to previous frame!")
+                    
+                    generated_frames.append(frame)
+
+                    # Update previous motion parameters
+                    prev_motion = {
+                        'expression': curr_expression,
+                        'theta': curr_theta,
+                        'scale': curr_scale,
+                        'rotation': curr_rotation,
+                        'translation': curr_translation
+                    }
+
+                    # Increment frame counter for GT theta indexing
+                    frame_counter += 1
+
+                # Update motion data using the last frame from this window
+                # IMPORTANT: Use [:, -1] not [:, -1:] to remove time dimension
+                # Note: Only theta and expression are used - SRT removed from training
+                motion_data = {
+                    'theta': motion_sequence['theta'][:, -1],  # [B, 3, 4] not [B, 1, 3, 4]
+                    'expression_embed': motion_sequence['expression_embed'][:, -1]  # [B, 128]
+                }
+
+            logger.info(f"Total frames generated: {len(generated_frames)}")
+            return torch.stack(generated_frames).squeeze(1)
+
+        except Exception as e:
+            logger.error(f"Error in generation: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+        
+    def test_grid_sample(self):
+        """Test EMO's grid sample function works correctly."""
+        try:
+            logger.info("\n=== Testing Grid Sample ===")
+            device = next(self.volumetric_avatar.parameters()).device
+            
+            # Create test volume
+            c = self.volumetric_avatar.args.latent_volume_channels
+            d = self.volumetric_avatar.args.latent_volume_depth
+            s = self.volumetric_avatar.args.latent_volume_size
+            
+            test_volume = torch.zeros(1, c, d, s, s, device=device)
+            test_volume[:, :, d//2, s//2, s//2] = 1.0
+            
+            # Use original grid construction from EMO model
+            grid_s = torch.linspace(-1, 1, s)
+            grid_z = torch.linspace(-1, 1, d)
+            w, v, u = torch.meshgrid(grid_z, grid_s, grid_s)
+            e = torch.ones_like(u)
+            grid = torch.stack([u, v, w, e], dim=3).view(1, -1, 4).to(device)
+            
+            # Get identity transform
+            theta = torch.eye(4, device=device).unsqueeze(0)[:, :3]
+            rotation_warp = grid.bmm(theta.transpose(1, 2)).view(-1, d, s, s, 3)
+            
+            # Test grid sample
+            output = self.volumetric_avatar.grid_sample(test_volume, rotation_warp)
+            
+            logger.info(f"Input volume shape: {test_volume.shape}")
+            logger.info(f"Grid shape: {grid.shape}")
+            logger.info(f"Rotation warp shape: {rotation_warp.shape}")
+            logger.info(f"Output volume shape: {output.shape}")
+            
+            # Check if pattern is preserved
+            in_center = test_volume[:, :, d//2, s//2, s//2]
+            out_center = output[:, :, d//2, s//2, s//2]
+            logger.info(f"Center value preserved: {torch.allclose(in_center, out_center)}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Grid sample test failed: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+        
+    def log_tensor_range(self,name, tensor):
+        if tensor is not None:
+            logger.info(f"{name} range: [{tensor.min():.3f}, {tensor.max():.3f}]")
+    
+   
+    def sanity_check_emo_pipeline(self, source_img, frame_idx=0):
+        with torch.no_grad():
+            # 1. Face mask processing
+            import torchvision.transforms.functional as FF
+            source_gray = FF.rgb_to_grayscale(source_img)
+            face_mask_source = self.volumetric_avatar.face_idt.forward(source_gray)[0]
+            # face_mask_source = self.volumetric_avatar.face_idt.forward(source_img)[0]
+            face_mask_source = (face_mask_source > 0.6).float()
+            source_masked = source_img * face_mask_source
+
+            # 2. Get initial parameters
+            idt_embed = self.volumetric_avatar.idt_embedder_nw.forward_image(source_masked)
+            theta = self.volumetric_avatar.head_pose_regressor.forward(source_img * face_mask_source)
+
+            # 3. Create initial data dictionary
+            data_dict = {
+                'source_img': source_img,
+                'source_mask': face_mask_source,
+                'source_theta': theta,
+                'target_img': source_img,
+                'target_mask': face_mask_source,
+                'target_theta': theta,
+                'idt_embed': idt_embed
+            }
+
+            # 4. Get expression embedding through full pipeline
+            data_dict = self.volumetric_avatar.expression_embedder_nw(data_dict, True, False)
+            
+            # 5. Get embedding dictionaries
+            source_warp_embed_dict, _, _, embed_dict = self.volumetric_avatar.predict_embed(data_dict)
+
+            # 6. Process source latents
+            source_latents = self.volumetric_avatar.local_encoder_nw(source_masked)
+            c = self.volumetric_avatar.args.latent_volume_channels
+            d = self.volumetric_avatar.args.latent_volume_depth
+            s = self.volumetric_avatar.args.latent_volume_size
+
+            source_latent_volume = source_latents.view(1, c, d, s, s)
+            if self.volumetric_avatar.args.source_volume_num_blocks > 0:
+                source_latent_volume = self.volumetric_avatar.volume_source_nw(source_latent_volume)
+
+            canonical_volume = self.volumetric_avatar.volume_process_nw(source_latent_volume, embed_dict)
+            target_latent_feats = canonical_volume.view(1, c * d, s, s)
+
+            # 7. Generate frame
+            frame, _, _, _ = self.volumetric_avatar.decoder_nw(
+                data_dict,
+                embed_dict,
+                target_latent_feats,
+                False,
+                stage_two=True
+            )
+
+            # Save images
+            debug_dir = Path("debug_outputs")
+            debug_dir.mkdir(exist_ok=True)
+            torchvision.utils.save_image(source_img, debug_dir / "01_source.png")
+            torchvision.utils.save_image(source_masked, debug_dir / "02_masked.png")
+            torchvision.utils.save_image(frame, debug_dir / "03_output.png")
+            comparison = torch.cat([source_img, frame], dim=3)
+            torchvision.utils.save_image(comparison, debug_dir / "comparison.png")
+
+            return frame
+
+
+    def convert_theta_format(self, theta):
+        if theta.ndim == 4:
+            # shape [B, T, 4, 4], remove the last row and pick the first time step
+            return theta[:, 0, :3, :]  # => [B, 3, 4]
+        elif theta.ndim == 3:
+            # shape [B, 4, 4], remove the last row
+            return theta[:, :3, :]     # => [B, 3, 4]
+        else:
+            raise ValueError(f"Unexpected shape for theta: {theta.shape}")
+
+
+
+    def process_audio(self, waveform, sr=16000, fps=25.0):
+        """Process audio into windows of features."""
+        try:
+            # Ensure waveform is 2D [channels, samples]
+            if waveform.dim() == 1:
+                waveform = waveform.unsqueeze(0)  # Add channel dimension
+
+            # Calculate exact audio duration and frame count
+            audio_length_seconds = waveform.shape[1] / sr
+            target_frames = int(audio_length_seconds * fps)
+            logger.info(f"\n=== Audio Processing Stats ===")
+            logger.info(f"Audio length: {audio_length_seconds:.2f} seconds")
+            logger.info(f"Target frames @ {fps} fps: {target_frames}")
+            
+            window_duration = self.window_size / fps
+            logger.info(f"Window duration: {window_duration:.2f} seconds")
+            
+            samples_per_window = int(window_duration * sr)
+            stride_samples = int((self.stride / fps) * sr)
+            logger.info(f"Samples per window: {samples_per_window}")
+            logger.info(f"Stride samples: {stride_samples}")
+
+            windows = []
+            total_duration = 0
+            
+            for start_sample in range(0, waveform.size(1) - samples_per_window + 1, stride_samples):
+                window = waveform[:, start_sample:start_sample + samples_per_window]
+                
+                # Process through aligned wav2vec with JoyVASA's approach
+                inputs = self.audio_processor(window.squeeze().numpy(), 
+                                            sampling_rate=sr,
+                                            return_tensors="pt")
+                
+                with torch.no_grad():
+                    # Use aligned model with BackResample strategy for better temporal info
+                    features = self.audio_model(
+                        inputs.input_values.to(self.device),
+                        output_fps=25,  # Target FPS
+                        frame_num=self.config.motion.window_size,  # Target frames
+                        use_back_resample=True  # JoyVASA's strategy
+                    )
+                    
+                    # Add normalization and variance checking
+                    logger.info(f"Aligned Wav2Vec features shape: {features.shape}")
+                    logger.info(f"Raw features variance: {features.var().item():.6f}")
+                    logger.info(f"Raw features mean: {features.mean().item():.6f}")
+                    
+                    # Apply variance preservation (like in training)
+                    original_var = features.var().item()
+                    features = (features - features.mean(dim=-1, keepdim=True)) / (features.std(dim=-1, keepdim=True) + 1e-8)
+                    current_var = features.var().item()
+                    
+                    if current_var > 0:
+                        scale_factor = (original_var / current_var) ** 0.5
+                        scale_factor = min(scale_factor, 3.0)  # Cap scaling
+                        features = features * scale_factor
+                    
+                    logger.info(f"Preserved variance features: {features.var().item():.6f}")
+                    logger.info(f"Features mean: {features.mean().item():.6f}")
+                    
+                    # Aligned model already outputs correct size [1, window_size, 768]
+                    logger.info(f"Final features shape: {features.shape}")
+                    logger.info(f"Final features variance: {features.var().item():.6f}")
+                    logger.info(f"Final features mean: {features.mean().item():.6f}")
+                    
+                    speed_bucket = torch.ones(1, self.window_size, 1).to(self.device) * 4
+
+                    window_frames = self.window_size
+                    total_duration += window_frames / fps
+                    
+                    windows.append({
+                        'audio_features': features,
+                        'speed_bucket': speed_bucket
+                    })
+
+                logger.info(f"Window {len(windows)}: {window_frames} frames")
+
+            logger.info(f"\nTotal windows created: {len(windows)}")
+            logger.info(f"Total duration: {total_duration:.2f} seconds")
+            logger.info(f"Target duration: {audio_length_seconds:.2f} seconds")
+
+            return windows
+
+        except Exception as e:
+            logger.error(f"Error in process_audio: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+    def _generate_frame(self, source_params, curr_expression, curr_theta, curr_rotation, curr_scale, curr_translation, device, uv_warps):
+        """Generate a single frame using EMO decoder matching H5 cache warping pipeline.
+
+        This follows the exact warping pipeline from create_video_face_swap.py:
+        1. Use VASA model predictions for UV warps (REQUIRED)
+        2. Apply UV warp to canonical volume
+        3. Apply rotation warp
+        4. Generate frame through decoder
+
+        Args:
+            uv_warps: REQUIRED - UV warps from VASA model predictions [B, 16, 64, 64, 3]
+        """
+        try:
+            # Get dimensions from EMO model
+            c = self.volumetric_avatar.args.latent_volume_channels
+            d = self.volumetric_avatar.args.latent_volume_depth
+            s = self.volumetric_avatar.args.latent_volume_size
+
+            # UV warps are REQUIRED from VASA model
+            if uv_warps is None:
+                raise ValueError("UV warps are required from VASA model predictions")
+
+            target_uv_warp = uv_warps
+            logger.debug(f"Using VASA-predicted UV warps with shape: {target_uv_warp.shape}")
+
+            # Use theta from VASA predictions - it should always be a proper matrix
+            if isinstance(curr_theta, torch.Tensor) and len(curr_theta.shape) >= 2:
+                target_theta = curr_theta
+            else:
+                raise ValueError(f"Expected theta matrix from VASA but got: {type(curr_theta)}")
+
+            # Ensure proper shape for theta
+            if target_theta.ndim == 2:
+                target_theta = target_theta.unsqueeze(0)  # Add batch dimension
+            if target_theta.shape[-2:] == (4, 4):
+                target_theta = target_theta[:, :3, :]  # Remove last row to get 3x4
+
+            # Generate rotation warp from theta (matching create_video_face_swap.py)
+            grid = self.volumetric_avatar.identity_grid_3d.repeat_interleave(1, dim=0)
+            target_rotation_warp = grid.bmm(target_theta.transpose(1, 2)).view(-1, d, s, s, 3)
+
+            # Apply warps exactly like create_video_face_swap.py - nested grid_sample calls
+            # First apply UV warp, then rotation warp
+            aligned_target_volume = self.volumetric_avatar.grid_sample(
+                self.volumetric_avatar.grid_sample(source_params['canonical_volume'], target_uv_warp),
+                target_rotation_warp
+            )
+
+            # Prepare for decoder
+            target_latent_feats = aligned_target_volume.view(1, c * d, s, s)
+
+            # Create data dict for decoder
+            decoder_dict = {
+                'source_img': torch.zeros(1, 3, 512, 512).to(device),
+                'target_img': torch.zeros(1, 3, 512, 512).to(device),
+                'source_mask': source_params['source_mask'],
+                'target_mask': source_params['source_mask'],
+                'source_theta': source_params['theta'],
+                'target_theta': target_theta,
+                'idt_embed': source_params['idt_embed'],
+                'source_pose_embed': source_params.get('expression_embed', source_params.get('source_expression')),
+                'target_pose_embed': curr_expression,
+            }
+
+            # Get embed_dict if not created yet
+            if 'embed_dict' not in locals():
+                _, _, _, embed_dict = self.volumetric_avatar.predict_embed(decoder_dict)
+
+            # Generate frame through decoder
+            frame, _, _, _ = self.volumetric_avatar.decoder_nw(
+                decoder_dict,
+                embed_dict,
+                target_latent_feats,
+                False,
+                stage_two=True
+            )
+
+            return frame
+
+        except Exception as e:
+            logger.error(f"Error generating frame: {str(e)}")
+            logger.error(traceback.format_exc())
+            logger.error(f"Available source_params keys: {list(source_params.keys())}")
+            raise
+
+    def extract_video_assets(self,video_path: str, output_dir: Path) -> Tuple[str, str]:
+        """
+        Extract first frame and audio from video file.
+        
+        Args:
+            video_path: Path to input video
+            output_dir: Directory to save extracted assets
+            
+        Returns:
+            Tuple of (image_path, audio_path)
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        video_name = Path(video_path).stem
+        image_path = output_dir / f"{video_name}_source.png"
+        audio_path = output_dir / f"{video_name}_audio.wav"
+        
+        try:
+            logger.info(f"Extracting assets from: {video_path}")
+            
+            # Extract first frame
+            cap = cv2.VideoCapture(video_path)
+            ret, frame = cap.read()
+            if not ret:
+                raise ValueError("Failed to read video frame")
+                
+            # Convert BGR to RGB and save
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            Image.fromarray(frame_rgb).save(image_path)
+            logger.info(f"Saved source frame to: {image_path}")
+            
+            # Extract audio using ffmpeg
+            command = [
+                'ffmpeg', '-y',
+                '-i', video_path,
+                '-vn',  # Disable video
+                '-acodec', 'pcm_s16le',  # PCM 16-bit
+                '-ar', '16000',  # 16kHz sample rate
+                '-ac', '1',  # Mono
+                str(audio_path)
+            ]
+            
+            subprocess.run(command, check=True)
+            logger.info(f"Saved audio to: {audio_path}")
+            
+            return str(image_path), str(audio_path)
+            
+        except Exception as e:
+            logger.error(f"Error extracting video assets: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+        finally:
+            if 'cap' in locals():
+                cap.release()
+
+    def extract_source_params(self, source_img):
+        """Extract initial parameters and canonical volume from source image."""
+        with torch.no_grad():
+            # Get face mask
+            source_mask = self.volumetric_avatar.face_idt.forward(source_img)[0]
+            source_mask = (source_mask > 0.6).float()
+            source_masked = source_img * source_mask
+
+            # Get identity embedding
+            idt_embed = self.volumetric_avatar.idt_embedder_nw(source_masked)
+
+            # Get pose parameters
+            theta, scale, rotation, translation = self.volumetric_avatar.head_pose_regressor.forward(
+                source_img, return_srt=True)
+
+            # Prepare data dict for expression embedder (matching create_video_face_swap.py)
+            data_dict = {
+                'source_img': source_img,
+                'source_mask': source_mask,
+                'source_theta': theta,
+                'target_img': source_img,  # Same as source for canonical
+                'target_mask': source_mask,
+                'target_theta': theta,
+                'idt_embed': idt_embed
+            }
+
+            # Get expression embedding with face alignment (matching create_video_face_swap.py)
+            data_dict = self.volumetric_avatar.expression_embedder_nw(data_dict, True, False, False)
+            expression_embed = data_dict['source_pose_embed']  # Aligned expression embedding
+
+            # Get warp embeddings for source
+            source_warp_embed, _, _, embed_dict = self.volumetric_avatar.predict_embed(data_dict)
+
+            # Generate XY warps for source
+            source_xy_warp, _ = self.volumetric_avatar.xy_generator_nw(source_warp_embed)
+
+            # Extract source volume
+            source_latents = self.volumetric_avatar.local_encoder_nw(source_masked)
+
+            # Get volume dimensions
+            c = self.volumetric_avatar.args.latent_volume_channels
+            d = self.volumetric_avatar.args.latent_volume_depth
+            s = self.volumetric_avatar.args.latent_volume_size
+
+            # Process source volume
+            source_volume = source_latents.view(1, c, d, s, s)
+
+            # Process source volume if needed
+            if hasattr(self.volumetric_avatar.args, 'source_volume_num_blocks') and self.volumetric_avatar.args.source_volume_num_blocks > 0:
+                source_volume = self.volumetric_avatar.volume_source_nw(source_volume)
+
+            # CRITICAL: Apply INVERSE warps to get canonical volume (matching create_video_face_swap.py)
+            grid = self.volumetric_avatar.identity_grid_3d.repeat_interleave(1, dim=0)
+            inv_source_theta = theta.float().inverse().type(theta.type())
+            source_rotation_warp = grid.bmm(inv_source_theta[:, :3].transpose(1, 2)).view(-1, d, s, s, 3)
+
+            # Apply warps in correct order: rotation first, then XY warp
+            rotated_source = self.volumetric_avatar.grid_sample(source_volume, source_rotation_warp)
+            canonical_volume = self.volumetric_avatar.grid_sample(rotated_source, source_xy_warp)
+
+            # Process canonical volume
+            processed_canonical = self.volumetric_avatar.volume_process_nw(canonical_volume, embed_dict)
+
+            # Convert theta format for compatibility
+            theta = self.convert_theta_format(theta)
+
+            return {
+                'idt_embed': idt_embed,
+                'embed_dict': embed_dict,
+                'theta': theta,
+                'scale': scale,
+                'rotation': rotation,
+                'translation': translation,
+                'expression_embed': expression_embed,
+                'source_pose_embed': expression_embed,  # Keep both names for compatibility
+                'source_mask': source_mask,
+                'source_volume': source_volume,
+                'canonical_volume': processed_canonical  # This is now the properly unwarped canonical volume
+            }
+
+
+
+    def _save_video(self, frames_dict, audio_path, output_path, fps):
+        """Save video frames with audio."""
+        try:
+            # Save frames
+            temp_video = str(Path(output_path).with_suffix('.tmp.mp4'))
+            
+            # Extract frames tensor from dictionary
+            frames = frames_dict['frames']
+            
+            # Convert to CPU and numpy
+            frames = frames.cpu().numpy().transpose(0, 2, 3, 1)
+            
+            if frames.max() <= 1.0:
+                frames = (frames * 255).astype(np.uint8)
+                
+            writer = cv2.VideoWriter(
+                temp_video,
+                cv2.VideoWriter_fourcc(*'mp4v'),
+                fps,
+                (frames.shape[2], frames.shape[1])
+            )
+            
+            for frame in frames:
+                writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            writer.release()
+            
+            # Add audio
+            command = [
+                'ffmpeg', '-y',
+                '-i', temp_video,
+                '-i', audio_path,
+                '-c:v', 'copy',
+                '-c:a', 'aac',
+                output_path
+            ]
+            
+            subprocess.run(command, check=True)
+            Path(temp_video).unlink()
+            
+        except Exception as e:
+            print(f"Error saving video: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            raise
+
+
+    # def visualize_inference_outputs2(
+    #     self,
+    #     input_video: str,
+    #     output_dir: str = "inference_vis",
+    #     fps: float = 25.0
+    # ):
+    #     """
+    #     Create visualizations of inference outputs for sanity checking.
+    #     Saves frame-by-frame visualization of inputs and generated expressions.
+        
+    #     Args:
+    #         input_video: Path to input video file
+    #         output_dir: Directory to save visualizations
+    #         fps: Video frame rate
+    #     """
+    #     import matplotlib.pyplot as plt
+    #     from matplotlib.gridspec import GridSpec
+    #     import os
+        
+    #     try:
+    #         os.makedirs(output_dir, exist_ok=True)
+    #         logger.info(f"Saving visualizations to: {output_dir}")
+            
+    #         # Extract source image and audio
+    #         source_image_path, audio_path = self.extract_video_assets(
+    #             input_video, 
+    #             Path(output_dir) / "assets"
+    #         )
+            
+    #         # Load source image
+    #         source_img = Image.open(source_image_path).convert('RGB')
+    #         source_tensor = self.transform(source_img).unsqueeze(0).to(self.device)
+            
+    #         # Load and process audio
+    #         waveform, sr = torchaudio.load(audio_path)
+    #         if sr != 16000:
+    #             resampler = torchaudio.transforms.Resample(sr, 16000)
+    #             waveform = resampler(waveform)
+            
+    #         # Convert to mono if needed
+    #         if waveform.shape[0] > 1:
+    #             waveform = waveform.mean(dim=0, keepdim=True)
+            
+    #         # Process audio into windows with proper overlap
+    #         audio_windows = self.process_audio(waveform, sr=16000, fps=fps)
+            
+    #         # Extract source parameters
+    #         source_params = self.extract_source_params(source_tensor)
+            
+    #         # Process each window
+    #         for window_idx, audio_window in enumerate(audio_windows):
+    #             logger.info(f"Processing window {window_idx}")
+                
+    #             # Prepare conditions
+    #             conditions = {
+    #                 'audio_features': audio_window.unsqueeze(0),
+    #                 'speed_bucket': torch.ones(
+    #                     1, self.motion_handler.window_size, 1, 
+    #                     device=self.device
+    #                 ) * 4  # Middle speed bucket
+    #             }
+                
+    #             # Generate motion sequence
+    #             motion_sequence = self.model.generate_sequence(
+    #                 initial_pose={
+    #                     'theta': source_params['theta'],
+    #                     'rotation': source_params['rotation'],
+    #                     'translation': source_params['translation']
+    #                 },
+    #                 initial_dynamics=source_params['expression_embed'],
+    #                 conditions=conditions,
+    #                 num_steps=50
+    #             )
+                
+    #             # Visualize each frame in the window
+    #             for frame_idx in range(self.motion_handler.window_size):
+    #                 fig = plt.figure(figsize=(20, 15))
+    #                 gs = GridSpec(3, 3, figure=fig)
+                    
+    #                 # Generate current frame using EMO model
+    #                 curr_frame = self.generate_frames(
+    #                     source_params,
+    #                     {
+    #                         'theta': motion_sequence['theta'][:, frame_idx:frame_idx+1],
+    #                         'expression_embed': motion_sequence['expression_embed'][:, frame_idx:frame_idx+1]
+    #                     }
+    #                 )
+                    
+    #                 # Plot generated frame
+    #                 ax_source = fig.add_subplot(gs[0, 0])
+    #                 frame_np = curr_frame[0].cpu().permute(1, 2, 0).numpy()
+    #                 frame_np = (frame_np - frame_np.min()) / (frame_np.max() - frame_np.min())
+    #                 ax_source.imshow(frame_np)
+    #                 ax_source.set_title(f"Generated Frame {frame_idx}")
+    #                 ax_source.axis('off')
+                    
+    #                 # 2. Plot audio features
+    #                 ax_audio = fig.add_subplot(gs[0, 1:])
+    #                 audio_feat = conditions['audio_features'][0, frame_idx].cpu().numpy()
+    #                 im = ax_audio.imshow(audio_feat.reshape(1, -1), aspect='auto', cmap='viridis')
+    #                 plt.colorbar(im, ax=ax_audio)
+    #                 ax_audio.set_title(f"Audio Features (Frame {frame_idx})")
+                    
+    #                 # 3. Plot expression embedding
+    #                 ax_expr = fig.add_subplot(gs[1, :])
+    #                 expr = motion_sequence['expression_embed'][0, frame_idx].cpu().numpy()
+    #                 expr_2d = expr.reshape(8, -1)  # Reshape for better visualization
+    #                 im = ax_expr.imshow(expr_2d, cmap='RdBu', aspect='auto')
+    #                 plt.colorbar(im, ax=ax_expr)
+    #                 ax_expr.set_title(f"Generated Expression Embedding")
+                    
+    #                 # 4. Plot pose parameters
+    #                 ax_pose = fig.add_subplot(gs[2, 0])
+    #                 theta = motion_sequence['theta'][0, frame_idx].cpu().numpy()
+    #                 im = ax_pose.imshow(theta, cmap='RdBu')
+    #                 plt.colorbar(im, ax=ax_pose)
+    #                 ax_pose.set_title("Pose Matrix")
+                    
+    #                 # 5. Plot rotation angles
+    #                 ax_rot = fig.add_subplot(gs[2, 1])
+    #                 rotation = motion_sequence['rotation'][0, frame_idx].cpu().numpy()
+    #                 ax_rot.bar(['Pitch', 'Yaw', 'Roll'], rotation)
+    #                 ax_rot.set_title("Rotation Angles")
+                    
+    #                 # 6. Plot translation
+    #                 ax_trans = fig.add_subplot(gs[2, 2])
+    #                 translation = motion_sequence['translation'][0, frame_idx].cpu().numpy()
+    #                 ax_trans.bar(['X', 'Y', 'Z'], translation)
+    #                 ax_trans.set_title("Translation")
+                    
+    #                 # Save frame visualization
+    #                 plt.tight_layout()
+    #                 plt.savefig(os.path.join(
+    #                     output_dir,
+    #                     f'window_{window_idx:03d}_frame_{frame_idx:03d}.png'
+    #                 ))
+    #                 plt.close()
+                    
+    #             # Save window statistics
+    #             with open(os.path.join(output_dir, f'window_{window_idx:03d}_stats.txt'), 'w') as f:
+    #                 f.write(f"Window {window_idx} Statistics\n")
+    #                 f.write("-" * 50 + "\n")
+    #                 f.write(f"Expression range: [{motion_sequence['expression_embed'].min().item():.3f}, "
+    #                     f"{motion_sequence['expression_embed'].max().item():.3f}]\n")
+    #                 f.write(f"Rotation range: [{motion_sequence['rotation'].min().item():.3f}, "
+    #                     f"{motion_sequence['rotation'].max().item():.3f}]\n")
+    #                 f.write(f"Translation range: [{motion_sequence['translation'].min().item():.3f}, "
+    #                     f"{motion_sequence['translation'].max().item():.3f}]\n")
+                    
+    #         logger.info("Visualization complete!")
+            
+    #     except Exception as e:
+    #         logger.error(f"Error in visualization: {str(e)}")
+    #         logger.error(traceback.format_exc())
+    #         raise
+
+
+    
+    # def visualize_inference_outputs(
+    #     self,
+    #     input_video: str,
+    #     target_image_path: str,
+    #     output_dir: str = "inference_vis",
+    #     fps: float = 25.0
+    # ):
+    #     """
+    #     Create visualizations of inference outputs, using expressions from input video 
+    #     to drive a target identity image.
+        
+    #     Args:
+    #         input_video: Path to input video file
+    #         target_image_path: Path to target identity image
+    #         output_dir: Directory to save visualizations
+    #         fps: Video frame rate
+    #     """
+    #     import matplotlib.pyplot as plt
+    #     from matplotlib.gridspec import GridSpec
+    #     import os
+        
+    #     try:
+    #         os.makedirs(output_dir, exist_ok=True)
+    #         logger.info(f"Saving visualizations to: {output_dir}")
+            
+    #         # Load target identity image
+    #         target_img = Image.open(target_image_path).convert('RGB')
+    #         target_tensor = self.transform(target_img).unsqueeze(0).to(self.device)
+            
+    #         # Extract canonical volume for target identity
+    #         with torch.no_grad():
+    #             # Get face mask
+    #             target_mask = self.volumetric_avatar.face_idt.forward(target_tensor)[0]
+    #             target_mask = (target_mask > 0.6).float()
+    #             target_masked = target_tensor * target_mask
+                
+    #             # Get identity embedding
+    #             idt_embed = self.volumetric_avatar.idt_embedder_nw(target_masked)
+                
+    #             # Extract source latents
+    #             target_latents = self.volumetric_avatar.local_encoder_nw(target_masked)
+                
+    #             # Get volume dimensions
+    #             c = self.volumetric_avatar.args.latent_volume_channels
+    #             d = self.volumetric_avatar.args.latent_volume_depth
+    #             s = self.volumetric_avatar.args.latent_volume_size
+                
+    #             # Process target volume
+    #             target_latent_volume = target_latents.view(1, c, d, s, s)
+    #             if self.volumetric_avatar.args.source_volume_num_blocks > 0:
+    #                 target_latent_volume = self.volumetric_avatar.volume_source_nw(target_latent_volume)
+                
+    #             # Get canonical volume
+    #             canonical_volume = self.volumetric_avatar.volume_process_nw(target_latent_volume)
+                
+    #             target_params = {
+    #                 'source_mask': target_mask,
+    #                 'idt_embed': idt_embed,
+    #                 'source_latent_volume': target_latent_volume,
+    #                 'canonical_volume': canonical_volume
+    #             }
+            
+    #         # Extract frames from input video
+    #         cap = cv2.VideoCapture(input_video)
+    #         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    #         logger.info(f"Processing {total_frames} frames from input video")
+            
+    #         # Process each frame
+    #         for frame_idx in range(total_frames):
+    #             ret, frame = cap.read()
+    #             if not ret:
+    #                 break
+                    
+    #             # Convert frame to RGB and proper format
+    #             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    #             frame_pil = Image.fromarray(frame_rgb).resize((512, 512))
+    #             frame_tensor = self.transform(frame_pil).unsqueeze(0).to(self.device)
+                
+    #             # Extract expression from frame
+    #             with torch.no_grad():
+    #                 # Get frame parameters
+    #                 frame_mask = self.volumetric_avatar.face_idt.forward(frame_tensor)[0]
+    #                 frame_mask = (frame_mask > 0.6).float()
+    #                 frame_masked = frame_tensor * frame_mask
+                    
+    #                 # Get frame parameters
+    #                 data_dict = {
+    #                     'source_img': frame_tensor,
+    #                     'source_mask': frame_mask,
+    #                     'target_img': frame_tensor,
+    #                     'target_mask': frame_mask
+    #                 }
+                    
+    #                 # Get expression embedding
+    #                 data_dict = self.volumetric_avatar.expression_embedder_nw(data_dict, True, False)
+    #                 expression_embed = data_dict['source_pose_embed']
+                    
+    #                 # Get pose parameters
+    #                 frame_theta = self.volumetric_avatar.head_pose_regressor.forward(frame_tensor)
+                    
+    #                 # Generate output using target identity
+    #                 data_dict = {
+    #                     'source_img': target_tensor,
+    #                     'source_mask': target_params['source_mask'],
+    #                     'target_pose_embed': expression_embed,
+    #                     'target_theta': frame_theta
+    #                 }
+                    
+    #                 # Generate frame using both EMO and VASA
+    #                 emo_frame, _, _, _ = self.volumetric_avatar.decoder_nw(
+    #                     data_dict,
+    #                     None,  # embed_dict
+    #                     target_params['canonical_volume'].view(1, -1, s, s),
+    #                     False   # is_training
+    #                 )
+                    
+    #                 vasa_frame = self.generate_frames(
+    #                     target_params,
+    #                     {
+    #                         'theta': frame_theta,
+    #                         'expression_embed': expression_embed
+    #                     }
+    #                 )
+                
+    #             # Create visualization
+    #             fig = plt.figure(figsize=(20, 15))
+    #             gs = GridSpec(3, 3, figure=fig)
+                
+    #             # Create grid of frames
+    #             ax_frames = fig.add_subplot(gs[0, :])
+                
+    #             # Prepare frames for display
+    #             input_np = frame_tensor.squeeze().cpu().permute(1, 2, 0).numpy()
+    #             input_np = (input_np - input_np.min()) / (input_np.max() - input_np.min())
+                
+    #             target_np = target_tensor.squeeze().cpu().permute(1, 2, 0).numpy()
+    #             target_np = (target_np - target_np.min()) / (target_np.max() - target_np.min())
+                
+    #             emo_np = emo_frame[0].cpu().permute(1, 2, 0).numpy()
+    #             emo_np = (emo_np - emo_np.min()) / (emo_np.max() - emo_np.min())
+                
+    #             vasa_np = vasa_frame[0].cpu().permute(1, 2, 0).numpy()
+    #             vasa_np = (vasa_np - vasa_np.min()) / (vasa_np.max() - vasa_np.min())
+                
+    #             # Create combined image
+    #             padding = 10
+    #             H, W = input_np.shape[:2]
+    #             combined = np.zeros((H, W * 4 + padding * 3, 3))
+                
+    #             # Add frames
+    #             combined[:, :W] = input_np  # Input frame
+    #             combined[:, W+padding:2*W+padding] = target_np  # Target identity
+    #             combined[:, 2*W+2*padding:3*W+2*padding] = emo_np  # EMO output
+    #             combined[:, 3*W+3*padding:] = vasa_np  # VASA output
+                
+    #             ax_frames.imshow(combined)
+    #             ax_frames.axvline(x=W + padding/2, color='white', linestyle='--', alpha=0.5)
+    #             ax_frames.axvline(x=2*W + 3*padding/2, color='white', linestyle='--', alpha=0.5)
+    #             ax_frames.axvline(x=3*W + 5*padding/2, color='white', linestyle='--', alpha=0.5)
+    #             ax_frames.set_title(f"Input Frame | Target Identity | EMO Output | VASA Output (Frame {frame_idx})")
+    #             ax_frames.axis('off')
+                
+    #             # Plot expression embedding
+    #             ax_expr = fig.add_subplot(gs[1, :])
+    #             expr = expression_embed[0].cpu().numpy()
+    #             expr_2d = expr.reshape(8, -1)
+    #             im = ax_expr.imshow(expr_2d, cmap='RdBu', aspect='auto')
+    #             plt.colorbar(im, ax=ax_expr)
+    #             ax_expr.set_title("Extracted Expression Embedding")
+                
+    #             # Plot pose parameters
+    #             ax_pose = fig.add_subplot(gs[2, 0])
+    #             theta = frame_theta[0].cpu().numpy()
+    #             im = ax_pose.imshow(theta, cmap='RdBu')
+    #             plt.colorbar(im, ax=ax_pose)
+    #             ax_pose.set_title("Pose Matrix")
+                
+    #             # Save visualization
+    #             plt.tight_layout()
+    #             plt.savefig(os.path.join(output_dir, f'frame_{frame_idx:04d}.png'))
+    #             plt.close()
+                
+    #         cap.release()
+    #         logger.info("Visualization complete!")
+            
+    #     except Exception as e:
+    #         logger.error(f"Error in visualization: {str(e)}")
+    #         logger.error(traceback.format_exc())
+    #         raise
+
+# Example usage:
+# inferencer = VASAInference(...)
+# inferencer.visualize_inference_outputs("input.mp4", "vis_output")
+# Example usage
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='VASA-1 Video Inference')
+    parser.add_argument('--config', type=str, default='overfit_config.yaml',
+                        help='Path to config file (default: overfit_config.yaml)')
+    parser.add_argument('--checkpoint', type=str, default=None,
+                        help='Path to checkpoint file (default: auto-detect from config)')
+    parser.add_argument('--input', type=str, default='./videovideoeI2V8Bd5X9s-scene6_scene1.mp4',
+                        help='Input video path')
+    parser.add_argument('--output', type=str, default=None,
+                        help='Output video path (default: auto-generate)')
+    parser.add_argument('--fps', type=float, default=25.0,
+                        help='Output video FPS (default: 25.0)')
+    parser.add_argument('--neutral', action='store_true',
+                        help='Use neutral expression')
+    parser.add_argument('--visualize', action='store_true',
+                        help='Generate visualization outputs instead of video')
+    parser.add_argument('--target_image', type=str, default='./data/IMG_1.png',
+                        help='Target image for visualization (default: ./data/A.png)')
+    parser.add_argument('--vis-dir', type=str, default='vis_output',
+                        help='Output directory for visualizations (default: vis_output)')
+    parser.add_argument('--gt-theta-h5', type=str, default=None,
+                        help='Path to cached GT theta H5 file (uses GT theta instead of predicted)')
+    parser.add_argument('--expression-db', type=str, default=None,
+                        help='Path to expression database H5 file for stability clamping')
+
+    args = parser.parse_args()
+    
+    # Load config to determine checkpoint path
+    config = OmegaConf.load(args.config)
+    
+    # Determine checkpoint path
+    if args.checkpoint:
+        checkpoint_path = args.checkpoint
+    else:
+        # Auto-detect checkpoint based on config
+        if 'overfit' in args.config:
+            checkpoint_path = "./checkpoints_overfit/best_checkpoint.pt"
+            if not Path(checkpoint_path).exists():
+                # Try to find latest checkpoint
+                checkpoint_dir = Path("./checkpoints_overfit")
+                if checkpoint_dir.exists():
+                    checkpoints = sorted(checkpoint_dir.glob("checkpoint_epoch_*.pt"))
+                    if checkpoints:
+                        checkpoint_path = str(checkpoints[-1])
+                        logger.info(f"Using latest checkpoint: {checkpoint_path}")
+        else:
+            checkpoint_path = "./checkpoints/best_checkpoint.pt"
+            if not Path(checkpoint_path).exists():
+                # Try to find latest checkpoint
+                checkpoint_dir = Path("./checkpoints")
+                if checkpoint_dir.exists():
+                    checkpoints = sorted(checkpoint_dir.glob("checkpoint_epoch_*.pt"))
+                    if checkpoints:
+                        checkpoint_path = str(checkpoints[-1])
+                        logger.info(f"Using latest checkpoint: {checkpoint_path}")
+    
+    # Generate output path if not specified
+    if args.output is None:
+        config_name = Path(args.config).stem
+        input_name = Path(args.input).stem
+        args.output = f"vasa-output-{config_name}-{input_name}.mp4"
+    
+    logger.info(f"Configuration: {args.config}")
+    logger.info(f"Checkpoint: {checkpoint_path}")
+    logger.info(f"Input video: {args.input}")
+    
+    # Create inferencer
+    inferencer = VASAInference(
+        checkpoint_path=checkpoint_path,
+        config_path=args.config,
+        expression_db_path=args.expression_db  # Pass expression database path if provided
+    )
+
+    if args.visualize:
+        # Generate visualization outputs
+        logger.info(f"Generating visualizations to: {args.vis_dir}")
+        logger.info(f"Target image: {args.target_image}")
+        inferencer.visualize_inference_outputs(
+            input_video=args.input,
+            target_image_path=args.target_image,
+            output_dir=args.vis_dir
+        )
+    else:
+        # Generate video
+        logger.info(f"Output video: {args.output}")
+        logger.info(f"Target image: {args.target_image}")
+        if args.gt_theta_h5:
+            logger.info(f"Using GT theta from: {args.gt_theta_h5}")
+        inferencer.generate_from_video(
+            input_video=args.input,
+            output_path=args.output,
+            fps=args.fps,
+            target_image=args.target_image,
+            gt_theta_h5=args.gt_theta_h5  # Pass GT theta cache if provided
+        )
+
+    # inferencer.visualize_inference_outputs(
+    #     input_video="./junk/ovs-GiY_848_1.mp4",
+    #     target_image_path="./data/A.png",
+    #     output_dir="vis_output"
+    # )
+
+    # inferencer.visualize_inference_outputs2(
+    #     input_video="./junk/ovs-GiY_848_1.mp4",
+
+    # )

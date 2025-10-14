@@ -1292,6 +1292,37 @@ class VASAModel(nn.Module):
                             )
                             window_motion[key] = scheduler_output.prev_sample
 
+                # CRITICAL: Clamp theta/SRT to prevent geometric distortions
+                # These are reasonable ranges based on typical face pose/scale variations
+                logger.info(f"[CLAMPING] Before - Scale range: [{window_motion['scale'].min().item():.2f}, {window_motion['scale'].max().item():.2f}]")
+                logger.info(f"[CLAMPING] Before - Rotation range: [{window_motion['rotation'].min().item():.2f}, {window_motion['rotation'].max().item():.2f}] rad")
+                logger.info(f"[CLAMPING] Before - Translation range: [{window_motion['translation'].min().item():.2f}, {window_motion['translation'].max().item():.2f}]")
+
+                # Clamp to prevent extreme distortions
+                window_motion['scale'] = torch.clamp(window_motion['scale'], 0.7, 1.3)  # ±30% scale variation
+                window_motion['rotation'] = torch.clamp(window_motion['rotation'], -0.785, 0.785)  # ±45 degrees
+                window_motion['translation'] = torch.clamp(window_motion['translation'], -0.3, 0.3)  # ±0.3 translation
+
+                logger.info(f"[CLAMPING] After - Scale range: [{window_motion['scale'].min().item():.2f}, {window_motion['scale'].max().item():.2f}]")
+                logger.info(f"[CLAMPING] After - Rotation range: [{window_motion['rotation'].min().item():.2f}, {window_motion['rotation'].max().item():.2f}] rad")
+                logger.info(f"[CLAMPING] After - Translation range: [{window_motion['translation'].min().item():.2f}, {window_motion['translation'].max().item():.2f}]")
+
+                # Recompose theta from clamped SRT for geometric consistency
+                import sys
+                sys.path.insert(0, 'nemo')
+                from utils.point_transforms import get_transform_matrix
+
+                # Flatten to [B*T, 3] for get_transform_matrix
+                B_win, T_win = window_motion['scale'].shape[:2]
+                scale_flat = window_motion['scale'].view(B_win * T_win, 3)
+                rotation_flat = window_motion['rotation'].view(B_win * T_win, 3)
+                translation_flat = window_motion['translation'].view(B_win * T_win, 3)
+
+                # Recompose theta from clamped SRT
+                theta_4x4 = get_transform_matrix(scale_flat, rotation_flat, translation_flat)
+                window_motion['theta'] = theta_4x4[:, :3, :].view(B_win, T_win, 3, 4)
+                logger.info(f"[CLAMPING] Recomposed theta from clamped SRT")
+
                 # Generate warps using volumetric_avatar's predict_embed pipeline
                 if 'expression_embed' in window_motion and 'theta' in window_motion:
                     if idt_embed is not None and self.use_derived_warps:

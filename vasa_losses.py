@@ -2549,9 +2549,9 @@ class VASALossModule:
                         # Extract emotion if recognizer available (only for valid frames)
                         if dataset.emotion_recognizer is not None and 'emotion' in conditions:
                             try:
-                                # Use dataset's _get_emotion method which returns [valence, arousal]
-                                emotion_va = dataset._get_emotion(frame_np)
-                                pred_emotions.append(emotion_va)
+                                # Use dataset's _get_emotion method which returns (label, va_values)
+                                emotion_label, emotion_va = dataset._get_emotion(frame_np)
+                                pred_emotions.append(emotion_va)  # Only append VA values [valence, arousal]
                             except Exception as e:
                                 logger.warning(f"Could not extract emotion from frame {t_idx}: {e}")
 
