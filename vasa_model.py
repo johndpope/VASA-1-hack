@@ -571,10 +571,28 @@ class MotionTransformer(nn.Module):
                 nn.init.xavier_normal_(layer.weight, gain=2.0)  # Larger initialization for rotation
                 if layer.bias is not None:
                     nn.init.zeros_(layer.bias)
+
         self.expr_head = nn.Sequential(
             nn.Linear(self.d_model, self.d_model // 2),
             nn.SiLU(),
             nn.Linear(self.d_model // 2, self.expression_dim)
+        )
+
+        # SRT heads for scale, rotation, translation prediction
+        self.scale_head = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model // 4),
+            nn.SiLU(),
+            nn.Linear(self.d_model // 4, 3)
+        )
+        self.rotation_head = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model // 4),
+            nn.SiLU(),
+            nn.Linear(self.d_model // 4, 3)
+        )
+        self.translation_head = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model // 4),
+            nn.SiLU(),
+            nn.Linear(self.d_model // 4, 3)
         )
 
 
@@ -733,6 +751,11 @@ class MotionTransformer(nn.Module):
         theta_pred = self.theta_head(out).view(B, T, 3, 4)  # H5: (1, 4, 4) but model uses 3x4
         expr_pred = self.expr_head(out)  # [B, T, 128] - matches target_pose_embed in H5
 
+        # Predict SRT components (always predict, even if using derived warps)
+        scale_pred = self.scale_head(out)  # [B, T, 3] - matches H5
+        rotation_pred = self.rotation_head(out)  # [B, T, 3] - matches H5
+        translation_pred = self.translation_head(out)  # [B, T, 3] - matches H5
+
         # Debug expression predictions
         if torch.rand(1).item() < 0.01:  # Log 1% of the time
             logger.info(f"[DEBUG] Expression prediction stats:")
@@ -747,23 +770,19 @@ class MotionTransformer(nn.Module):
         # Add assertions to verify output shapes
         assert theta_pred.shape == (B, T, 3, 4), f"Theta pred shape mismatch: {theta_pred.shape}"
         assert expr_pred.shape == (B, T, 128), f"Expression pred shape mismatch: {expr_pred.shape}"
+        assert scale_pred.shape == (B, T, 3), f"Scale pred shape mismatch: {scale_pred.shape}"
+        assert rotation_pred.shape == (B, T, 3), f"Rotation pred shape mismatch: {rotation_pred.shape}"
+        assert translation_pred.shape == (B, T, 3), f"Translation pred shape mismatch: {translation_pred.shape}"
 
-        # Build output dict - when using derived warps, only predict theta and expression_embed
-        # Nemo's pretrained components handle scale/rotation/translation internally
+        # Build output dict - always include SRT predictions for loss computation
         output_dict = {
             'theta': theta_pred,  # Pose matrix
             'expression_embed': expr_pred,  # Aligned expression embedding (target_pose_embed in H5)
+            'scale': scale_pred,  # SRT scale
+            'rotation': rotation_pred,  # SRT rotation
+            'translation': translation_pred,  # SRT translation
             # Note: uv_warps will be added by VASAModel.forward() via implicit generation
         }
-
-        # Only include SRT components if NOT using derived warps (legacy mode)
-        if not self.use_derived_warps:
-            rotation_pred = motion_data['rotation'] if 'rotation' in motion_data else torch.zeros(B, T, 3, device=device)
-            scale_pred = motion_data['scale'] if 'scale' in motion_data else torch.zeros(B, T, 3, device=device)
-            translation_pred = motion_data['translation'] if 'translation' in motion_data else torch.zeros(B, T, 3, device=device)
-            output_dict['rotation'] = rotation_pred
-            output_dict['scale'] = scale_pred
-            output_dict['translation'] = translation_pred
 
         return output_dict
 

@@ -135,8 +135,8 @@ class MotionSequenceHandler:
     def prepare_motion_data(self, window: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Prepare motion data from window matching H5 cache structure.
 
-        NOTE: SRT (scale/rotation/translation) removed - model only predicts theta + expression.
-        Nemo's volumetric avatar handles SRT internally via warp generation.
+        NOTE: SRT (scale/rotation/translation) restored - model predicts theta + expression + SRT.
+        SRT values are used for direct supervision against ground truth from EMO.
         """
         # UV warps are optional - if not cached, use zeros (will be derived from Nemo networks)
         if 'uv_warps' not in window:
@@ -152,6 +152,14 @@ class MotionSequenceHandler:
             'expression_embed': window['expression_embed'],  # [B, T, 128] - aligned expression
             'uv_warps': uv_warps,      # [B, T, 16, 64, 64, 3] - UV warps (zeros if not cached, derived during forward)
         }
+
+        # Add SRT ground truth values if available (for direct supervision)
+        if 'scale' in window:
+            motion_data['scale'] = window['scale']  # [B, T, 3] - GT scale from EMO
+        if 'rotation' in window:
+            motion_data['rotation'] = window['rotation']  # [B, T, 3] - GT rotation from EMO
+        if 'translation' in window:
+            motion_data['translation'] = window['translation']  # [B, T, 3] - GT translation from EMO
 
         # Include audio features for sync loss and other audio-related losses
         if 'audio_features' in window:

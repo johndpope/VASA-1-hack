@@ -171,6 +171,11 @@ loss:
   lambda_expression_cosine: 10.0  # NEW: Direct GT expression matching via cosine similarity
   lambda_pose: 5.0  # Increased from 1.0 to enforce better head pose learning
 
+  # SRT losses - Scale, Rotation, Translation components
+  lambda_scale: 1.0            # Scale prediction loss weight
+  lambda_rotation: 1.0         # Rotation prediction loss weight
+  lambda_translation: 1.0      # Translation prediction loss weight
+
   # Progressive losses (unlock based on thresholds)
   # Stage 2: Blinking (unlocks at epoch 5 if reconstruction < 0.1)
   lambda_blink: 0.1           # Will ramp to 2.0
@@ -194,7 +199,7 @@ loss:
   lambda_control: 0.0         # DISABLED until TDD converges - focus on theta+expression first
   lambda_lip: 0.0
   lambda_cfg: 0.5
-  lambda_perceptual: 0.5      # Increased perceptual loss for better quality
+  lambda_perceptual: 50      # Increased perceptual loss for better quality
   lambda_temporal: 0.0        # DISABLED - temporal smoothness prevents expression variation
   use_consistency: true       # Enable VASA consistency loss
   use_identity: true          # Enable face identity preservation
@@ -285,7 +290,7 @@ dataset:
   preextract_audio: true
   cache_audio: true
   hop_length: 10
-  max_videos: 10              # REDUCED from 1000 to 50 - use only the best quality videos
+  max_videos: 1000              # REDUCED from 1000 to 50 - use only the best quality videos
   max_sequence_samples: 1000 # Maximum samples per epoch
   use_identity_image: true    # UNSTABLE - Use high-quality identity image instead of video frame
   identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image

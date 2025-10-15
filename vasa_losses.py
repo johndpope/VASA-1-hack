@@ -186,6 +186,9 @@ class VASALossModule:
            # Extract loss weights from config
         self.lambda_pose = config.loss.lambda_pose
         self.lambda_dynamics = config.loss.lambda_dynamics
+        self.lambda_scale = getattr(config.loss, 'lambda_scale', 1.0)
+        self.lambda_rotation = getattr(config.loss, 'lambda_rotation', 1.0)
+        self.lambda_translation = getattr(config.loss, 'lambda_translation', 1.0)
         self.lambda_gaze_direction = config.loss.lambda_gaze_direction
         self.lambda_distance = config.loss.lambda_head_distance
         self.lambda_emotion = config.loss.lambda_emotion
@@ -578,109 +581,92 @@ class VASALossModule:
                     logger.debug(f"  {k}: {v.item():.6f}")
 
             # 1.5 Motion Diversity Loss - Encourage variance to prevent collapse
-            logger.debug("\nComputing motion diversity loss:")
-            if 'expression_embed' in outputs:
-                expr = outputs['expression_embed']  # [B, T, D]
-                B, T, D = expr.shape
+            # logger.debug("\nComputing motion diversity loss:")
+            # if 'expression_embed' in outputs:
+            #     expr = outputs['expression_embed']  # [B, T, D]
+            #     B, T, D = expr.shape
 
-                # Compute entropy of expression embeddings to encourage diversity
-                # Higher entropy = more diverse expressions
-                expr_flat = expr.view(-1, D)  # Flatten to [B*T, D]
+            #     # Compute entropy of expression embeddings to encourage diversity
+            #     # Higher entropy = more diverse expressions
+            #     expr_flat = expr.view(-1, D)  # Flatten to [B*T, D]
 
-                # Normalize to probabilities using softmax
-                expr_norm = F.softmax(expr_flat.abs(), dim=-1)  # Use abs to handle negative values
+            #     # Normalize to probabilities using softmax
+            #     expr_norm = F.softmax(expr_flat.abs(), dim=-1)  # Use abs to handle negative values
 
-                # Compute entropy: -sum(p * log(p))
-                entropy = -(expr_norm * torch.log(expr_norm + 1e-8)).sum(-1).mean()
+            #     # Compute entropy: -sum(p * log(p))
+            #     entropy = -(expr_norm * torch.log(expr_norm + 1e-8)).sum(-1).mean()
 
-                # We want HIGH entropy (diverse), so we minimize negative entropy
-                diversity_loss = -entropy * 0.1  # Small weight to encourage diversity
-                losses['motion_diversity'] = diversity_loss
+            #     # We want HIGH entropy (diverse), so we minimize negative entropy
+            #     diversity_loss = -entropy * 0.1  # Small weight to encourage diversity
+            #     losses['motion_diversity'] = diversity_loss
 
-                logger.debug(f"  Expression entropy: {entropy.item():.6f}")
+            #     logger.debug(f"  Expression entropy: {entropy.item():.6f}")
 
-                # 1.6 Audio-Expression Direct Coupling - Force expression to follow audio energy
-                audio_key = 'audio_features' if 'audio_features' in conditions else 'audio' if 'audio' in conditions else None
-                if audio_key is not None:
-                    audio = conditions[audio_key]  # [B, T_audio, 768]
+            #     # 1.6 Audio-Expression Direct Coupling - Force expression to follow audio energy
+            #     audio_key = 'audio_features' if 'audio_features' in conditions else 'audio' if 'audio' in conditions else None
+            #     if audio_key is not None:
+            #         audio = conditions[audio_key]  # [B, T_audio, 768]
 
-                    # Align audio sequence length with expression sequence length
-                    B_expr, T_expr, D_expr = expr.shape
-                    B_audio, T_audio, D_audio = audio.shape
+            #         # Align audio sequence length with expression sequence length
+            #         B_expr, T_expr, D_expr = expr.shape
+            #         B_audio, T_audio, D_audio = audio.shape
 
-                    if T_audio != T_expr:
-                        logger.debug(f"  Interpolating audio from {T_audio} to {T_expr} frames for audio-expr coupling")
-                        # Permute to [B, D, T] for interpolation, then back to [B, T, D]
-                        audio = audio.permute(0, 2, 1)  # [B, 768, T]
-                        audio = F.interpolate(audio, size=T_expr, mode='linear', align_corners=False)
-                        audio = audio.permute(0, 2, 1)  # [B, T_expr, 768]
+            #         if T_audio != T_expr:
+            #             logger.debug(f"  Interpolating audio from {T_audio} to {T_expr} frames for audio-expr coupling")
+            #             # Permute to [B, D, T] for interpolation, then back to [B, T, D]
+            #             audio = audio.permute(0, 2, 1)  # [B, 768, T]
+            #             audio = F.interpolate(audio, size=T_expr, mode='linear', align_corners=False)
+            #             audio = audio.permute(0, 2, 1)  # [B, T_expr, 768]
 
-                    # Compute audio energy/magnitude
-                    audio_energy = torch.norm(audio, dim=-1, keepdim=True)  # [B, T_expr, 1]
-                    # Normalize to [0, 1]
-                    audio_energy_norm = (audio_energy - audio_energy.min()) / (audio_energy.max() - audio_energy.min() + 1e-8)
+            #         # Compute audio energy/magnitude
+            #         audio_energy = torch.norm(audio, dim=-1, keepdim=True)  # [B, T_expr, 1]
+            #         # Normalize to [0, 1]
+            #         audio_energy_norm = (audio_energy - audio_energy.min()) / (audio_energy.max() - audio_energy.min() + 1e-8)
 
-                    # Compute expression magnitude
-                    expr_magnitude = torch.norm(expr, dim=-1, keepdim=True)  # [B, T_expr, 1]
-                    # Normalize to [0, 1]
-                    expr_magnitude_norm = (expr_magnitude - expr_magnitude.min()) / (expr_magnitude.max() - expr_magnitude.min() + 1e-8)
+            #         # Compute expression magnitude
+            #         expr_magnitude = torch.norm(expr, dim=-1, keepdim=True)  # [B, T_expr, 1]
+            #         # Normalize to [0, 1]
+            #         expr_magnitude_norm = (expr_magnitude - expr_magnitude.min()) / (expr_magnitude.max() - expr_magnitude.min() + 1e-8)
 
-                    # MSE loss: Expression magnitude should correlate with audio energy
-                    lambda_audio_expr_coupling = getattr(self.config.loss, 'lambda_audio_expr_coupling', 5.0)
-                    audio_expr_coupling_loss = F.mse_loss(expr_magnitude_norm, audio_energy_norm) * lambda_audio_expr_coupling
-                    losses['audio_expression_coupling'] = audio_expr_coupling_loss
-                    logger.debug(f"  Audio-Expression coupling loss: {audio_expr_coupling_loss.item():.6f}")
-                logger.debug(f"  Motion diversity loss: {diversity_loss.item():.6f}")
+            #         # MSE loss: Expression magnitude should correlate with audio energy
+            #         lambda_audio_expr_coupling = getattr(self.config.loss, 'lambda_audio_expr_coupling', 5.0)
+            #         audio_expr_coupling_loss = F.mse_loss(expr_magnitude_norm, audio_energy_norm) * lambda_audio_expr_coupling
+            #         losses['audio_expression_coupling'] = audio_expr_coupling_loss
+            #         logger.debug(f"  Audio-Expression coupling loss: {audio_expr_coupling_loss.item():.6f}")
+            #     logger.debug(f"  Motion diversity loss: {diversity_loss.item():.6f}")
 
-                # 1.7 Direct GT Expression Matching Loss - CRITICAL for overfitting
-                if 'expression_embed' in targets:
-                    gt_expr = targets['expression_embed']  # [B, T, D]
-                    pred_expr = outputs['expression_embed']  # [B, T, D]
+            #     # 1.7 Direct GT Expression Matching Loss - CRITICAL for overfitting
+            #     if 'expression_embed' in targets:
+            #         gt_expr = targets['expression_embed']  # [B, T, D]
+            #         pred_expr = outputs['expression_embed']  # [B, T, D]
 
-                    # Normalize both for cosine similarity
-                    pred_expr_norm = F.normalize(pred_expr, p=2, dim=-1)  # [B, T, D]
-                    gt_expr_norm = F.normalize(gt_expr, p=2, dim=-1)  # [B, T, D]
+            #         # Normalize both for cosine similarity
+            #         pred_expr_norm = F.normalize(pred_expr, p=2, dim=-1)  # [B, T, D]
+            #         gt_expr_norm = F.normalize(gt_expr, p=2, dim=-1)  # [B, T, D]
 
-                    # Cosine similarity loss: minimize 1 - cosine_similarity
-                    # Higher cosine similarity = better match (closer to 1)
-                    cosine_sim = (pred_expr_norm * gt_expr_norm).sum(dim=-1).mean()  # Scalar
-                    expression_cosine_loss = 1.0 - cosine_sim
+            #         # Cosine similarity loss: minimize 1 - cosine_similarity
+            #         # Higher cosine similarity = better match (closer to 1)
+            #         cosine_sim = (pred_expr_norm * gt_expr_norm).sum(dim=-1).mean()  # Scalar
+            #         expression_cosine_loss = 1.0 - cosine_sim
 
-                    # Weight and add to losses
-                    lambda_expression_cosine = getattr(self.config.loss, 'lambda_expression_cosine', 0.0)
-                    if lambda_expression_cosine > 0:
-                        losses['expression_cosine'] = expression_cosine_loss * lambda_expression_cosine
-                        logger.debug(f"  Direct GT expression cosine loss: {expression_cosine_loss.item():.6f} (weighted: {(expression_cosine_loss * lambda_expression_cosine).item():.6f})")
-                        logger.debug(f"  Cosine similarity: {cosine_sim.item():.6f}")
+            #         # Weight and add to losses
+            #         lambda_expression_cosine = getattr(self.config.loss, 'lambda_expression_cosine', 0.0)
+            #         if lambda_expression_cosine > 0:
+            #             losses['expression_cosine'] = expression_cosine_loss * lambda_expression_cosine
+            #             logger.debug(f"  Direct GT expression cosine loss: {expression_cosine_loss.item():.6f} (weighted: {(expression_cosine_loss * lambda_expression_cosine).item():.6f})")
+            #             logger.debug(f"  Cosine similarity: {cosine_sim.item():.6f}")
 
-                        # Also compute L2 distance for monitoring
-                        l2_dist = (pred_expr - gt_expr).pow(2).sum(dim=-1).sqrt().mean()
-                        metrics['expression_gt/l2_distance'] = l2_dist.item()
-                        metrics['expression_gt/cosine_similarity'] = cosine_sim.item()
-                        logger.debug(f"  L2 distance to GT: {l2_dist.item():.6f}")
+            #             # Also compute L2 distance for monitoring
+            #             l2_dist = (pred_expr - gt_expr).pow(2).sum(dim=-1).sqrt().mean()
+            #             metrics['expression_gt/l2_distance'] = l2_dist.item()
+            #             metrics['expression_gt/cosine_similarity'] = cosine_sim.item()
+            #             logger.debug(f"  L2 distance to GT: {l2_dist.item():.6f}")
 
-                # Also compute standard deviation as a metric
-                expr_std = expr.std(dim=-1).mean()
-                losses['expression_std'] = expr_std  # Just for monitoring
-                logger.debug(f"  Expression std: {expr_std.item():.6f}")
+            #     # Also compute standard deviation as a metric
+            #     expr_std = expr.std(dim=-1).mean()
+            #     losses['expression_std'] = expr_std  # Just for monitoring
+            #     logger.debug(f"  Expression std: {expr_std.item():.6f}")
 
-            # 2. Warp Regularization Loss
-            # SKIP warp losses when using derived warps - they're generated from frozen networks
-            # so comparing to dataset warps is meaningless. Expression loss is what matters.
-            if not self.use_derived_warps:
-                logger.debug("\nComputing warp regularization losses:")
-                # Check for any warp fields (UV warps is our main one now)
-                if ('uv_warps' in outputs and 'uv_warps' in targets) or \
-                   ('xy_warps' in outputs and 'xy_warps' in targets) or \
-                   ('rigid_warps' in outputs and 'rigid_warps' in targets):
-                    warp_losses = self._compute_warp_regularization_losses(outputs, targets)
-                    losses.update(warp_losses)
-                    logger.debug("Warp regularization losses:")
-                    for k, v in warp_losses.items():
-                        if isinstance(v, torch.Tensor):
-                            logger.debug(f"  {k}: {v.item():.6f}")
-            else:
-                logger.debug("\n⚠️ SKIPPING warp losses (using derived warps from frozen networks)")
 
             # 3. Expression Verification Loss
             logger.debug("\nChecking verification loss conditions:")
@@ -1221,14 +1207,100 @@ class VASALossModule:
                     False,
                     stage_two=True
                 )
-                
+
+                # Apply green chroma key removal and composite onto gray background
+                frame = self._remove_green_background(frame)
+
                 return frame.detach()  # Ensure final output is detached
 
         except Exception as e:
             logger.error(f"Error in batch processing: {str(e)}")
             logger.error(traceback.format_exc())
             raise
-    
+
+    def _remove_green_background(self, frame: torch.Tensor) -> torch.Tensor:
+        """
+        Remove green chroma key background and composite onto gray background.
+        Matches the implementation in frame_disk_cache.py for consistency.
+
+        Args:
+            frame: Generated frame tensor [B, C, H, W] in range [0, 1] or [-1, 1]
+
+        Returns:
+            Frame with green background replaced by gray (128/255)
+        """
+        try:
+            import cv2
+
+            # Ensure frame is in correct format and range
+            device = frame.device
+            B, C, H, W = frame.shape
+
+            # Convert to [B, H, W, C] numpy for OpenCV processing
+            frame_np = frame.detach().cpu().numpy()
+            frame_np = np.transpose(frame_np, (0, 2, 3, 1))  # [B, C, H, W] -> [B, H, W, C]
+
+            # Convert to uint8 [0, 255] range
+            frame_min, frame_max = frame_np.min(), frame_np.max()
+            if frame_min >= 0.0 and frame_max <= 1.0:
+                # [0, 1] range
+                frame_np = (frame_np * 255).astype(np.uint8)
+            elif frame_min >= -1.0 and frame_max <= 1.0:
+                # [-1, 1] range
+                frame_np = ((frame_np + 1.0) * 127.5).astype(np.uint8)
+            else:
+                # Normalize to [0, 255]
+                frame_np = ((frame_np - frame_min) / (frame_max - frame_min + 1e-8) * 255).astype(np.uint8)
+
+            # Process each batch item
+            processed_frames = []
+            for b in range(B):
+                frame_rgb = frame_np[b]  # [H, W, C]
+
+                # Convert RGB to BGR for OpenCV
+                frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+
+                # Convert to HSV for better green detection
+                frame_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+
+                # Define green color range (matching frame_disk_cache.py)
+                lower_green = np.array([35, 40, 40])
+                upper_green = np.array([85, 255, 255])
+
+                # Create mask for green pixels
+                green_mask = cv2.inRange(frame_hsv, lower_green, upper_green)
+
+                # Create alpha channel (255 where NOT green, 0 where green)
+                alpha = 255 - green_mask
+
+                # Convert back to RGB
+                frame_rgb_out = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+
+                # Create solid gray background (128 = middle gray)
+                gray_background = np.full_like(frame_rgb_out, 128, dtype=np.uint8)
+
+                # Composite: blend foreground over gray using alpha
+                alpha_float = alpha.astype(np.float32) / 255.0
+                alpha_3ch = np.stack([alpha_float, alpha_float, alpha_float], axis=-1)
+
+                # Composite: fg * alpha + bg * (1 - alpha)
+                composited = (frame_rgb_out * alpha_3ch + gray_background * (1 - alpha_3ch)).astype(np.uint8)
+
+                processed_frames.append(composited)
+
+            # Stack back to batch
+            processed_np = np.stack(processed_frames, axis=0)  # [B, H, W, C]
+
+            # Convert back to torch tensor [B, C, H, W] in [0, 1] range
+            processed_tensor = torch.from_numpy(processed_np).float() / 255.0
+            processed_tensor = processed_tensor.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
+
+            return processed_tensor.to(device)
+
+        except Exception as e:
+            logger.warning(f"Error in green background removal: {str(e)}, returning original frame")
+            return frame
+
     def _compute_temporal_offset(
         self,
         generated_frames: torch.Tensor,  # [B, T, C, H, W]
@@ -1771,8 +1843,15 @@ class VASALossModule:
                         target['theta']
                     )
 
-            # SRT losses REMOVED - scale/rotation/translation handled by nemo internally
-            # Model only predicts theta + expression_embed, nemo derives warps from these
+            # SRT losses - compare predicted scale, rotation, translation to ground truth
+            if 'scale' in pred and 'scale' in target:
+                losses['scale_loss'] = F.mse_loss(pred['scale'], target['scale'])
+
+            if 'rotation' in pred and 'rotation' in target:
+                losses['rotation_loss'] = F.mse_loss(pred['rotation'], target['rotation'])
+
+            if 'translation' in pred and 'translation' in target:
+                losses['translation_loss'] = F.mse_loss(pred['translation'], target['translation'])
 
             # 5. Expression loss with variance preservation
             if 'expression_embed' in pred:
@@ -1838,6 +1917,11 @@ class VASALossModule:
             # Direct theta loss (no wrapper)
             theta_loss = losses.get('theta_loss', torch.tensor(0.0, device=device)) * self.lambda_pose
 
+            # SRT losses
+            scale_loss = losses.get('scale_loss', torch.tensor(0.0, device=device)) * self.lambda_scale
+            rotation_loss = losses.get('rotation_loss', torch.tensor(0.0, device=device)) * self.lambda_rotation
+            translation_loss = losses.get('translation_loss', torch.tensor(0.0, device=device)) * self.lambda_translation
+
             # Aggregate all expression-related losses
             expression_total = losses.get('expression_loss', torch.tensor(0.0, device=device))
             expression_total += losses.get('expression_mse', torch.tensor(0.0, device=device))
@@ -1853,15 +1937,18 @@ class VASALossModule:
             if seq_len > 1:
                 motion_loss = self._compute_motion_smoothness_loss(pred) * self.lambda_temporal
 
-            # Combined reconstruction loss
-            reconstruction_loss = theta_loss + dynamics_loss + motion_loss
+            # Combined reconstruction loss (theta + SRT + dynamics + motion)
+            reconstruction_loss = theta_loss + scale_loss + rotation_loss + translation_loss + dynamics_loss + motion_loss
 
-            # Return all losses (SRT and pose_loss wrapper removed)
+            # Return all losses including SRT
             return {
                 'reconstruction': reconstruction_loss,
                 'dynamics_loss': dynamics_loss,
                 'motion_loss': motion_loss,
                 'theta_loss': theta_loss,
+                'scale_loss': scale_loss,
+                'rotation_loss': rotation_loss,
+                'translation_loss': translation_loss,
                 'expression_loss': losses.get('expression_loss', torch.tensor(0.0, device=device))
             }
 

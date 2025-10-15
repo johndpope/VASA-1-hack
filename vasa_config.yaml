@@ -171,6 +171,11 @@ loss:
   lambda_expression_cosine: 5.0  # NEW: Direct GT expression matching via cosine similarity (lower than overfit for generalization)
   lambda_pose: 5.0  # Increased from 1.0 to enforce better head pose learning
 
+  # SRT losses - Scale, Rotation, Translation components
+  lambda_scale: 1.0            # Scale prediction loss weight
+  lambda_rotation: 1.0         # Rotation prediction loss weight
+  lambda_translation: 1.0      # Translation prediction loss weight
+
   # Progressive losses (unlock based on thresholds)
   # Stage 2: Blinking (unlocks at epoch 5 if reconstruction < 0.1)
   lambda_blink: 0.1           # Will ramp to 2.0
