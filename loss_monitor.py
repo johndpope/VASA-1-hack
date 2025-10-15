@@ -69,38 +69,36 @@ class LossRangeMonitor:
             'description': 'Direct GT expression cosine similarity loss (1.0 - cosine_sim). Low loss = high similarity = good GT matching'
         },
 
-        # Warp losses
-        'uv_warp_loss': {
-            'healthy': (0.01, 0.5),
-            'warning': 1.0,
-            'critical': 5.0,
-            'description': '3D UV warp field reconstruction'
-        },
-        'uv_warp_magnitude': {
-            'healthy': (0.001, 0.1),
-            'warning': 0.2,
-            'critical': 1.0,
-            'description': 'UV warp magnitude matching (collapse prevention)'
-        },
-        'xy_warp_loss': {
-            'healthy': (0.01, 0.5),
-            'warning': 1.0,
-            'critical': 5.0,
-            'description': '2D XY warp reconstruction'
-        },
-        'rigid_warp_loss': {
-            'healthy': (0.01, 0.5),
-            'warning': 1.0,
-            'critical': 5.0,
-            'description': 'Rigid warp reconstruction'
-        },
-
         # Lip sync losses
-        'lips_loss': {
+        'lips_total': {
             'healthy': (0.01, 0.5),
             'warning': 1.0,
             'critical': 2.0,
-            'description': 'Lip landmark matching'
+            'description': 'Total lip loss (position + velocity)'
+        },
+        'lips_pos_loss': {
+            'healthy': (0.01, 0.3),
+            'warning': 0.5,
+            'critical': 1.0,
+            'description': 'Lip position/landmark loss'
+        },
+        'lips_vel_loss': {
+            'healthy': (0.001, 0.1),
+            'warning': 0.2,
+            'critical': 0.5,
+            'description': 'Lip velocity/motion smoothness loss'
+        },
+        'nonlip_total': {
+            'healthy': (0.01, 0.3),
+            'warning': 0.5,
+            'critical': 1.0,
+            'description': 'Non-lip facial motion total (eyes, nose, jaw)'
+        },
+        'facial_motion_total': {
+            'healthy': (0.01, 0.5),
+            'warning': 1.0,
+            'critical': 2.0,
+            'description': 'Total facial motion loss (lips + nonlip)'
         },
         'audio_lip_correlation': {
             'healthy': (0.001, 0.1),
@@ -108,11 +106,17 @@ class LossRangeMonitor:
             'critical': 0.5,
             'description': 'Audio-lip motion correlation'
         },
-        'audio_expr_coupling': {
+        'audio_expression_coupling': {
             'healthy': (0.001, 0.1),
             'warning': 0.2,
             'critical': 0.5,
             'description': 'Audio-expression magnitude coupling'
+        },
+        'sync_loss': {
+            'healthy': (0.01, 0.5),
+            'warning': 1.0,
+            'critical': 2.0,
+            'description': 'Audio-visual synchronization (SyncNet/Synchformer)'
         },
 
         # Control losses
@@ -140,8 +144,32 @@ class LossRangeMonitor:
             'critical': 0.5,
             'description': 'Blink pattern control (total loss)'
         },
+        'control_speed': {
+            'healthy': (0.001, 0.1),
+            'warning': 0.2,
+            'critical': 0.5,
+            'description': 'Motion speed control'
+        },
+        'control_total': {
+            'healthy': (0.01, 0.5),
+            'warning': 1.0,
+            'critical': 2.0,
+            'description': 'Total control loss (all control signals)'
+        },
+        'speed_loss': {
+            'healthy': (0.001, 0.1),
+            'warning': 0.2,
+            'critical': 0.5,
+            'description': 'Speed prediction loss'
+        },
+        'speed_accuracy': {
+            'healthy': (0.7, 1.0),
+            'warning': 0.5,
+            'critical': 0.3,
+            'description': 'Speed bucket classification accuracy (should be high)'
+        },
 
-        # Blink sub-losses
+        # Blink sub-losses (from _compute_blink_loss)
         'blink_openness_loss': {
             'healthy': (0.001, 0.05),
             'warning': 0.1,
@@ -175,24 +203,66 @@ class LossRangeMonitor:
             'description': 'Direct mouth openness to audio supervision'
         },
 
+        # Disentanglement losses
+        'disentangle_total': {
+            'healthy': (0.01, 0.5),
+            'warning': 1.0,
+            'critical': 2.0,
+            'description': 'Total disentanglement loss (consist + cross_id)'
+        },
+        'l_consist': {
+            'healthy': (0.01, 0.3),
+            'warning': 0.5,
+            'critical': 1.0,
+            'description': 'Consistency loss for disentanglement'
+        },
+        'l_cross_id': {
+            'healthy': (0.01, 0.3),
+            'warning': 0.5,
+            'critical': 1.0,
+            'description': 'Cross-identity similarity loss'
+        },
+
+        # Regularization losses
+        'velocity_smoothness': {
+            'healthy': (0.001, 0.05),
+            'warning': 0.1,
+            'critical': 0.5,
+            'description': 'Motion velocity smoothness'
+        },
+        'perceptual': {
+            'healthy': (0.01, 0.5),
+            'warning': 1.0,
+            'critical': 2.0,
+            'description': 'Perceptual loss (VGG features)'
+        },
+        'verification': {
+            'healthy': (0.01, 0.5),
+            'warning': 1.0,
+            'critical': 2.0,
+            'description': 'Face verification/identity loss'
+        },
+
+        # Deprecated/monitoring only (commented losses in code)
+        'expression_std': {
+            'healthy': (0.01, 0.2),
+            'warning': 0.5,
+            'critical': 1.0,
+            'description': 'Expression standard deviation (monitoring only)'
+        },
+        'motion_diversity': {
+            'healthy': (0.01, 0.3),
+            'warning': 0.5,
+            'critical': 1.0,
+            'description': 'Motion diversity loss (currently disabled)'
+        },
+
         # Aggregated losses
         'reconstruction': {
             'healthy': (0.1, 1.0),
             'warning': 2.0,
             'critical': 5.0,
             'description': 'Total reconstruction loss'
-        },
-        'pose_loss': {
-            'healthy': (0.01, 0.2),
-            'warning': 0.5,
-            'critical': 2.0,
-            'description': 'Combined pose losses'
-        },
-        'dynamics_loss': {
-            'healthy': (0.01, 0.5),
-            'warning': 1.0,
-            'critical': 2.0,
-            'description': 'Combined dynamics losses'
         },
         'total': {
             'healthy': (0.5, 3.0),

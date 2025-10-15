@@ -1282,8 +1282,8 @@ class VASATrainer:
                                         ).squeeze(-1).squeeze(-1)
                                         logger.debug(f"[IDT_EMBED] Computed fallback idt_embed: {idt_embed.shape}")
 
-                            # Get actual frames from the window data for disentanglement loss
-                            target_frames = window.get('frames', None)  # Get frames from dataset
+                            # Get EMO-generated frames with identity swapped for perceptual loss
+                            target_frames = window.get('emo_frames', None)  # Get EMO frames with identity from dataset
 
                             # Generate frames if we have disentanglement losses enabled
                             # OPTIMIZATION: Only generate the 2 frames needed for disentanglement loss
