@@ -1359,25 +1359,25 @@ class VASATrainer:
 
                                         # INJECT GT THETA if enabled in config (matches vi_v2.py technique)
                                         use_gt_theta = getattr(self.config.train, 'use_gt_theta', False)
-                                        if use_gt_theta and 'theta' in targets:
+                                        if use_gt_theta and 'theta' in motion_data:
                                             # VERIFY: Store original predicted theta for comparison
                                             original_predicted_theta = outputs['theta'].clone()
 
-                                            # Replace predicted theta with GT theta from dataset
-                                            outputs['theta'] = targets['theta'].clone()
+                                            # Replace predicted theta with GT theta from dataset (motion_data = targets)
+                                            outputs['theta'] = motion_data['theta'].clone()
 
                                             # Optionally replace SRT components too
-                                            if getattr(self.config.train, 'use_gt_scale', False) and 'scale' in targets:
-                                                outputs['scale'] = targets['scale'].clone()
-                                            if getattr(self.config.train, 'use_gt_rotation', False) and 'rotation' in targets:
-                                                outputs['rotation'] = targets['rotation'].clone()
-                                            if getattr(self.config.train, 'use_gt_translation', False) and 'translation' in targets:
-                                                outputs['translation'] = targets['translation'].clone()
+                                            if getattr(self.config.train, 'use_gt_scale', False) and 'scale' in motion_data:
+                                                outputs['scale'] = motion_data['scale'].clone()
+                                            if getattr(self.config.train, 'use_gt_rotation', False) and 'rotation' in motion_data:
+                                                outputs['rotation'] = motion_data['rotation'].clone()
+                                            if getattr(self.config.train, 'use_gt_translation', False) and 'translation' in motion_data:
+                                                outputs['translation'] = motion_data['translation'].clone()
 
                                             if self.global_step % 100 == 0:
                                                 # VERIFY: Confirm injection by comparing
                                                 diff = (outputs['theta'] - original_predicted_theta).abs().mean().item()
-                                                match = (outputs['theta'] - targets['theta']).abs().mean().item()
+                                                match = (outputs['theta'] - motion_data['theta']).abs().mean().item()
                                                 logger.info(f"[GT THETA] Injected GT theta for frame generation (isolating expression learning)")
                                                 logger.info(f"  ✓ Diff from predicted: {diff:.6f} (should be >0)")
                                                 logger.info(f"  ✓ Match with GT: {match:.10f} (should be ~0)")
