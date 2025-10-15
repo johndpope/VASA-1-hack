@@ -172,6 +172,13 @@ class VASAVolumetricAvatarBridge:
         B, T = motion_outputs['theta'].shape[:2]
         device = motion_outputs['theta'].device
 
+        # VERIFY: Log theta values to confirm we're receiving GT theta (if enabled)
+        if 'theta' in motion_outputs:
+            theta_sample = motion_outputs['theta'][0, 0]  # First batch, first frame
+            theta_mean = theta_sample.mean().item()
+            theta_std = theta_sample.std().item()
+            logger.debug(f"🔍 Received theta for frame generation: mean={theta_mean:.4f}, std={theta_std:.4f}")
+
         # Get source embeddings (cached after first call)
         source_data = self.get_source_embeddings(source_img)
 
@@ -199,7 +206,10 @@ class VASAVolumetricAvatarBridge:
             # Check if uv_warps are near identity (all zeros would mean no warping)
             uv_magnitude = motion_outputs['uv_warps'].abs().mean().item()
 
-            logger.info(f"🔍 Motion parameter variance check:")
+            # Check if theta values look like GT (higher variance = GT, lower = predicted)
+            gt_theta_indicator = "GT" if theta_variance > 0.01 else "PREDICTED"
+
+            logger.info(f"🔍 Motion parameter variance check (theta looks like {gt_theta_indicator}):")
             logger.info(f"  theta variance across time: {theta_variance:.6f}")
             logger.info(f"  expression_embed variance across time: {expr_variance:.6f}")
             logger.info(f"  uv_warps variance across time: {uv_variance:.6f}")

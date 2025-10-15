@@ -443,11 +443,12 @@ class AudioCrossDecoderLayer(nn.Module):
         seq_len = tgt_normed.size(1)
         audio_seq_len = audio_memory.size(1)
 
-        # Create causal mask: [seq_len, audio_seq_len] where position (i, j) is -inf if j > i
-        # This prevents frame i from attending to audio from frame j where j > i
+        # Create causal mask with 2-frame audio lookahead: [seq_len, audio_seq_len]
+        # diagonal=3 means frame i can see audio from frames 0..i+2 (2-frame lookahead)
+        # This masks j >= i+3, allowing audio lookahead while preventing motion leakage
         audio_causal_mask = torch.triu(
             torch.ones(seq_len, audio_seq_len, device=tgt_normed.device) * float('-inf'),
-            diagonal=1
+            diagonal=3
         )
 
         audio_attn, _ = self.cross_attn(

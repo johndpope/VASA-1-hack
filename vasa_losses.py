@@ -246,6 +246,104 @@ class VASALossModule:
             logger.warning(f"Could not initialize identity extractor: {e}")
             self.id_extractor = None
 
+    def _extract_mouth_masks(self, frames: torch.Tensor, device: torch.device) -> torch.Tensor:
+        """
+        Extract mouth region masks from frames using MediaPipe landmarks.
+
+        Args:
+            frames: Video frames [B, C, H, W] in range [-1, 1] or [0, 1]
+            device: Target device for output tensor
+
+        Returns:
+            Mouth masks [B, 1, H, W] with values 0-1 (1 = mouth region)
+        """
+        try:
+            import mediapipe as mp
+            import cv2
+
+            B, C, H, W = frames.shape
+
+            # Convert frames to numpy [0, 255] range for MediaPipe
+            frames_np = frames.detach().cpu().numpy()
+            if frames_np.min() < 0:  # If in [-1, 1]
+                frames_np = ((frames_np + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
+            else:  # If in [0, 1]
+                frames_np = (frames_np * 255).clip(0, 255).astype(np.uint8)
+
+            # Convert from [B, C, H, W] to [B, H, W, C]
+            frames_np = np.transpose(frames_np, (0, 2, 3, 1))
+
+            # Initialize MediaPipe Face Mesh
+            mp_face_mesh = mp.solutions.face_mesh
+            face_mesh = mp_face_mesh.FaceMesh(
+                static_image_mode=True,
+                max_num_faces=1,
+                refine_landmarks=True,
+                min_detection_confidence=0.5
+            )
+
+            # Process each frame
+            mouth_masks = []
+            for b in range(B):
+                # Convert RGB to BGR for MediaPipe
+                frame_bgr = cv2.cvtColor(frames_np[b], cv2.COLOR_RGB2BGR)
+
+                # Detect landmarks
+                results = face_mesh.process(frame_bgr)
+
+                if results.multi_face_landmarks:
+                    # Get mouth landmarks (MediaPipe lip indices: 61-68, 291-308)
+                    landmarks = results.multi_face_landmarks[0].landmark
+
+                    # Inner mouth: indices 78, 191, 80, 81, 82, 13, 312, 311, 310, 415
+                    # Outer mouth: indices 61, 146, 91, 181, 84, 17, 314, 405, 321, 375
+                    mouth_indices = list(range(61, 69)) + list(range(291, 309))  # All mouth landmarks
+
+                    # Extract mouth points
+                    mouth_points = []
+                    for idx in mouth_indices:
+                        lm = landmarks[idx]
+                        x, y = int(lm.x * W), int(lm.y * H)
+                        mouth_points.append([x, y])
+
+                    mouth_points = np.array(mouth_points, dtype=np.int32)
+
+                    # Create mouth mask
+                    mask = np.zeros((H, W), dtype=np.float32)
+                    cv2.fillConvexPoly(mask, mouth_points, 1.0)
+
+                    # Dilate mask slightly to include surrounding area
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+                    mask = cv2.dilate(mask, kernel, iterations=1)
+
+                    mouth_masks.append(mask)
+                else:
+                    # No face detected - use center region as fallback
+                    mask = np.zeros((H, W), dtype=np.float32)
+                    center_y, center_x = H // 2 + H // 6, W // 2  # Slightly below center
+                    mouth_h, mouth_w = H // 6, W // 4
+                    mask[center_y - mouth_h // 2:center_y + mouth_h // 2,
+                         center_x - mouth_w // 2:center_x + mouth_w // 2] = 1.0
+                    mouth_masks.append(mask)
+
+            # Stack and convert to tensor [B, 1, H, W]
+            masks_np = np.stack(mouth_masks, axis=0)[:, np.newaxis, :, :]
+            masks_tensor = torch.from_numpy(masks_np).float().to(device)
+
+            face_mesh.close()
+            return masks_tensor
+
+        except Exception as e:
+            logger.warning(f"Error extracting mouth masks, using center region: {e}")
+            # Fallback: simple center region mask
+            B, C, H, W = frames.shape
+            mask = torch.zeros(B, 1, H, W, device=device)
+            center_y, center_x = H // 2 + H // 6, W // 2
+            mouth_h, mouth_w = H // 6, W // 4
+            mask[:, :, center_y - mouth_h // 2:center_y + mouth_h // 2,
+                 center_x - mouth_w // 2:center_x + mouth_w // 2] = 1.0
+            return mask
+
     def _compute_blink_loss(
         self,
         pred_motion: Dict[str, torch.Tensor],
@@ -928,18 +1026,44 @@ class VASALossModule:
                     
                     # Compute LPIPS loss
                     perceptual_loss = self.loss_fn_alex(gen_flat, tgt_flat).mean()
-                    
+
                     # Apply lambda_perceptual weight
                     lambda_perceptual = self.config.loss.get('lambda_perceptual', 0.5)
                     perceptual_term = perceptual_loss * lambda_perceptual
                     losses['perceptual'] = perceptual_term
-                    
+
                     logger.debug(f"  Perceptual loss (LPIPS): {perceptual_loss.item():.6f}")
                     logger.debug(f"  Weighted perceptual term: {perceptual_term.item():.6f}")
-                    
+
+                    # Compute mouth-focused perceptual loss (TalkVid style)
+                    lambda_mouth_perceptual = self.config.loss.get('lambda_mouth_perceptual', 0.0)
+                    if lambda_mouth_perceptual > 0:
+                        try:
+                            # Extract mouth masks from MediaPipe landmarks
+                            mouth_masks = self._extract_mouth_masks(gen_flat, device)
+
+                            # Compute per-pixel LPIPS loss (no reduction)
+                            lpips_per_pixel = self.loss_fn_alex(gen_flat, tgt_flat)  # [B*T, 1, H, W]
+
+                            # Apply mouth weighting: mouth_region × 100 + non_mouth × 1
+                            # This matches TalkVid: loss *= ((100 - 1) * mouth_mask + 1)
+                            weight_map = (lambda_mouth_perceptual - 1) * mouth_masks + 1.0
+
+                            # Weight and average
+                            weighted_lpips = (lpips_per_pixel * weight_map).mean()
+                            losses['mouth_perceptual'] = weighted_lpips
+
+                            logger.debug(f"  Mouth perceptual loss: {weighted_lpips.item():.6f}")
+                        except Exception as mouth_err:
+                            logger.warning(f"Could not compute mouth perceptual loss: {mouth_err}")
+                            losses['mouth_perceptual'] = torch.tensor(0.0, device=device)
+                    else:
+                        losses['mouth_perceptual'] = torch.tensor(0.0, device=device)
+
                 except Exception as e:
                     logger.warning(f"Could not compute perceptual loss: {e}")
                     losses['perceptual'] = torch.tensor(0.0, device=device)
+                    losses['mouth_perceptual'] = torch.tensor(0.0, device=device)
             else:
                 logger.debug("  No frames provided for perceptual loss")
                 losses['perceptual'] = torch.tensor(0.0, device=device)
@@ -947,7 +1071,10 @@ class VASALossModule:
             # Add audio-expression coupling term
             audio_expr_term = losses.get('audio_expression_coupling', torch.tensor(0.0, device=device))
 
-            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + warp_term + diversity_term + perceptual_term + audio_lip_term + audio_expr_term
+            # Add mouth-focused perceptual term
+            mouth_perceptual_term = losses.get('mouth_perceptual', torch.tensor(0.0, device=device))
+
+            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + warp_term + diversity_term + perceptual_term + mouth_perceptual_term + audio_lip_term + audio_expr_term
             losses['total'] = total_loss
             logger.debug(f"Total loss (with perceptual): {total_loss.item():.6f}")
 
@@ -1696,7 +1823,8 @@ class VASALossModule:
             # 1. Theta (pose matrix) loss
             # Skip if using identity theta (no theta prediction/loss in this mode)
             use_identity_theta = self.config.dataset.get('use_identity_theta', False)
-            if 'theta' in pred and not use_identity_theta:
+            use_gt_theta = getattr(self.config.train, 'use_gt_theta', False)
+            if 'theta' in pred and not use_identity_theta and not use_gt_theta:
                 if is_training:
                     # During training, compare predicted noise to target noise
                     pred_flat = pred['theta'].view(pred['theta'].shape[0], -1, 12)
@@ -1710,13 +1838,18 @@ class VASALossModule:
                     )
 
             # SRT losses - compare predicted scale, rotation, translation to ground truth
-            if 'scale' in pred and 'scale' in target:
+            # Skip SRT losses if using GT values (no point computing loss on GT)
+            use_gt_scale = getattr(self.config.train, 'use_gt_scale', False)
+            use_gt_rotation = getattr(self.config.train, 'use_gt_rotation', False)
+            use_gt_translation = getattr(self.config.train, 'use_gt_translation', False)
+
+            if 'scale' in pred and 'scale' in target and not use_gt_scale:
                 losses['scale_loss'] = F.mse_loss(pred['scale'], target['scale'])
 
-            if 'rotation' in pred and 'rotation' in target:
+            if 'rotation' in pred and 'rotation' in target and not use_gt_rotation:
                 losses['rotation_loss'] = F.mse_loss(pred['rotation'], target['rotation'])
 
-            if 'translation' in pred and 'translation' in target:
+            if 'translation' in pred and 'translation' in target and not use_gt_translation:
                 losses['translation_loss'] = F.mse_loss(pred['translation'], target['translation'])
 
             # 5. Expression loss with variance preservation

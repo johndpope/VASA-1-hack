@@ -63,6 +63,12 @@ train:
   # when to add conditional signals
   control_start_epoch: 0      # Start control immediately for overfitting
 
+  # Ground truth theta injection (for isolating expression learning)
+  use_gt_theta: true           # Use ground truth theta from dataset instead of predicted (disables theta loss)
+  use_gt_scale: true           # Use ground truth scale (only if use_gt_theta=true)
+  use_gt_rotation: true        # Use ground truth rotation (only if use_gt_theta=true)
+  use_gt_translation: true     # Use ground truth translation (only if use_gt_theta=true)
+
   lr: 5e-4 # Base learning rate for overfitting
   motion_proj_lr: 0.1 # DEPRECATED - see get_layer_wise_learning_rates in vasa_trainer.py
   expression_lr: 0.1   # DEPRECATED - use expression_lr_mult instead
@@ -190,7 +196,7 @@ loss:
   lambda_emotion: 0.0        # DISABLED until TDD converges
 
   # Stage 6: Lip Sync (unlocks at epoch 45 if emotion < 0.3)
-  lambda_lips: 2.0            # INCREASED from 0.1 to force better mouth movement
+  lambda_lips: 0              # DISABLED to test mouth_perceptual in isolation
   lambda_sync: 0.5            # REDUCED from 2.0 - Synchformer designed for evaluation, not training gradients
   
   # Other losses
@@ -199,7 +205,8 @@ loss:
   lambda_control: 0.0         # DISABLED until TDD converges - focus on theta+expression first
   lambda_lip: 0.0
   lambda_cfg: 0.5
-  lambda_perceptual: 50      # Increased perceptual loss for better quality
+  lambda_perceptual: 1      # Increased perceptual loss for better quality
+  lambda_mouth_perceptual: 100  # Mouth-focused LPIPS loss (TalkVid style) - 100x weight on mouth region
   lambda_temporal: 0.0        # DISABLED - temporal smoothness prevents expression variation
   use_consistency: true       # Enable VASA consistency loss
   use_identity: true          # Enable face identity preservation

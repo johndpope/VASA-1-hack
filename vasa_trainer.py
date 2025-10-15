@@ -32,125 +32,127 @@ import sys
 if 'nemo' not in sys.path:
     sys.path.insert(0, 'nemo')
 
-def debug_warps(
-    predicted_motion: dict,
-    target_motion: dict = None,
-    num_frames: int = 50,
-    log_to_wandb: bool = False,
-    step: int = None
-):
-    """
-    Debug warps over a sequence of frames by analyzing norms of rigid (theta rotation/translation)
-    and non-rigid (UV displacements) warps. Compares to target if provided to check variation matching.
+# DISABLED: Commenting out debug_warps function for cleaner wandb
+# def debug_warps(
+#     predicted_motion: dict,
+#     target_motion: dict = None,
+#     num_frames: int = 50,
+#     log_to_wandb: bool = False,
+#     step: int = None
+# ):
+#     """
+#     Debug warps over a sequence of frames by analyzing norms of rigid (theta rotation/translation)
+#     and non-rigid (UV displacements) warps. Compares to target if provided to check variation matching.
+#
+#     Args:
+#         predicted_motion: Dict with keys like 'theta' [B, T, 3, 4], 'uv_warps' [B, T, D, S, S, 3]
+#         target_motion: Optional target/ground truth motion dict for comparison
+#         num_frames: Number of frames to analyze (up to T)
+#         log_to_wandb: If True, log metrics to wandb
+#         step: Training step for wandb logging
+#     """
+#     # Extract dimensions
+#     T = min(num_frames, next(iter(predicted_motion.values())).shape[1] if predicted_motion else 0)
+#     if T == 0:
+#         logger.warning("No frames in predicted_motion")
+#         return
+#
+#     metrics = {
+#         'rot_norm': [],
+#         'trans_norm': [],
+#         'uv_disp_norm': []
+#     }
+#     if target_motion:
+#         target_metrics = {k: [] for k in metrics}
+#         diff_metrics = {k: [] for k in metrics}
+#
+#     for t in range(T):
+#         frame_metrics = {}
+#
+#         # Rigid: theta [B, T, 3, 4] -> rotation [3,3], translation [3]
+#         if 'theta' in predicted_motion:
+#             theta = predicted_motion['theta'][0, t]  # [3,4]
+#             R = theta[:3, :3]  # Rotation matrix
+#             trans = theta[:3, 3]   # Translation vector
+#
+#             # Rotation deviation norm: ||R - I||_F
+#             I = torch.eye(3, device=theta.device)
+#             rot_norm = torch.norm(R - I, p='fro').item()
+#             trans_norm = torch.norm(trans, p=2).item()
+#
+#             frame_metrics['rot_norm'] = rot_norm
+#             frame_metrics['trans_norm'] = trans_norm
+#         else:
+#             frame_metrics['rot_norm'] = 0.0
+#             frame_metrics['trans_norm'] = 0.0
+#
+#         # Non-rigid: uv_warps [B, T, D, S, S, 3] displacements
+#         if 'uv_warps' in predicted_motion:
+#             uv = predicted_motion['uv_warps'][0, t]  # [D, S, S, 3]
+#             # Mean L2 norm per voxel
+#             uv_disp_norm = torch.mean(torch.norm(uv.view(-1, 3), p=2, dim=1)).item()
+#             frame_metrics['uv_disp_norm'] = uv_disp_norm
+#         else:
+#             frame_metrics['uv_disp_norm'] = 0.0
+#
+#         # Append to lists
+#         for k, v in frame_metrics.items():
+#             metrics[k].append(v)
+#
+#         # Handle target if provided
+#         if target_motion:
+#             target_frame = {}
+#             if 'theta' in target_motion:
+#                 theta_tgt = target_motion['theta'][0, t]
+#                 R_tgt = theta_tgt[:3, :3]
+#                 trans_tgt = theta_tgt[:3, 3]
+#                 rot_norm_tgt = torch.norm(R_tgt - I, p='fro').item()
+#                 trans_norm_tgt = torch.norm(trans_tgt, p=2).item()
+#                 target_frame['rot_norm'] = rot_norm_tgt
+#                 target_frame['trans_norm'] = trans_norm_tgt
+#
+#                 # Differences
+#                 diff_metrics['rot_norm'].append(abs(rot_norm - rot_norm_tgt))
+#                 diff_metrics['trans_norm'].append(abs(trans_norm - trans_norm_tgt))
+#
+#             if 'uv_warps' in target_motion:
+#                 uv_tgt = target_motion['uv_warps'][0, t]
+#                 uv_disp_norm_tgt = torch.mean(torch.norm(uv_tgt.view(-1, 3), p=2, dim=1)).item()
+#                 target_frame['uv_disp_norm'] = uv_disp_norm_tgt
+#                 diff_metrics['uv_disp_norm'].append(abs(uv_disp_norm - uv_disp_norm_tgt))
+#
+#             for k, v in target_frame.items():
+#                 target_metrics[k].append(v)
+#
+#     # Compute averages
+#     avg_metrics = {k: np.mean(v) if v else 0.0 for k, v in metrics.items()}
+#     if target_motion:
+#         avg_target = {k: np.mean(v) if v else 0.0 for k, v in target_metrics.items()}
+#         avg_diff = {k: np.mean(v) if v else 0.0 for k, v in diff_metrics.items()}
+#
+#     if log_to_wandb and wandb.run is not None:
+#         log_dict = {f"debug/warp_{k}_avg": v for k, v in avg_metrics.items()}
+#         if target_motion:
+#             log_dict.update({f"debug/warp_target_{k}_avg": v for k, v in avg_target.items()})
+#             log_dict.update({f"debug/warp_diff_{k}_avg": v for k, v in avg_diff.items()})
+#
+#         # Also log variance to detect collapse
+#         log_dict[f"debug/warp_uv_variance"] = np.var(metrics['uv_disp_norm']) if metrics['uv_disp_norm'] else 0.0
+#
+#         if step is not None:
+#             wandb.log(log_dict, step=step)
+#         else:
+#             wandb.log(log_dict)
+#     else:
+#         logger.info("\n=== Warp Debug Averages ===")
+#         for k, v in avg_metrics.items():
+#             logger.info(f"  Predicted {k}: {v:.4f}")
+#         if target_motion:
+#             for k, v in avg_target.items():
+#                 logger.info(f"  Target {k}: {v:.4f}")
+#             for k, v in avg_diff.items():
+#                 logger.info(f"  Diff {k}: {v:.4f}")
 
-    Args:
-        predicted_motion: Dict with keys like 'theta' [B, T, 3, 4], 'uv_warps' [B, T, D, S, S, 3]
-        target_motion: Optional target/ground truth motion dict for comparison
-        num_frames: Number of frames to analyze (up to T)
-        log_to_wandb: If True, log metrics to wandb
-        step: Training step for wandb logging
-    """
-    # Extract dimensions
-    T = min(num_frames, next(iter(predicted_motion.values())).shape[1] if predicted_motion else 0)
-    if T == 0:
-        logger.warning("No frames in predicted_motion")
-        return
-
-    metrics = {
-        'rot_norm': [],
-        'trans_norm': [],
-        'uv_disp_norm': []
-    }
-    if target_motion:
-        target_metrics = {k: [] for k in metrics}
-        diff_metrics = {k: [] for k in metrics}
-
-    for t in range(T):
-        frame_metrics = {}
-
-        # Rigid: theta [B, T, 3, 4] -> rotation [3,3], translation [3]
-        if 'theta' in predicted_motion:
-            theta = predicted_motion['theta'][0, t]  # [3,4]
-            R = theta[:3, :3]  # Rotation matrix
-            trans = theta[:3, 3]   # Translation vector
-
-            # Rotation deviation norm: ||R - I||_F
-            I = torch.eye(3, device=theta.device)
-            rot_norm = torch.norm(R - I, p='fro').item()
-            trans_norm = torch.norm(trans, p=2).item()
-
-            frame_metrics['rot_norm'] = rot_norm
-            frame_metrics['trans_norm'] = trans_norm
-        else:
-            frame_metrics['rot_norm'] = 0.0
-            frame_metrics['trans_norm'] = 0.0
-
-        # Non-rigid: uv_warps [B, T, D, S, S, 3] displacements
-        if 'uv_warps' in predicted_motion:
-            uv = predicted_motion['uv_warps'][0, t]  # [D, S, S, 3]
-            # Mean L2 norm per voxel
-            uv_disp_norm = torch.mean(torch.norm(uv.view(-1, 3), p=2, dim=1)).item()
-            frame_metrics['uv_disp_norm'] = uv_disp_norm
-        else:
-            frame_metrics['uv_disp_norm'] = 0.0
-
-        # Append to lists
-        for k, v in frame_metrics.items():
-            metrics[k].append(v)
-
-        # Handle target if provided
-        if target_motion:
-            target_frame = {}
-            if 'theta' in target_motion:
-                theta_tgt = target_motion['theta'][0, t]
-                R_tgt = theta_tgt[:3, :3]
-                trans_tgt = theta_tgt[:3, 3]
-                rot_norm_tgt = torch.norm(R_tgt - I, p='fro').item()
-                trans_norm_tgt = torch.norm(trans_tgt, p=2).item()
-                target_frame['rot_norm'] = rot_norm_tgt
-                target_frame['trans_norm'] = trans_norm_tgt
-
-                # Differences
-                diff_metrics['rot_norm'].append(abs(rot_norm - rot_norm_tgt))
-                diff_metrics['trans_norm'].append(abs(trans_norm - trans_norm_tgt))
-
-            if 'uv_warps' in target_motion:
-                uv_tgt = target_motion['uv_warps'][0, t]
-                uv_disp_norm_tgt = torch.mean(torch.norm(uv_tgt.view(-1, 3), p=2, dim=1)).item()
-                target_frame['uv_disp_norm'] = uv_disp_norm_tgt
-                diff_metrics['uv_disp_norm'].append(abs(uv_disp_norm - uv_disp_norm_tgt))
-
-            for k, v in target_frame.items():
-                target_metrics[k].append(v)
-
-    # Compute averages
-    avg_metrics = {k: np.mean(v) if v else 0.0 for k, v in metrics.items()}
-    if target_motion:
-        avg_target = {k: np.mean(v) if v else 0.0 for k, v in target_metrics.items()}
-        avg_diff = {k: np.mean(v) if v else 0.0 for k, v in diff_metrics.items()}
-
-    if log_to_wandb and wandb.run is not None:
-        log_dict = {f"debug/warp_{k}_avg": v for k, v in avg_metrics.items()}
-        if target_motion:
-            log_dict.update({f"debug/warp_target_{k}_avg": v for k, v in avg_target.items()})
-            log_dict.update({f"debug/warp_diff_{k}_avg": v for k, v in avg_diff.items()})
-
-        # Also log variance to detect collapse
-        log_dict[f"debug/warp_uv_variance"] = np.var(metrics['uv_disp_norm']) if metrics['uv_disp_norm'] else 0.0
-
-        if step is not None:
-            wandb.log(log_dict, step=step)
-        else:
-            wandb.log(log_dict)
-    else:
-        logger.info("\n=== Warp Debug Averages ===")
-        for k, v in avg_metrics.items():
-            logger.info(f"  Predicted {k}: {v:.4f}")
-        if target_motion:
-            for k, v in avg_target.items():
-                logger.info(f"  Target {k}: {v:.4f}")
-            for k, v in avg_diff.items():
-                logger.info(f"  Diff {k}: {v:.4f}")
 from logger import logger,TorchDebugger
 import traceback
 from vasa_dataset import WorkerState, VASAIntegratedDataset
@@ -1285,6 +1287,9 @@ class VASATrainer:
                             # Get EMO-generated frames with identity swapped for perceptual loss
                             target_frames = window.get('emo_frames', None)  # Get EMO frames with identity from dataset
 
+                            # Also get original video frames for thumbnail visualization
+                            original_frames = window.get('frames', None)  # Original video frames for visualization only
+
                             # Generate frames if we have disentanglement losses enabled
                             # OPTIMIZATION: Only generate the 2 frames needed for disentanglement loss
                             # Note: VASA paper doesn't specify needing all frames for these losses,
@@ -1351,7 +1356,32 @@ class VASATrainer:
                                     # Generate frames using volumetric avatar
                                     with torch.no_grad():
                                         T = outputs['theta'].shape[1]
-                                        
+
+                                        # INJECT GT THETA if enabled in config (matches vi_v2.py technique)
+                                        use_gt_theta = getattr(self.config.train, 'use_gt_theta', False)
+                                        if use_gt_theta and 'theta' in targets:
+                                            # VERIFY: Store original predicted theta for comparison
+                                            original_predicted_theta = outputs['theta'].clone()
+
+                                            # Replace predicted theta with GT theta from dataset
+                                            outputs['theta'] = targets['theta'].clone()
+
+                                            # Optionally replace SRT components too
+                                            if getattr(self.config.train, 'use_gt_scale', False) and 'scale' in targets:
+                                                outputs['scale'] = targets['scale'].clone()
+                                            if getattr(self.config.train, 'use_gt_rotation', False) and 'rotation' in targets:
+                                                outputs['rotation'] = targets['rotation'].clone()
+                                            if getattr(self.config.train, 'use_gt_translation', False) and 'translation' in targets:
+                                                outputs['translation'] = targets['translation'].clone()
+
+                                            if self.global_step % 100 == 0:
+                                                # VERIFY: Confirm injection by comparing
+                                                diff = (outputs['theta'] - original_predicted_theta).abs().mean().item()
+                                                match = (outputs['theta'] - targets['theta']).abs().mean().item()
+                                                logger.info(f"[GT THETA] Injected GT theta for frame generation (isolating expression learning)")
+                                                logger.info(f"  ✓ Diff from predicted: {diff:.6f} (should be >0)")
+                                                logger.info(f"  ✓ Match with GT: {match:.10f} (should be ~0)")
+
                                         if use_sparse_frames:
                                             # OPTIMIZATION: Only generate first and last frame (90% memory savings)
                                             # This is sufficient for disentanglement losses which only use these 2 frames
@@ -1500,17 +1530,18 @@ class VASATrainer:
                                 self._gen_stats = []
 
                             # Debug warps periodically to detect collapse
-                            if self.global_step % 100 == 0 and window_idx == 0:  # Log every 100 steps for first window
-                                try:
-                                    debug_warps(
-                                        predicted_motion=outputs,
-                                        target_motion=targets_with_lip,
-                                        num_frames=min(10, outputs['theta'].shape[1]),  # Analyze first 10 frames
-                                        log_to_wandb=True,
-                                        step=self.global_step
-                                    )
-                                except Exception as e:
-                                    logger.warning(f"Failed to debug warps: {e}")
+                            # DISABLED: Commenting out warp debug logging for cleaner wandb
+                            # if self.global_step % 100 == 0 and window_idx == 0:  # Log every 100 steps for first window
+                            #     try:
+                            #         debug_warps(
+                            #             predicted_motion=outputs,
+                            #             target_motion=targets_with_lip,
+                            #             num_frames=min(10, outputs['theta'].shape[1]),  # Analyze first 10 frames
+                            #             log_to_wandb=True,
+                            #             step=self.global_step
+                            #         )
+                            #     except Exception as e:
+                            #         logger.warning(f"Failed to debug warps: {e}")
 
                             # Check for NaN/Inf in loss before backward pass
                             if not torch.isfinite(losses['total']):
@@ -1676,14 +1707,14 @@ class VASATrainer:
                                     single_frame_generated = None
                                     single_frame_target = None
                                     frame_idx = 0  # Default frame index
-                                    
-                                    if target_frames is not None:
+
+                                    if original_frames is not None:
                                         # Pick a random frame index
-                                        T = target_frames.shape[1] if target_frames.dim() > 4 else 1
+                                        T = original_frames.shape[1] if original_frames.dim() > 4 else 1
                                         frame_idx = random.randint(T//3, T-1) if T > 3 else 0
-                                        
-                                        # Extract single target frame
-                                        single_frame_target = target_frames[:, frame_idx:frame_idx+1] if T > 1 else target_frames[:, 0:1]
+
+                                        # Extract single original frame for "Target" panel
+                                        single_frame_target = original_frames[:, frame_idx:frame_idx+1] if T > 1 else original_frames[:, 0:1]
                                         
                                         # Generate just this one frame
                                         with torch.no_grad():
@@ -1832,185 +1863,185 @@ class VASATrainer:
                                         }, step=self.global_step)
                                         logger.info(f"📸 Generated and logged training thumbnail for epoch {self.current_epoch}")
 
-                                        # Log warping field visualizations with target/predicted comparison
-                                        try:
-                                            if 'xy_warps' in motion_data and 'rigid_warps' in motion_data:
-                                                import matplotlib.pyplot as plt
-                                                import numpy as np
-
+                                        # Log warping field visualizations with target/predicted comparison DISABLED for cleaner wandb
+                                        # try:
+                                            # if 'xy_warps' in motion_data and 'rigid_warps' in motion_data:
+                                                # import matplotlib.pyplot as plt
+                                                # import numpy as np
+# 
                                                 # Get first batch, middle frame, middle depth slice
-                                                b_idx = 0
-                                                t_idx = motion_data['xy_warps'].shape[1] // 2  # Middle frame
-                                                d_idx = 8  # Middle depth slice (16/2)
-
+                                                # b_idx = 0
+                                                # t_idx = motion_data['xy_warps'].shape[1] // 2  # Middle frame
+                                                # d_idx = 8  # Middle depth slice (16/2)
+# 
                                                 # Check if we have predictions to compare (stored_outputs contains model predictions)
-                                                has_predictions = stored_outputs and 'xy_warps' in stored_outputs
-
-                                                if has_predictions:
+                                                # has_predictions = stored_outputs and 'xy_warps' in stored_outputs
+# 
+                                                # if has_predictions:
                                                     # Create larger figure for target vs predicted comparison
-                                                    fig, axes = plt.subplots(4, 3, figsize=(15, 20))
-                                                else:
+                                                    # fig, axes = plt.subplots(4, 3, figsize=(15, 20))
+                                                # else:
                                                     # Original layout for target only
-                                                    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-
-                                                if has_predictions:
+                                                    # fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+# 
+                                                # if has_predictions:
                                                     # === TARGET WARPS (Row 0) ===
                                                     # XY Warps (source non-rigid) - TARGET
-                                                    xy_warp_target = motion_data['xy_warps'][b_idx, t_idx, d_idx].cpu().numpy()
-                                                    xy_magnitude_target = np.linalg.norm(xy_warp_target, axis=-1)
-                                                    im1 = axes[0, 0].imshow(xy_magnitude_target, cmap='viridis')
-                                                    axes[0, 0].set_title(f'TARGET XY Warp (frame {t_idx}, depth {d_idx})')
-                                                    axes[0, 0].axis('off')
-                                                    plt.colorbar(im1, ax=axes[0, 0])
-
+                                                    # xy_warp_target = motion_data['xy_warps'][b_idx, t_idx, d_idx].cpu().numpy()
+                                                    # xy_magnitude_target = np.linalg.norm(xy_warp_target, axis=-1)
+                                                    # im1 = axes[0, 0].imshow(xy_magnitude_target, cmap='viridis')
+                                                    # axes[0, 0].set_title(f'TARGET XY Warp (frame {t_idx}, depth {d_idx})')
+                                                    # axes[0, 0].axis('off')
+                                                    # plt.colorbar(im1, ax=axes[0, 0])
+# 
                                                     # Rigid Warps - TARGET
-                                                    rigid_warp_target = motion_data['rigid_warps'][b_idx, t_idx, d_idx].cpu().numpy()
-                                                    rigid_magnitude_target = np.linalg.norm(rigid_warp_target, axis=-1)
-                                                    im2 = axes[0, 1].imshow(rigid_magnitude_target, cmap='plasma')
-                                                    axes[0, 1].set_title(f'TARGET Rigid Warp')
-                                                    axes[0, 1].axis('off')
-                                                    plt.colorbar(im2, ax=axes[0, 1])
-
+                                                    # rigid_warp_target = motion_data['rigid_warps'][b_idx, t_idx, d_idx].cpu().numpy()
+                                                    # rigid_magnitude_target = np.linalg.norm(rigid_warp_target, axis=-1)
+                                                    # im2 = axes[0, 1].imshow(rigid_magnitude_target, cmap='plasma')
+                                                    # axes[0, 1].set_title(f'TARGET Rigid Warp')
+                                                    # axes[0, 1].axis('off')
+                                                    # plt.colorbar(im2, ax=axes[0, 1])
+# 
                                                     # UV Warps - TARGET
-                                                    uv_warp_target = motion_data['uv_warps'][b_idx, t_idx, d_idx].cpu().numpy()
-                                                    uv_magnitude_target = np.linalg.norm(uv_warp_target, axis=-1)
-                                                    im3 = axes[0, 2].imshow(uv_magnitude_target, cmap='coolwarm')
-                                                    axes[0, 2].set_title(f'TARGET UV Warp')
-                                                    axes[0, 2].axis('off')
-                                                    plt.colorbar(im3, ax=axes[0, 2])
-
+                                                    # uv_warp_target = motion_data['uv_warps'][b_idx, t_idx, d_idx].cpu().numpy()
+                                                    # uv_magnitude_target = np.linalg.norm(uv_warp_target, axis=-1)
+                                                    # im3 = axes[0, 2].imshow(uv_magnitude_target, cmap='coolwarm')
+                                                    # axes[0, 2].set_title(f'TARGET UV Warp')
+                                                    # axes[0, 2].axis('off')
+                                                    # plt.colorbar(im3, ax=axes[0, 2])
+# 
                                                     # === PREDICTED WARPS (Row 1) ===
                                                     # XY Warps - PREDICTED
-                                                    xy_warp_pred = stored_outputs['xy_warps'][b_idx, t_idx, d_idx].numpy()
-                                                    xy_magnitude_pred = np.linalg.norm(xy_warp_pred, axis=-1)
-                                                    im4 = axes[1, 0].imshow(xy_magnitude_pred, cmap='viridis')
-                                                    axes[1, 0].set_title(f'PREDICTED XY Warp')
-                                                    axes[1, 0].axis('off')
-                                                    plt.colorbar(im4, ax=axes[1, 0])
-
+                                                    # xy_warp_pred = stored_outputs['xy_warps'][b_idx, t_idx, d_idx].numpy()
+                                                    # xy_magnitude_pred = np.linalg.norm(xy_warp_pred, axis=-1)
+                                                    # im4 = axes[1, 0].imshow(xy_magnitude_pred, cmap='viridis')
+                                                    # axes[1, 0].set_title(f'PREDICTED XY Warp')
+                                                    # axes[1, 0].axis('off')
+                                                    # plt.colorbar(im4, ax=axes[1, 0])
+# 
                                                     # Rigid Warps - PREDICTED
-                                                    rigid_warp_pred = stored_outputs['rigid_warps'][b_idx, t_idx, d_idx].numpy()
-                                                    rigid_magnitude_pred = np.linalg.norm(rigid_warp_pred, axis=-1)
-                                                    im5 = axes[1, 1].imshow(rigid_magnitude_pred, cmap='plasma')
-                                                    axes[1, 1].set_title(f'PREDICTED Rigid Warp')
-                                                    axes[1, 1].axis('off')
-                                                    plt.colorbar(im5, ax=axes[1, 1])
-
+                                                    # rigid_warp_pred = stored_outputs['rigid_warps'][b_idx, t_idx, d_idx].numpy()
+                                                    # rigid_magnitude_pred = np.linalg.norm(rigid_warp_pred, axis=-1)
+                                                    # im5 = axes[1, 1].imshow(rigid_magnitude_pred, cmap='plasma')
+                                                    # axes[1, 1].set_title(f'PREDICTED Rigid Warp')
+                                                    # axes[1, 1].axis('off')
+                                                    # plt.colorbar(im5, ax=axes[1, 1])
+# 
                                                     # UV Warps - PREDICTED
-                                                    uv_warp_pred = stored_outputs['uv_warps'][b_idx, t_idx, d_idx].numpy()
-                                                    uv_magnitude_pred = np.linalg.norm(uv_warp_pred, axis=-1)
-                                                    im6 = axes[1, 2].imshow(uv_magnitude_pred, cmap='coolwarm')
-                                                    axes[1, 2].set_title(f'PREDICTED UV Warp')
-                                                    axes[1, 2].axis('off')
-                                                    plt.colorbar(im6, ax=axes[1, 2])
-
+                                                    # uv_warp_pred = stored_outputs['uv_warps'][b_idx, t_idx, d_idx].numpy()
+                                                    # uv_magnitude_pred = np.linalg.norm(uv_warp_pred, axis=-1)
+                                                    # im6 = axes[1, 2].imshow(uv_magnitude_pred, cmap='coolwarm')
+                                                    # axes[1, 2].set_title(f'PREDICTED UV Warp')
+                                                    # axes[1, 2].axis('off')
+                                                    # plt.colorbar(im6, ax=axes[1, 2])
+# 
                                                     # === DIFFERENCE MAPS (Row 2) ===
                                                     # XY Warp Difference
-                                                    xy_diff = np.abs(xy_magnitude_target - xy_magnitude_pred)
-                                                    im7 = axes[2, 0].imshow(xy_diff, cmap='hot')
-                                                    axes[2, 0].set_title(f'XY Warp Error (MAE: {xy_diff.mean():.4f})')
-                                                    axes[2, 0].axis('off')
-                                                    plt.colorbar(im7, ax=axes[2, 0])
-
+                                                    # xy_diff = np.abs(xy_magnitude_target - xy_magnitude_pred)
+                                                    # im7 = axes[2, 0].imshow(xy_diff, cmap='hot')
+                                                    # axes[2, 0].set_title(f'XY Warp Error (MAE: {xy_diff.mean():.4f})')
+                                                    # axes[2, 0].axis('off')
+                                                    # plt.colorbar(im7, ax=axes[2, 0])
+# 
                                                     # Rigid Warp Difference
-                                                    rigid_diff = np.abs(rigid_magnitude_target - rigid_magnitude_pred)
-                                                    im8 = axes[2, 1].imshow(rigid_diff, cmap='hot')
-                                                    axes[2, 1].set_title(f'Rigid Warp Error (MAE: {rigid_diff.mean():.4f})')
-                                                    axes[2, 1].axis('off')
-                                                    plt.colorbar(im8, ax=axes[2, 1])
-
+                                                    # rigid_diff = np.abs(rigid_magnitude_target - rigid_magnitude_pred)
+                                                    # im8 = axes[2, 1].imshow(rigid_diff, cmap='hot')
+                                                    # axes[2, 1].set_title(f'Rigid Warp Error (MAE: {rigid_diff.mean():.4f})')
+                                                    # axes[2, 1].axis('off')
+                                                    # plt.colorbar(im8, ax=axes[2, 1])
+# 
                                                     # UV Warp Difference
-                                                    uv_diff = np.abs(uv_magnitude_target - uv_magnitude_pred)
-                                                    im9 = axes[2, 2].imshow(uv_diff, cmap='hot')
-                                                    axes[2, 2].set_title(f'UV Warp Error (MAE: {uv_diff.mean():.4f})')
-                                                    axes[2, 2].axis('off')
-                                                    plt.colorbar(im9, ax=axes[2, 2])
-
+                                                    # uv_diff = np.abs(uv_magnitude_target - uv_magnitude_pred)
+                                                    # im9 = axes[2, 2].imshow(uv_diff, cmap='hot')
+                                                    # axes[2, 2].set_title(f'UV Warp Error (MAE: {uv_diff.mean():.4f})')
+                                                    # axes[2, 2].axis('off')
+                                                    # plt.colorbar(im9, ax=axes[2, 2])
+# 
                                                     # === FLOW VISUALIZATIONS (Row 3) ===
-                                                    flow_row = 3
-                                                else:
+                                                    # flow_row = 3
+                                                # else:
                                                     # Original single visualization for targets only
-                                                    xy_warp_target = motion_data['xy_warps'][b_idx, t_idx, d_idx].cpu().numpy()
-                                                    xy_magnitude_target = np.linalg.norm(xy_warp_target, axis=-1)
-                                                    im1 = axes[0, 0].imshow(xy_magnitude_target, cmap='viridis')
-                                                    axes[0, 0].set_title(f'XY Warp Magnitude (frame {t_idx}, depth {d_idx})')
-                                                    axes[0, 0].axis('off')
-                                                    plt.colorbar(im1, ax=axes[0, 0])
-
-                                                    rigid_warp_target = motion_data['rigid_warps'][b_idx, t_idx, d_idx].cpu().numpy()
-                                                    rigid_magnitude_target = np.linalg.norm(rigid_warp_target, axis=-1)
-                                                    im2 = axes[0, 1].imshow(rigid_magnitude_target, cmap='plasma')
-                                                    axes[0, 1].set_title(f'Rigid Warp Magnitude')
-                                                    axes[0, 1].axis('off')
-                                                    plt.colorbar(im2, ax=axes[0, 1])
-
-                                                    uv_warp_target = motion_data['uv_warps'][b_idx, t_idx, d_idx].cpu().numpy()
-                                                    uv_magnitude_target = np.linalg.norm(uv_warp_target, axis=-1)
-                                                    im3 = axes[0, 2].imshow(uv_magnitude_target, cmap='coolwarm')
-                                                    axes[0, 2].set_title(f'UV Warp Magnitude')
-                                                    axes[0, 2].axis('off')
-                                                    plt.colorbar(im3, ax=axes[0, 2])
-
-                                                    flow_row = 1
-
+                                                    # xy_warp_target = motion_data['xy_warps'][b_idx, t_idx, d_idx].cpu().numpy()
+                                                    # xy_magnitude_target = np.linalg.norm(xy_warp_target, axis=-1)
+                                                    # im1 = axes[0, 0].imshow(xy_magnitude_target, cmap='viridis')
+                                                    # axes[0, 0].set_title(f'XY Warp Magnitude (frame {t_idx}, depth {d_idx})')
+                                                    # axes[0, 0].axis('off')
+                                                    # plt.colorbar(im1, ax=axes[0, 0])
+# 
+                                                    # rigid_warp_target = motion_data['rigid_warps'][b_idx, t_idx, d_idx].cpu().numpy()
+                                                    # rigid_magnitude_target = np.linalg.norm(rigid_warp_target, axis=-1)
+                                                    # im2 = axes[0, 1].imshow(rigid_magnitude_target, cmap='plasma')
+                                                    # axes[0, 1].set_title(f'Rigid Warp Magnitude')
+                                                    # axes[0, 1].axis('off')
+                                                    # plt.colorbar(im2, ax=axes[0, 1])
+# 
+                                                    # uv_warp_target = motion_data['uv_warps'][b_idx, t_idx, d_idx].cpu().numpy()
+                                                    # uv_magnitude_target = np.linalg.norm(uv_warp_target, axis=-1)
+                                                    # im3 = axes[0, 2].imshow(uv_magnitude_target, cmap='coolwarm')
+                                                    # axes[0, 2].set_title(f'UV Warp Magnitude')
+                                                    # axes[0, 2].axis('off')
+                                                    # plt.colorbar(im3, ax=axes[0, 2])
+# 
+                                                    # flow_row = 1
+# 
                                                 # Warp flow visualization (X and Y components)
-                                                axes[flow_row, 0].quiver(
-                                                    np.arange(0, 64, 4), np.arange(0, 64, 4),
-                                                    xy_warp_target[::4, ::4, 0], xy_warp_target[::4, ::4, 1],
-                                                    angles='xy', scale_units='xy', scale=0.5, color='blue'
-                                                )
-                                                axes[flow_row, 0].set_title('XY Warp Flow (Target)')
-                                                axes[flow_row, 0].set_xlim(0, 64)
-                                                axes[flow_row, 0].set_ylim(64, 0)
-                                                axes[flow_row, 0].set_aspect('equal')
-
+                                                # axes[flow_row, 0].quiver(
+                                                    # np.arange(0, 64, 4), np.arange(0, 64, 4),
+                                                    # xy_warp_target[::4, ::4, 0], xy_warp_target[::4, ::4, 1],
+                                                    # angles='xy', scale_units='xy', scale=0.5, color='blue'
+                                                # )
+                                                # axes[flow_row, 0].set_title('XY Warp Flow (Target)')
+                                                # axes[flow_row, 0].set_xlim(0, 64)
+                                                # axes[flow_row, 0].set_ylim(64, 0)
+                                                # axes[flow_row, 0].set_aspect('equal')
+# 
                                                 # Source theta warp visualization
-                                                source_theta = motion_data['source_theta_warp'][b_idx, t_idx].cpu().numpy()  # [3, 4]
-                                                axes[flow_row, 1].imshow(source_theta, cmap='RdBu', aspect='auto')
-                                                axes[flow_row, 1].set_title(f'Source Theta Warp (frame {t_idx})')
-                                                axes[flow_row, 1].set_xlabel('Coefficients')
-                                                axes[flow_row, 1].set_ylabel('Dimensions')
-                                                for i in range(3):
-                                                    for j in range(4):
-                                                        axes[flow_row, 1].text(j, i, f'{source_theta[i, j]:.2f}',
-                                                                       ha='center', va='center', color='black')
-
+                                                # source_theta = motion_data['source_theta_warp'][b_idx, t_idx].cpu().numpy()  # [3, 4]
+                                                # axes[flow_row, 1].imshow(source_theta, cmap='RdBu', aspect='auto')
+                                                # axes[flow_row, 1].set_title(f'Source Theta Warp (frame {t_idx})')
+                                                # axes[flow_row, 1].set_xlabel('Coefficients')
+                                                # axes[flow_row, 1].set_ylabel('Dimensions')
+                                                # for i in range(3):
+                                                    # for j in range(4):
+                                                        # axes[flow_row, 1].text(j, i, f'{source_theta[i, j]:.2f}',
+                                                                       # ha='center', va='center', color='black')
+# 
                                                 # Temporal warp variation (std across time) or predicted flow if available
-                                                if has_predictions:
+                                                # if has_predictions:
                                                     # Show predicted flow visualization
-                                                    axes[flow_row, 2].quiver(
-                                                        np.arange(0, 64, 4), np.arange(0, 64, 4),
-                                                        xy_warp_pred[::4, ::4, 0], xy_warp_pred[::4, ::4, 1],
-                                                        angles='xy', scale_units='xy', scale=0.5, color='red'
-                                                    )
-                                                    axes[flow_row, 2].set_title('XY Warp Flow (Predicted)')
-                                                    axes[flow_row, 2].set_xlim(0, 64)
-                                                    axes[flow_row, 2].set_ylim(64, 0)
-                                                    axes[flow_row, 2].set_aspect('equal')
-                                                else:
+                                                    # axes[flow_row, 2].quiver(
+                                                        # np.arange(0, 64, 4), np.arange(0, 64, 4),
+                                                        # xy_warp_pred[::4, ::4, 0], xy_warp_pred[::4, ::4, 1],
+                                                        # angles='xy', scale_units='xy', scale=0.5, color='red'
+                                                    # )
+                                                    # axes[flow_row, 2].set_title('XY Warp Flow (Predicted)')
+                                                    # axes[flow_row, 2].set_xlim(0, 64)
+                                                    # axes[flow_row, 2].set_ylim(64, 0)
+                                                    # axes[flow_row, 2].set_aspect('equal')
+                                                # else:
                                                     # Original temporal variation visualization
-                                                    xy_temporal_std = torch.std(motion_data['xy_warps'][b_idx], dim=0).mean(dim=0).mean(dim=-1).cpu().numpy()
-                                                    axes[flow_row, 2].imshow(xy_temporal_std, cmap='hot')
-                                                    axes[flow_row, 2].set_title('XY Warp Temporal Variation (std)')
-                                                    axes[flow_row, 2].axis('off')
-
+                                                    # xy_temporal_std = torch.std(motion_data['xy_warps'][b_idx], dim=0).mean(dim=0).mean(dim=-1).cpu().numpy()
+                                                    # axes[flow_row, 2].imshow(xy_temporal_std, cmap='hot')
+                                                    # axes[flow_row, 2].set_title('XY Warp Temporal Variation (std)')
+                                                    # axes[flow_row, 2].axis('off')
+# 
                                                 # Add overall title
-                                                if has_predictions:
-                                                    fig.suptitle('Warping Fields: Target vs Predicted Comparison', fontsize=16, y=1.02)
-                                                else:
-                                                    fig.suptitle('Warping Fields: Target Only', fontsize=16, y=1.02)
-
-                                                plt.tight_layout()
-                                                wandb.log({"visuals/warping_fields": wandb.Image(fig)}, step=self.global_step)
-                                                plt.close(fig)
-
-                                                if has_predictions:
-                                                    logger.info("📊 Logged warping field comparison (target vs predicted)")
-                                                else:
-                                                    logger.info("📊 Logged warping field visualizations (target only)")
-
-                                        except Exception as e:
-                                            logger.warning(f"Could not visualize warping fields: {e}")
+                                                # if has_predictions:
+                                                    # fig.suptitle('Warping Fields: Target vs Predicted Comparison', fontsize=16, y=1.02)
+                                                # else:
+                                                    # fig.suptitle('Warping Fields: Target Only', fontsize=16, y=1.02)
+# 
+                                                # plt.tight_layout()
+                                                # wandb.log({"visuals/warping_fields": wandb.Image(fig)}, step=self.global_step)
+                                                # plt.close(fig)
+# 
+                                                # if has_predictions:
+                                                    # logger.info("📊 Logged warping field comparison (target vs predicted)")
+                                                # else:
+                                                    # logger.info("📊 Logged warping field visualizations (target only)")
+# 
+                                        # except Exception as e:
+                                            # logger.warning(f"Could not visualize warping fields: {e}")
                                     else:
                                         logger.warning("Thumbnail generation returned None")
 
@@ -3288,7 +3319,8 @@ class VASATrainer:
                 # Add new candle-like expression visualization
                 from visualize_expression import create_expression_candles, create_expression_difference_map
                 from visualize_audio_expression import create_audio_expression_visualization
-                from warp_visualization import visualize_uv_warps, log_warp_statistics
+                # DISABLED: Warp visualization commented out for cleaner wandb
+                # from warp_visualization import visualize_uv_warps, log_warp_statistics
 
                 # Create candle visualization for entire window
                 if outputs['expression_embed'].shape[1] > 1:  # If we have temporal dimension
@@ -3302,17 +3334,18 @@ class VASATrainer:
                     plt.close(fig_candles)
 
                     # Add UV warp candles visualization
-                    if 'uv_warps' in outputs and 'uv_warps' in targets:
-                        try:
-                            fig_warp_candles = visualize_uv_warps(
-                                uv_warps=outputs['uv_warps'][0:1],  # First batch
-                                target_uv_warps=targets['uv_warps'][0:1],
-                                step=step,
-                                wandb_logger=wandb
-                            )
-                            plt.close(fig_warp_candles)
-                        except Exception as e:
-                            logger.warning(f"Failed to create warp visualization: {e}")
+                    # DISABLED: Commenting out warp visualization for cleaner wandb
+                    # if 'uv_warps' in outputs and 'uv_warps' in targets:
+                    #     try:
+                    #         fig_warp_candles = visualize_uv_warps(
+                    #             uv_warps=outputs['uv_warps'][0:1],  # First batch
+                    #             target_uv_warps=targets['uv_warps'][0:1],
+                    #             step=step,
+                    #             wandb_logger=wandb
+                    #         )
+                    #         plt.close(fig_warp_candles)
+                    #     except Exception as e:
+                    #         logger.warning(f"Failed to create warp visualization: {e}")
                     
                     # Create difference map
                     fig_diff = create_expression_difference_map(

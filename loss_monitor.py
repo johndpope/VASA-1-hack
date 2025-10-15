@@ -236,6 +236,12 @@ class LossRangeMonitor:
             'critical': 2.0,
             'description': 'Perceptual loss (VGG features)'
         },
+        'mouth_perceptual': {
+            'healthy': (0.1, 5.0),
+            'warning': 10.0,
+            'critical': 20.0,
+            'description': 'Mouth-focused perceptual loss (LPIPS weighted 100x on mouth region, TalkVid style)'
+        },
         'verification': {
             'healthy': (0.01, 0.5),
             'warning': 1.0,
