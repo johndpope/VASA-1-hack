@@ -10,7 +10,7 @@ model:
   dim_feedforward: 2048
   dropout: 0.05
   expression_dim: 128  # Expression embedding dimension from volumetric avatar
-  use_derived_warps: true     # Use identity-conditioned warp generation via volumetric_avatar pipeline
+  use_derived_warps: true    # Use identity-conditioned warp generation via volumetric_avatar pipeline
   # Add these:
   condition_embedding_dim: 512  # Dimension for condition embeddings
   use_prev_motion: true        # Whether to use previous motion context
@@ -31,7 +31,7 @@ diffusion:
   noise_injection_epochs: 30      # Inject noise for first N epochs
   noise_injection_scale: 0.05     # Scale of additional noise (0.05 = 5% of signal)
 
-# Motion generation parameters - SMALLER WINDOWS
+# Motion generation parameters - SMALLER WINDOWS FOR TDD
 motion:
   num_speed_buckets: 9
   window_size: 50              # Reduced from 50 to 20 for faster training
@@ -64,10 +64,10 @@ train:
   control_start_epoch: 0      # Start control immediately for overfitting
 
   # Ground truth theta injection (for isolating expression learning)
-  use_gt_theta: false          # Use ground truth theta from dataset instead of predicted (disables theta loss)
-  use_gt_scale: false          # Use ground truth scale (only if use_gt_theta=true)
-  use_gt_rotation: false       # Use ground truth rotation (only if use_gt_theta=true)
-  use_gt_translation: false    # Use ground truth translation (only if use_gt_theta=true)
+  use_gt_theta: true           # Use ground truth theta from dataset instead of predicted (disables theta loss)
+  use_gt_scale: true           # Use ground truth scale (only if use_gt_theta=true)
+  use_gt_rotation: true        # Use ground truth rotation (only if use_gt_theta=true)
+  use_gt_translation: true     # Use ground truth translation (only if use_gt_theta=true)
 
   lr: 5e-4 # Base learning rate for overfitting
   motion_proj_lr: 0.1 # DEPRECATED - see get_layer_wise_learning_rates in vasa_trainer.py
@@ -86,15 +86,15 @@ train:
   # To increase GPU utilization:
   # - Increase batch_size (e.g., from 28 to 56)
   # - This processes more windows per step but maintains temporal continuity
-  batch_size: 4               # Batch size for training
+  batch_size: 16               # Batch size for training
 
-  windows_per_batch: 4          # INCREASED from 4 to 8 to use more VRAM (was 4)
-  gradient_accumulation_steps: 4  # REDUCED from 4 to maintain effective batch size
-  num_epochs: 10000            # Reduced for quick testing
+  windows_per_batch: 2          # Reduced from 14 to 4 for better sequence diversity
+  gradient_accumulation_steps: 4  # Increase effective batch size to break plateau
+  num_epochs: 4000            # Reduced for quick testing
 
   beta1: 0.9
   beta2: 0.999
-  weight_decay: 1e-4  # INCREASED from 1e-5 for stronger regularization to prevent overfitting
+  weight_decay: 1e-5  # Reduced from 0.01 to allow more variance
   max_grad_norm: 0.1  # Very aggressive gradient clipping to prevent explosions (was 0.5)
   save_freq: 5                # Save very frequently to enable recovery from OOM
   
@@ -140,8 +140,8 @@ loss:
   use_adaptive_weighting: true
   adaptive_update_freq: 100   # Update weights every N steps  # Minimum weight for least important dimensions
     
-  use_sync_loss: false  # SyncNet is for evaluation only (per VASA-1 paper)
-  use_synchformer: false  # Use Synchformer instead of SyncNet for sync loss
+  use_sync_loss: true  # SyncNet is for evaluation only (per VASA-1 paper)
+  use_synchformer: true  # Use Synchformer instead of SyncNet for sync loss
   use_verification: false     # Disabled for faster training
   lambda_verification: 0
 
@@ -174,7 +174,7 @@ loss:
   # Foundation losses (always active)
   lambda_reconstruction: 2.0   # Increased for better reconstruction
   lambda_dynamics: 10.0        # INCREASED to 10.0 to force expression matching
-  lambda_expression_cosine: 5.0  # NEW: Direct GT expression matching via cosine similarity (lower than overfit for generalization)
+  lambda_expression_cosine: 10.0  # NEW: Direct GT expression matching via cosine similarity
   lambda_pose: 5.0  # Increased from 1.0 to enforce better head pose learning
 
   # SRT losses - Scale, Rotation, Translation components
@@ -196,8 +196,8 @@ loss:
   lambda_emotion: 0.0        # DISABLED until TDD converges
 
   # Stage 6: Lip Sync (unlocks at epoch 45 if emotion < 0.3)
-  lambda_lips: 2.0            # INCREASED from 0.1 to force better mouth movement
-  lambda_sync: 0.0            # SyncNet for evaluation only, audio conditioning handles training
+  lambda_lips: 0              # DISABLED to test mouth_perceptual in isolation
+  lambda_sync: 0.5            # REDUCED from 2.0 - Synchformer designed for evaluation, not training gradients
   
   # Other losses
   lambda_nonlip: 0.0          # DISABLED until TDD converges (was 0.1)
@@ -205,7 +205,7 @@ loss:
   lambda_control: 0.0         # DISABLED until TDD converges - focus on theta+expression first
   lambda_lip: 0.0
   lambda_cfg: 0.5
-  lambda_perceptual: 0.5      # Increased perceptual loss for better quality
+  lambda_perceptual: 1      # Increased perceptual loss for better quality
   lambda_mouth_perceptual: 100  # Mouth-focused LPIPS loss (TalkVid style) - 100x weight on mouth region
   lambda_temporal: 0.0        # DISABLED - temporal smoothness prevents expression variation
   use_consistency: true       # Enable VASA consistency loss
@@ -224,22 +224,22 @@ loss:
 
   # Expression-specific losses (CRITICAL FOR PREVENTING COLLAPSE)
   lambda_expression_l1: 0.0   # DISABLED - conflicts with L2, too weak (was 0.1)
-  lambda_expression_variance: 5.0  # Force prediction variance to match target variance
-  lambda_expression_temporal: 2.0  # Force temporal variation in expressions
-  lambda_audio_expr_coupling: 2.0  # REDUCED from 5.0 to 2.0 - let expression reconstruction dominate
+  lambda_expression_variance: 10.0  # INCREASED to force variance matching (was 5.0)
+  lambda_expression_temporal: 5.0  # INCREASED to force temporal variation (was 2.0)
+  lambda_audio_expr_coupling: 3.0  # INCREASED to tie expression to audio changes (was 2.0)
 
   # Warp regularization (CLEANED UP - removed conflicts)
   lambda_warp_l1: 0.0         # DISABLED - conflicts with magnitude loss (was 0.1)
   lambda_warp_tv: 0.05        # REDUCED from 0.1 - spatial smoothness only (removed redundant warp_smooth)
 
-  # EMO (Volumetric Avatar) Matching Loss - DISABLED for TDD-focused training
-  use_emo_matching: false             # DISABLED - not needed until TDD converges
+  # EMO (Volumetric Avatar) Matching Loss - ensures VASA matches high-quality EMO output
+  use_emo_matching: false             # DISABLED - EMO keyframes are static, causing expression collapse
   lambda_emo_match: 0.0               # DISABLED to prevent static pull
   emo_match_type: 'combined'          # 'l1', 'l2', 'lpips', or 'combined'
   emo_cache_dir: 'cache_emo'          # Directory for cached EMO outputs
+  emo_keyframes_per_window: 5         # Number of keyframes to compare per window
   emo_match_start_epoch: 0            # Start EMO matching from epoch 0 for immediate quality
   emo_min_valid_frames: 0.1           # LOWERED for overfitting: Skip EMO matching when <10% frames are valid (was 0.5)
-  # Note: emo_keyframes_per_window moved to dataset section below
 
   # Disentanglement loss configuration
   disentangle_num_pairs: 3           # Number of frame pairs to sample for l_consist
@@ -258,9 +258,8 @@ loss:
   
   # Frame generation for disentanglement losses and visualization
   use_sparse_frames: false    # If true, only generate first and last frame (saves 90% memory)
-  enable_frame_generation: false   # DISABLED - control losses not needed until TDD (expression DB) converges
-  save_debug_frames: false    # Save generated frames to debug_generated_frames/ directory (slows training, creates many files)
-
+  enable_frame_generation: true  # DISABLED - control losses not needed until TDD (expression DB) converges
+  save_debug_frames: false  
   warmup_epochs: 0            # No warmup for overfitting
   
   # Loss scheduling
@@ -293,33 +292,29 @@ inference:
 
 # Dataset parameters - SINGLE VIDEO for overfitting
 dataset:
-  sequence_length: 50         # Match window size
+  sequence_length: 50       
   frame_size: [512, 512]
   preextract_audio: true
   cache_audio: true
   hop_length: 10
-  max_videos: 50              # REDUCED from 1000 to 50 - use only the best quality videos
-  min_sequence_length: 50    # Minimum sequence length (match window_size)
+  max_videos: 1000              # REDUCED from 1000 to 50 - use only the best quality videos
   max_sequence_samples: 1000 # Maximum samples per epoch
-  use_identity_image: true    # Use high-quality identity image instead of video frame
+  use_identity_image: true    # UNSTABLE - Use high-quality identity image instead of video frame
   identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image
-  use_identity_theta: false 
-
+  use_identity_theta: false   # Use theta from identity image for all frames (no theta prediction/loss)
 
   # Frame caching options (MD5-indexed disk storage)
   cache_frames_to_disk: true        # Save original frames to disk (default: true)
   cache_emo_frames_to_disk: true    # Save EMO frames to disk (default: true)
   frame_format: 'png'               # Image format for cached frames ('png' or 'jpg')
 
-
-    # Expression database settings
+  # Expression database settings
   auto_rebuild_expression_db: true  # Auto-rebuild expression DB after preprocessing
   expression_db_frame_stride: 1     # Sample every Nth frame for DB (1=all frames, 5=every 5th)
-  
   # EMO generation settings
-  generate_emo_frames: false   # DISABLED - not needed until TDD converges (was true)
+  generate_emo_frames: true   # DISABLED - not needed until TDD converges (was true)
   emo_identity_path: "nemo/data/IMG_1.png"  # Same identity image for EMO generation
-  emo_keyframes_per_window: 0  # DISABLED - skip EMO generation (was 50)
+  emo_keyframes_per_window: 50  # DISABLED - skip EMO generation (was 5)
   use_single_bucket: true     # Use single-bucket caching for all windows
 
   # Quality filtering
@@ -334,13 +329,13 @@ dataset:
 
 # Model checkpoint paths
 paths:
-  checkpoint_dir: "checkpoints"
+  checkpoint_dir: "checkpoints_overfit"
   syncnet_path: "pretrained/syncnet.pth"
   emotion_model: "pretrained/emonet.pth"
   volumetric_model: "nemo/logs/Retrain_with_17_V1_New_rand_MM_SEC_4_drop_02_stm_10_CV_05_1_1/checkpoints/328_model.pth"
   volumetric_config: "nemo/models/stage_1/volumetric_avatar/va.yaml"
   data_dir: "data"
-  video_folder: "junk"
+  video_folder: "junk2"
   cache_dir: "cache_single_bucket"
 
 # Hardware/environment settings
@@ -368,8 +363,7 @@ audio:
 vis:
   save_videos: true
   save_frames: false
-  vis_freq: 500                # Visualize every 500 steps - focus on TDD (expression DB) first, not control losses
-                            # Control losses disabled until basic convergence achieved
+  vis_freq: 50                 # More frequent visualization
   num_vis_samples: 4
 
 # Logging configuration
@@ -387,7 +381,7 @@ logging:
     history_size: 50          # Number of samples to track
     graph_width: 50           # Graph width in characters
     graph_height: 6           # Graph height in lines
-    show_freq: 100            # Show visualization every N steps
+    show_freq: 50             # Show visualization every N steps (more frequent for overfitting)
 
   # Validation
   validation:

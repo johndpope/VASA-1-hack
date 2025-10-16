@@ -115,6 +115,13 @@ class SingleBucketCache:
                             if 'video_path' in value:
                                 window_group.attrs['video_path'] = value['video_path']
 
+                        elif key == 'emotion_label':
+                            # Save emotion_label as JSON string (list of strings)
+                            if isinstance(value, list):
+                                window_group.attrs['emotion_label'] = json.dumps(value)
+                            else:
+                                logger.warning(f"emotion_label is not a list, skipping: {type(value)}")
+
                         elif key == 'lip_metrics':
                             # Handle nested lip metrics
                             lip_group = window_group.create_group('lip_metrics')
@@ -207,6 +214,14 @@ class SingleBucketCache:
 
                 window_group = f[window_key]
                 window_data = {}
+
+                # Load emotion_label from window attributes if present
+                if 'emotion_label' in window_group.attrs:
+                    emotion_label_json = window_group.attrs['emotion_label']
+                    try:
+                        window_data['emotion_label'] = json.loads(emotion_label_json)
+                    except json.JSONDecodeError:
+                        logger.warning(f"Failed to decode emotion_label for window {window_idx}")
 
                 # Load all data from window
                 # First check if we have emo_frames (priority for Synchformer)
@@ -363,7 +378,14 @@ class SingleBucketCache:
 
                     # Save each tensor/data in the window
                     for key, value in window_data.items():
-                        if key == 'emo_frames':
+                        if key == 'emotion_label':
+                            # Save emotion_label as JSON string (list of strings)
+                            if isinstance(value, list):
+                                window_group.attrs['emotion_label'] = json.dumps(value)
+                            else:
+                                logger.warning(f"emotion_label is not a list, skipping: {type(value)}")
+
+                        elif key == 'emo_frames':
                             # Store EMO-generated driving frames for Synchformer
                             tensor_data = value.cpu().numpy() if (isinstance(value, torch.Tensor) and value.is_cuda) else (value.numpy() if isinstance(value, torch.Tensor) else value)
                             dataset = window_group.create_dataset(

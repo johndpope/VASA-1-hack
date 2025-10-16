@@ -95,12 +95,13 @@ audio_models:
 # Reference whichever model you want to use
 projections:
   audio: ${audio_models.wav2vec}  # Change to wav2vec to use wav2vec features
-  
+  use_talkvid_audio_projection: false  # Set to true to use TalkVid-style Perceiver architecture instead of JoyVASA linear layer
+
   blink:
-    input_dim: 3  
+    input_dim: 3
     hidden_dim: 32
     output_dim: 32
-    
+
   motion_norm_dim: 256
   control_norm_dim: 5  # Updated from 6 to 5 (removed speed_bucket: gaze:2 + distance:1 + emotion:2)
   landmark_norm_dim: ${sum:${landmarks.lips.points}*${landmarks.lips.coords},

@@ -2677,8 +2677,24 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                             cached_data['frames'] = frames
                             logger.info(f"📀 Loaded frames from disk cache for window {idx}")
                         else:
-                            logger.warning(f"❌ Failed to load frames from disk for window {idx}, video: {video_path}, window_idx: {window['window_idx']}")
-                            logger.warning(f"   Frames should be at: {self.frame_cache.get_window_dir(video_path, window['window_idx'])}")
+                            # RECOVERY: Regenerate frames from video on-the-fly
+                            logger.warning(f"⚠️ Frames missing from disk for window {idx}, regenerating from video...")
+                            start_frame = cached_data['metadata'].get('start_frame', 0)
+                            regenerated_frames, _ = self._extract_frames(video_path, start_frame, self.sequence_length)
+
+                            if regenerated_frames and len(regenerated_frames) > 0:
+                                frames_tensor = torch.stack(regenerated_frames)
+                                cached_data['frames'] = frames_tensor
+                                # Save to disk cache for future use
+                                try:
+                                    self.frame_cache.save_frames(video_path, window['window_idx'], frames_tensor, format='png')
+                                    logger.info(f"✅ Regenerated and saved {len(regenerated_frames)} frames for window {idx}")
+                                except Exception as e:
+                                    logger.warning(f"Failed to save regenerated frames: {e}")
+                            else:
+                                logger.error(f"❌ Could not regenerate frames for window {idx} from video {video_path}")
+                                # Return None to skip this window
+                                return None
                     elif 'frames' not in cached_data:
                         logger.error(f"❌ CRITICAL: frames not in cached_data and frame loading disabled!")
                         logger.error(f"   cache_frames_to_disk={self.cache_frames_to_disk}, frame_cache={self.frame_cache is not None}")
@@ -2693,6 +2709,18 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         if emo_frames is not None:
                             cached_data['emo_frames'] = emo_frames
                             logger.debug(f"📀 Loaded emo_frames from disk cache for window {idx}")
+
+                    # Ensure emotion_label exists (add default if missing from old cache)
+                    if 'emotion_label' not in cached_data:
+                        # Get sequence length from any tensor in the data
+                        seq_len = 50  # default
+                        for key in ['theta', 'expression_embed', 'emotion']:
+                            if key in cached_data and isinstance(cached_data[key], torch.Tensor):
+                                seq_len = cached_data[key].shape[0]
+                                break
+                        # Create default neutral labels for all frames
+                        cached_data['emotion_label'] = ['neutral'] * seq_len
+                        logger.debug(f"Added default emotion_label for window {idx} (length: {seq_len})")
 
                     return cached_data
             elif self.cache_type == 'chunked':
@@ -2712,6 +2740,19 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         'fps': window.get('fps', 30),
                         'has_context': window.get('has_context', False)
                     })
+
+                    # Ensure emotion_label exists (add default if missing from old cache)
+                    if 'emotion_label' not in cached_data:
+                        # Get sequence length from any tensor in the data
+                        seq_len = 50  # default
+                        for key in ['theta', 'expression_embed', 'emotion']:
+                            if key in cached_data and isinstance(cached_data[key], torch.Tensor):
+                                seq_len = cached_data[key].shape[0]
+                                break
+                        # Create default neutral labels for all frames
+                        cached_data['emotion_label'] = ['neutral'] * seq_len
+                        logger.debug(f"Added default emotion_label for window {window['window_idx']} (length: {seq_len})")
+
                     return cached_data
             else:
                 # For built-in cache
@@ -2728,6 +2769,19 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         'fps': window.get('fps', 30),
                         'has_context': window.get('has_context', False)
                     })
+
+                    # Ensure emotion_label exists (add default if missing from old cache)
+                    if 'emotion_label' not in cached_data:
+                        # Get sequence length from any tensor in the data
+                        seq_len = 50  # default
+                        for key in ['theta', 'expression_embed', 'emotion']:
+                            if key in cached_data and isinstance(cached_data[key], torch.Tensor):
+                                seq_len = cached_data[key].shape[0]
+                                break
+                        # Create default neutral labels for all frames
+                        cached_data['emotion_label'] = ['neutral'] * seq_len
+                        logger.debug(f"Added default emotion_label for window {window['window_idx']} (length: {seq_len})")
+
                     return cached_data
             
             # Process the single window

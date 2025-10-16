@@ -20,6 +20,160 @@ from logger import logger
 from blink_condition_handler import BlinkConditionHandler
 
 
+# TalkVid-style audio projection components (Perceiver architecture)
+def reshape_tensor(x, heads):
+    bs, length, width = x.shape
+    # (bs, length, width) --> (bs, length, n_heads, dim_per_head)
+    x = x.view(bs, length, heads, -1)
+    # (bs, length, n_heads, dim_per_head) --> (bs, n_heads, length, dim_per_head)
+    x = x.transpose(1, 2)
+    # (bs, n_heads, length, dim_per_head) --> (bs*n_heads, length, dim_per_head)
+    x = x.reshape(bs, heads, length, -1)
+    return x
+
+
+def masked_mean(t, *, dim, mask=None):
+    if mask is None:
+        return t.mean(dim=dim)
+
+    denom = mask.sum(dim=dim, keepdim=True)
+    # Avoid importing einops by using reshape
+    mask = mask.unsqueeze(-1)  # b n -> b n 1
+    masked_t = t.masked_fill(~mask, 0.0)
+
+    return masked_t.sum(dim=dim) / denom.clamp(min=1e-5)
+
+
+class PerceiverAttention(nn.Module):
+    def __init__(self, *, dim, dim_head=64, heads=8):
+        super().__init__()
+        self.scale = dim_head ** -0.5
+        self.dim_head = dim_head
+        self.heads = heads
+        inner_dim = dim_head * heads
+
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
+
+        self.to_q = nn.Linear(dim, inner_dim, bias=False)
+        self.to_kv = nn.Linear(dim, inner_dim * 2, bias=False)
+        self.to_out = nn.Linear(inner_dim, dim, bias=False)
+
+    def forward(self, x, latents):
+        """
+        Args:
+            x (torch.Tensor): image features
+                shape (b, n1, D)
+            latent (torch.Tensor): latent features
+                shape (b, n2, D)
+        """
+        x = self.norm1(x)
+        latents = self.norm2(latents)
+
+        b, l, _ = latents.shape
+
+        q = self.to_q(latents)
+        kv_input = torch.cat((x, latents), dim=-2)
+        k, v = self.to_kv(kv_input).chunk(2, dim=-1)
+
+        q = reshape_tensor(q, self.heads)
+        k = reshape_tensor(k, self.heads)
+        v = reshape_tensor(v, self.heads)
+
+        # attention
+        scale = 1 / math.sqrt(math.sqrt(self.dim_head))
+        weight = (q * scale) @ (k * scale).transpose(-2, -1)  # More stable with f16 than dividing afterwards
+        weight = torch.softmax(weight.float(), dim=-1).type(weight.dtype)
+        out = weight @ v
+
+        out = out.permute(0, 2, 1, 3).reshape(b, l, -1)
+
+        return self.to_out(out)
+
+
+def FeedForward(dim, mult=4):
+    inner_dim = int(dim * mult)
+    return nn.Sequential(
+        nn.LayerNorm(dim),
+        nn.Linear(dim, inner_dim, bias=False),
+        nn.GELU(),
+        nn.Linear(inner_dim, dim, bias=False),
+    )
+
+
+class TalkVidAudioProjection(nn.Module):
+    """
+    TalkVid-style audio projection using Perceiver architecture.
+
+    This is a more sophisticated approach than JoyVASA's simple linear layer,
+    using learnable latent queries and multi-layer attention to process audio features.
+    """
+    def __init__(
+            self,
+            dim=1024,
+            depth=8,
+            dim_head=64,
+            heads=16,
+            num_queries=8,
+            embedding_dim=768,
+            output_dim=1024,
+            ff_mult=4,
+            max_seq_len: int = 257,
+            num_latents_mean_pooled: int = 0,
+    ):
+        super().__init__()
+
+        self.pos_emb = nn.Embedding(max_seq_len, embedding_dim)
+        self.latents = nn.Parameter(torch.randn(1, num_queries, dim) / dim ** 0.5)
+
+        self.proj_in = nn.Linear(embedding_dim, dim)
+
+        self.proj_out = nn.Linear(dim, output_dim)
+        self.norm_out = nn.LayerNorm(output_dim)
+
+        self.to_latents_from_mean_pooled_seq = (
+            nn.Sequential(
+                nn.LayerNorm(dim),
+                nn.Linear(dim, dim * num_latents_mean_pooled),
+                # Rearrange("b (n d) -> b n d", n=num_latents_mean_pooled)
+                # Avoid einops dependency by using reshape
+            )
+            if num_latents_mean_pooled > 0
+            else None
+        )
+
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                PerceiverAttention(dim=dim, dim_head=dim_head, heads=heads),
+                FeedForward(dim=dim, mult=ff_mult),
+            ]))
+
+    def forward(self, x):
+        if self.pos_emb is not None:
+            n, device = x.shape[1], x.device
+            pos_emb = self.pos_emb(torch.arange(n, device=device))
+            x = x + pos_emb
+
+        latents = self.latents.repeat(x.size(0), 1, 1)
+
+        x = self.proj_in(x)
+
+        if self.to_latents_from_mean_pooled_seq:
+            meanpooled_seq = masked_mean(x, dim=1, mask=torch.ones(x.shape[:2], device=x.device, dtype=torch.bool))
+            meanpooled_latents = self.to_latents_from_mean_pooled_seq(meanpooled_seq)
+            # Rearrange manually
+            meanpooled_latents = meanpooled_latents.view(meanpooled_latents.size(0), -1, latents.size(-1))
+            latents = torch.cat((meanpooled_latents, latents), dim=-2)
+
+        for attn, ff in self.layers:
+            latents = attn(x, latents) + latents
+            latents = ff(latents) + latents
+
+        latents = self.proj_out(latents)
+        return self.norm_out(latents)
+
+
 class DynamicTanh(nn.Module):
     """
     Dynamic Tanh (DyT) - A learnable normalization alternative from Meta FAIR (March 2025).
@@ -114,11 +268,12 @@ class VASAPositionalEmbedding(nn.Module):
 
 
 class EfficientConditionEmbedding(nn.Module):
-    def __init__(self, model_dim: int = 512, max_seq_len: int = 60):
+    def __init__(self, model_dim: int = 512, max_seq_len: int = 60, use_talkvid_audio_projection: bool = False):
         super().__init__()
         self.model_dim = model_dim
         self.max_seq_len = max_seq_len
-        logger.info(f"Initializing EfficientConditionEmbedding: model_dim={model_dim}, max_seq_len={max_seq_len}")
+        self.use_talkvid_audio_projection = use_talkvid_audio_projection
+        logger.info(f"Initializing EfficientConditionEmbedding: model_dim={model_dim}, max_seq_len={max_seq_len}, use_talkvid_audio_projection={use_talkvid_audio_projection}")
 
         config = self.load_channel_config('channel_config.yaml')
         self.clip_min = config.model.clip_bounds.min
@@ -129,11 +284,35 @@ class EfficientConditionEmbedding(nn.Module):
         # Note: channel_layout from config is not used - features are concatenated directly
         # The config defines theoretical positions but implementation uses learned projections
 
-        # Audio projection - aligned with JoyVASA (single linear layer, no normalization)
-        # JoyVASA uses a single Linear layer: self.audio_feature_map = nn.Linear(768, feature_dim)
-        self.audio_proj = nn.Linear(768, config.projections.audio.output_dim)
-        logger.info("Using JoyVASA-aligned audio projection: single Linear(768 -> {}) without normalization".format(
-            config.projections.audio.output_dim))
+        # Audio projection - choose between JoyVASA and TalkVid styles
+        # Override with config value if not explicitly passed
+        if 'use_talkvid_audio_projection' in config.projections:
+            self.use_talkvid_audio_projection = config.projections.use_talkvid_audio_projection
+            logger.info(f"Overriding use_talkvid_audio_projection from config: {self.use_talkvid_audio_projection}")
+
+        audio_output_dim = config.projections.audio.output_dim
+        if self.use_talkvid_audio_projection:
+            # TalkVid-style: Perceiver-based architecture with learnable latent queries
+            # This uses multi-layer attention to process audio features
+            self.audio_proj = TalkVidAudioProjection(
+                dim=1024,  # Internal dimension for Perceiver
+                depth=4,  # Reduced from 8 to save parameters
+                dim_head=64,
+                heads=8,  # Reduced from 16 to save parameters
+                num_queries=8,  # Number of learnable latent queries
+                embedding_dim=768,  # Input audio feature dimension (wav2vec2)
+                output_dim=audio_output_dim,  # Output dimension (512)
+                ff_mult=4,
+                max_seq_len=max_seq_len,
+                num_latents_mean_pooled=0
+            )
+            logger.info(f"Using TalkVid-style audio projection: Perceiver architecture (768 -> {audio_output_dim})")
+            logger.info(f"  - Depth: 4 layers, Heads: 8, Queries: 8")
+        else:
+            # JoyVASA-style: Single linear layer without normalization
+            # This preserves variance signal that distinguishes silent vs speech
+            self.audio_proj = nn.Linear(768, audio_output_dim)
+            logger.info(f"Using JoyVASA-aligned audio projection: single Linear(768 -> {audio_output_dim}) without normalization")
 
         self.gaze_proj = nn.Linear(2, 2)
         self.distance_proj = nn.Linear(1, 1)
@@ -248,19 +427,38 @@ class EfficientConditionEmbedding(nn.Module):
                 audio = audio.permute(0, 2, 1)  # [B, T, 768]
                 logger.debug(f"Audio interpolated to match T={T}: {audio.shape}")
 
-            # JoyVASA approach: Direct projection without normalization
-            # This preserves the variance signal that distinguishes silent vs speech
-            audio_projected = self.audio_proj(audio)
+            # Apply audio projection (JoyVASA or TalkVid style)
+            audio_projected = self.audio_proj(audio)  # [B, T, 512] for JoyVASA, [B, num_queries, 512] for TalkVid
 
-            # No normalization - keep raw projected features
-            # This aligns with JoyVASA's audio_feature_map approach
-            audio_features = audio_projected  # Use projected features directly
+            # Handle different output shapes between JoyVASA and TalkVid
+            if self.use_talkvid_audio_projection:
+                # TalkVid Perceiver outputs compressed latent queries: [B, num_queries, 512]
+                # Need to expand to match sequence length T
+                # Use linear interpolation to expand num_queries -> T
+                logger.debug(f"[TALKVID] Perceiver output shape: {audio_projected.shape}")
+
+                # Permute to [B, 512, num_queries] for interpolation
+                audio_projected = audio_projected.permute(0, 2, 1)  # [B, 512, num_queries]
+                audio_projected = F.interpolate(audio_projected, size=T, mode='linear', align_corners=False)
+                audio_projected = audio_projected.permute(0, 2, 1)  # [B, T, 512]
+
+                logger.debug(f"[TALKVID] Expanded to match T={T}: {audio_projected.shape}")
+                audio_features = audio_projected
+            else:
+                # JoyVASA approach: Direct projection without normalization
+                # This preserves the variance signal that distinguishes silent vs speech
+                audio_features = audio_projected  # Use projected features directly
 
             # DEBUG: Log audio features variance to verify preservation
             audio_var = audio.var().item()
             audio_proj_var = audio_projected.var().item()
-            logger.debug(f"[JOYVASA ALIGNED] Audio variance - Raw: {audio_var:.6f}, Projected: {audio_proj_var:.6f}")
-            logger.debug(f"Preserving full variance signal without normalization")
+
+            if self.use_talkvid_audio_projection:
+                logger.debug(f"[TALKVID] Audio variance - Raw: {audio_var:.6f}, Projected: {audio_proj_var:.6f}")
+                logger.debug(f"[TALKVID] Using Perceiver-based audio projection with learnable latent queries")
+            else:
+                logger.debug(f"[JOYVASA ALIGNED] Audio variance - Raw: {audio_var:.6f}, Projected: {audio_proj_var:.6f}")
+                logger.debug(f"Preserving full variance signal without normalization")
 
             # Handle None values from dropout - use zeros as default
             gaze_tensor = conditions.get('gaze')
@@ -1095,33 +1293,23 @@ class VASAModel(nn.Module):
             outputs['theta'] = motion_data['theta']  # Use the identity theta we set earlier
             logger.debug(f"[IDENTITY THETA] Using fixed identity theta instead of prediction")
 
-        # Cosine embedding loss with expression database
-        # Apply AFTER motion_transformer but BEFORE warp generation
-        if self.expression_db is not None and 'expression_embed' in outputs:
-            pred_zdyn = outputs['expression_embed']  # [B, T, 128]
+        # DISABLED: Expression database clamping removed - prevents model from learning new expressions
+        # The database was acting as "training wheels" that constrained predictions to known expressions
+        # This prevented the model from generalizing and learning the full expression space
+        #
+        # Previous code computed cosine_loss to nearest database expression and pulled predictions toward it
+        # This is too restrictive - model needs freedom to predict any expression, not just cached ones
+        #
+        # if self.expression_db is not None and 'expression_embed' in outputs:
+        #     pred_zdyn = outputs['expression_embed']
+        #     pred_zdyn_proj = self.cosine_head(pred_zdyn)
+        #     real_zdyn = self.expression_db.get_closest(pred_zdyn_proj.detach())
+        #     cosine_loss = F.cosine_embedding_loss(...)
+        #     outputs['cosine_loss'] = cosine_loss
+        #     outputs['real_zdyn'] = real_zdyn
 
-            # Project through cosine head (normalizes predictions)
-            pred_zdyn_proj = self.cosine_head(pred_zdyn)
-
-            # Find closest real expression from database (detach to avoid backprop through DB)
-            with torch.no_grad():
-                real_zdyn = self.expression_db.get_closest(pred_zdyn_proj.detach())  # [B, T, 128]
-
-            # Compute cosine embedding loss
-            # Target is always +1 (maximize similarity)
-            target = torch.ones(B, T, device=device)
-            cosine_loss = F.cosine_embedding_loss(
-                pred_zdyn_proj.view(B * T, -1),
-                real_zdyn.view(B * T, -1),
-                target.view(-1),
-                reduction='mean'
-            )
-
-            # Add to outputs
-            outputs['cosine_loss'] = cosine_loss
-            outputs['real_zdyn'] = real_zdyn  # For debugging/visualization
-
-            logger.debug(f"[COSINE LOSS] {cosine_loss.item():.6f}")
+        # Expression database is now only used for lambda_expression_cosine loss in vasa_losses.py
+        # That loss uses GT expressions from dataset, NOT clamped expressions from database lookup
 
         # Generate warps using volumetric_avatar's predict_embed pipeline if enabled
         # This leverages identity conditioning and pretrained nemo components
