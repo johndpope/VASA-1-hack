@@ -1372,40 +1372,26 @@ class VASAModel(nn.Module):
         # Generate warps using volumetric_avatar's predict_embed pipeline if enabled
         # This leverages identity conditioning and pretrained nemo components
         # IMPORTANT: Only generate warps when explicitly requested (generate_warps=True)
-        # This saves massive VRAM during training when warps are only needed for visualization
-        if self.use_derived_warps and generate_warps:
-            # Only generate warps if use_derived_warps is enabled AND generate_warps=True
-            if 'expression_embed' in outputs and 'theta' in outputs:
-                if idt_embed is not None:
-                    logger.info(f"[DERIVED WARPS] Generating UV warps from zdyn {outputs['expression_embed'].shape} + idt_embed {idt_embed.shape}")
-                    # CRITICAL: Warp generation must be in no_grad() to avoid OOM
-                    # Warps are only for visualization/frame generation, not for training gradients
-                    with torch.no_grad():
-                        implicit_warps = self.compute_warps_from_zdyn(
-                            zdyn=outputs['expression_embed'].detach(),  # Detach to prevent gradient flow
-                            idt_embed=idt_embed,
-                            theta=outputs['theta'].detach()
-                        )
-                    outputs['uv_warps'] = implicit_warps
-                    outputs['warp_source'] = 'derived'  # Tag for debugging
-                    logger.info(f"[DERIVED WARPS] ✅ Generated warps shape: {implicit_warps.shape}")
-                else:
-                    logger.error(f"[WARPS ERROR] idt_embed is None but use_derived_warps=True")
-                    raise ValueError(f"Cannot generate derived warps: idt_embed required (use_derived_warps=True but idt_embed=None)")
+
+        if 'expression_embed' in outputs and 'theta' in outputs:
+            if idt_embed is not None:
+                logger.info(f"[DERIVED WARPS] Generating UV warps from zdyn {outputs['expression_embed'].shape} + idt_embed {idt_embed.shape}")
+                # CRITICAL: Warp generation must be in no_grad() to avoid OOM
+                # Warps are only for visualization/frame generation, not for training gradients
+                with torch.no_grad():
+                    implicit_warps = self.compute_warps_from_zdyn(
+                        zdyn=outputs['expression_embed'].detach(),  # Detach to prevent gradient flow
+                        idt_embed=idt_embed,
+                        theta=outputs['theta'].detach()
+                    )
+                outputs['uv_warps'] = implicit_warps
+                outputs['warp_source'] = 'derived'  # Tag for debugging
+                logger.info(f"[DERIVED WARPS] ✅ Generated warps shape: {implicit_warps.shape}")
             else:
-                raise ValueError(f"Cannot generate warps: missing expression_embed or theta in outputs. Keys: {outputs.keys()}")
-        elif self.use_derived_warps and not generate_warps:
-            logger.debug(f"[DERIVED WARPS] Skipping warp generation (generate_warps=False)")
+                logger.error(f"[WARPS ERROR] idt_embed is None but use_derived_warps=True")
+                raise ValueError(f"Cannot generate derived warps: idt_embed required (use_derived_warps=True but idt_embed=None)")
         else:
-            # use_derived_warps=False: Use pre-computed warps from dataset
-            logger.debug(f"[PRE-COMPUTED WARPS] Using warps from dataset (use_derived_warps=False)")
-            # Copy warps from motion_data if available (these are ground truth warps from dataset)
-            if 'uv_warps' in motion_data:
-                outputs['uv_warps'] = motion_data['uv_warps']
-                outputs['warp_source'] = 'dataset'  # Tag for debugging
-                logger.debug(f"[PRE-COMPUTED WARPS] Copied warps from motion_data: {motion_data['uv_warps'].shape}")
-            else:
-                logger.warning(f"[PRE-COMPUTED WARPS] No uv_warps in motion_data! Available keys: {list(motion_data.keys())}")
+            raise ValueError(f"Cannot generate warps: missing expression_embed or theta in outputs. Keys: {outputs.keys()}")
 
         # Clean outputs
         for key, tensor in outputs.items():

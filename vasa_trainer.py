@@ -801,8 +801,8 @@ class VASATrainer:
         self.cfg_scheduler = CFGScheduleHandler(config)
         self.grad_monitor = GradientMonitor(model)
         self.lr_monitor = LearningRateMonitor(self.optimizer)
-        self.loss_monitor = LossRangeMonitor(enable_warnings=True, enable_critical=True)
-        logger.info("✅ Loss range monitoring enabled - will warn on unhealthy loss values")
+        self.loss_monitor = LossRangeMonitor(enable_warnings=True, enable_critical=True, config=config)
+        logger.info("✅ Loss range monitoring enabled - will warn on unhealthy loss values and show config weights")
 
         # Prepare training components
         (

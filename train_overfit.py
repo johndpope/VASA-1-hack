@@ -111,7 +111,8 @@ def main():
         use_single_bucket=use_single_bucket,
         cache_frames_to_disk=config.dataset.get('cache_frames_to_disk', True),
         cache_emo_frames_to_disk=config.dataset.get('cache_emo_frames_to_disk', True),
-        frame_format=config.dataset.get('frame_format', 'png')
+        frame_format=config.dataset.get('frame_format', 'png'),
+        flow_noise_level=config.loss.get('flow_noise_level', 0.1)
     )
 
     # Check if single-bucket cache exists, preprocess if needed

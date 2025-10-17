@@ -537,6 +537,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         cache_frames_to_disk: bool = False,  # NEW: Load frames from disk cache
         cache_emo_frames_to_disk: bool = False,  # NEW: Load EMO frames from disk cache
         frame_format: str = 'png',  # NEW: Frame format for disk cache
+        flow_noise_level: float = 0.1,  # NEW: Noise level for Flow-DPO dispreferred samples
     ):
         VASADatasetMixin.__init__(self)
 
@@ -555,6 +556,9 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         self.hop_length = hop_length
         self.device = device
         self.model_device = next(emo_model.parameters()).device
+
+        # Flow-DPO parameters
+        self.flow_noise_level = flow_noise_level
 
         # Initialize LipStateAnalyzer for lip metrics computation
         self.lip_analyzer = LipStateAnalyzer()

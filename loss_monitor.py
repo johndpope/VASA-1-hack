@@ -304,7 +304,46 @@ class LossRangeMonitor:
         }
     }
 
-    def __init__(self, enable_warnings: bool = True, enable_critical: bool = True, history_size: int = 50):
+    # Mapping from loss names to their config lambda parameter names
+    LOSS_TO_LAMBDA = {
+        'reconstruction': 'lambda_reconstruction',
+        'dynamics_loss': 'lambda_dynamics',
+        'expression_cosine': 'lambda_expression_cosine',
+        'theta_loss': 'lambda_pose',
+        'scale_loss': 'lambda_scale',
+        'rotation_loss': 'lambda_rotation',
+        'translation_loss': 'lambda_translation',
+        'expression_loss': 'lambda_dynamics',  # Part of dynamics
+        'expression_variance_loss': 'lambda_expression_variance',
+        'expression_temporal_loss': 'lambda_expression_temporal',
+        'lips_total': 'lambda_lips',
+        'lips_pos_loss': 'lambda_lips',
+        'lips_vel_loss': 'lambda_lips',
+        'nonlip_total': 'lambda_nonlip',
+        'facial_motion_total': 'lambda_control',
+        'audio_lip_correlation': 'lambda_audio_lip',
+        'audio_expression_coupling': 'lambda_audio_expr_coupling',
+        'sync_loss': 'lambda_sync',
+        'control_gaze': 'lambda_gaze_direction',
+        'control_distance': 'lambda_head_distance',
+        'control_emotion': 'lambda_emotion',
+        'control_blink': 'lambda_blink',
+        'control_speed': 'lambda_speed',
+        'control_total': 'lambda_control',
+        'blink_openness_loss': 'lambda_blink',
+        'blink_phase_loss': 'lambda_blink',
+        'mouth_openness_direct': 'lambda_mouth_openness',
+        'disentangle_total': 'lambda_consistency',
+        'l_consist': 'lambda_consist',
+        'l_cross_id': 'lambda_cross_id',
+        'flow_dpo': 'lambda_flow_dpo',
+        'velocity_smoothness': 'lambda_velocity',
+        'perceptual': 'lambda_perceptual',
+        'mouth_perceptual': 'lambda_mouth_perceptual',
+        'verification': 'lambda_verification',
+    }
+
+    def __init__(self, enable_warnings: bool = True, enable_critical: bool = True, history_size: int = 50, config=None):
         """
         Initialize loss monitor.
 
@@ -312,6 +351,7 @@ class LossRangeMonitor:
             enable_warnings: Log warning when loss exceeds warning threshold
             enable_critical: Log critical error when loss exceeds critical threshold
             history_size: Number of recent loss values to track for trend visualization
+            config: Optional config object (OmegaConf) to extract lambda weights from
         """
         self.enable_warnings = enable_warnings
         self.enable_critical = enable_critical
@@ -319,6 +359,22 @@ class LossRangeMonitor:
         self.critical_counts = {}
         self.history_size = history_size
         self.loss_history = {}  # Dict[loss_name, List[float]]
+        self.config = config  # Store config for lambda weight lookups
+
+    def _get_lambda_weight(self, loss_name: str) -> Optional[float]:
+        """Get the lambda weight for a loss from config."""
+        if self.config is None or loss_name not in self.LOSS_TO_LAMBDA:
+            return None
+
+        lambda_name = self.LOSS_TO_LAMBDA[loss_name]
+        try:
+            # Config is OmegaConf, access via loss.lambda_X
+            if hasattr(self.config, 'loss') and hasattr(self.config.loss, lambda_name.replace('lambda_', '')):
+                return getattr(self.config.loss, lambda_name.replace('lambda_', ''))
+        except:
+            pass
+
+        return None
 
     def check_loss(
         self,
@@ -370,28 +426,52 @@ class LossRangeMonitor:
             message = f"✅ {loss_name}: {loss_value:.6f} (healthy)"
         elif loss_value <= warning_thresh:
             status = 'warning'
+            # Get lambda weight if available
+            lambda_weight = self._get_lambda_weight(loss_name)
+            lambda_info = ""
+            if lambda_weight is not None:
+                lambda_param = self.LOSS_TO_LAMBDA.get(loss_name, "")
+                lambda_info = f"   Config weight: {lambda_param} = {lambda_weight}\n"
+
             message = (
                 f"⚠️ {loss_name} elevated: {loss_value:.6f} "
                 f"(healthy max: {healthy_max:.3f}, warning: {warning_thresh:.3f})\n"
                 f"   Description: {description}\n"
+                f"{lambda_info}"
                 f"   Monitor: May need more training or hyperparameter adjustment"
             )
             self.warning_counts[loss_name] = self.warning_counts.get(loss_name, 0) + 1
         elif loss_value <= critical_thresh:
             status = 'high_warning'
+            # Get lambda weight if available
+            lambda_weight = self._get_lambda_weight(loss_name)
+            lambda_info = ""
+            if lambda_weight is not None:
+                lambda_param = self.LOSS_TO_LAMBDA.get(loss_name, "")
+                lambda_info = f"   Config weight: {lambda_param} = {lambda_weight}\n"
+
             message = (
                 f"🔶 {loss_name} HIGH: {loss_value:.6f} "
                 f"(warning: {warning_thresh:.3f}, critical: {critical_thresh:.3f})\n"
                 f"   Description: {description}\n"
+                f"{lambda_info}"
                 f"   Action needed: Check loss weight, learning rate, or training stability"
             )
             self.warning_counts[loss_name] = self.warning_counts.get(loss_name, 0) + 1
         else:
             status = 'critical'
+            # Get lambda weight if available
+            lambda_weight = self._get_lambda_weight(loss_name)
+            lambda_info = ""
+            if lambda_weight is not None:
+                lambda_param = self.LOSS_TO_LAMBDA.get(loss_name, "")
+                lambda_info = f"   Config weight: {lambda_param} = {lambda_weight}\n"
+
             message = (
                 f"🔴 CRITICAL: {loss_name} = {loss_value:.6f} "
                 f"(critical threshold: {critical_thresh:.3f})\n"
                 f"   Description: {description}\n"
+                f"{lambda_info}"
                 f"   URGENT: Loss not converging! Check:\n"
                 f"     - Loss weight (may be too high)\n"
                 f"     - Learning rate (may be too high/low)\n"

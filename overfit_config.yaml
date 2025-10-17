@@ -274,7 +274,7 @@ loss:
 
   # Flow-DPO loss parameters (VideoReward framework - Liu et al., 2025)
   use_flow_dpo: true   # Enable Flow-DPO loss for preference-based alignment
-  lambda_flow_dpo: 0.5 # Weight for Flow-DPO loss (start at 0.5x sync loss, ramp up)
+  lambda_flow_dpo: 25 # Weight for Flow-DPO loss (start at 0.5x sync loss, ramp up)
   flow_dpo_start_epoch: 0  # When to start using Flow-DPO (after dynamics stage)
   flow_dim: 140        # Dimension for velocity flows (12 theta + 128 expression = 140)
   flow_noise_level: 0.1  # Noise level for generating dispreferred samples (10% of signal)
