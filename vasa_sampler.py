@@ -294,7 +294,10 @@ def create_window_sequence_collate_fn(context_size: int = 10):
             # REQUIRED warping fields for MotionTransformer
             'xy_warps', 'rigid_warps', 'uv_warps', 'source_theta_warp',
             # EMO (Volumetric Avatar) generated frames for comparison
-            'emo_frames', 'emo_keyframe_indices'
+            'emo_frames', 'emo_keyframe_indices',
+            # Flow-DPO velocity fields for preference-based alignment (VideoReward)
+            'velocity_gt', 'velocity_dispreferred',
+            'theta_dispreferred', 'expression_dispreferred'
         ]
 
         for key in keys_to_stack:

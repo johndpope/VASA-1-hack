@@ -223,6 +223,32 @@ class LossRangeMonitor:
             'description': 'Cross-identity similarity loss'
         },
 
+        # Flow-DPO losses (VideoReward framework - Liu et al., 2025)
+        'flow_dpo': {
+            'healthy': (0.01, 0.5),
+            'warning': 1.0,
+            'critical': 2.0,
+            'description': 'Flow-DPO preference-based alignment loss'
+        },
+        'regret_w': {
+            'healthy': (-0.5, 0.5),
+            'warning': 1.0,
+            'critical': 2.0,
+            'description': 'Regret for preferred (ground-truth) samples - should be near 0'
+        },
+        'regret_l': {
+            'healthy': (0.0, 1.0),
+            'warning': 2.0,
+            'critical': 4.0,
+            'description': 'Regret for dispreferred (noisy) samples - should be positive'
+        },
+        'regret_diff': {
+            'healthy': (-0.5, 1.0),
+            'warning': 2.0,
+            'critical': 4.0,
+            'description': 'Regret difference (advantage) - preferred over dispreferred'
+        },
+
         # Regularization losses
         'velocity_smoothness': {
             'healthy': (0.001, 0.05),

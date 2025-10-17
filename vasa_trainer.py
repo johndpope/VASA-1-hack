@@ -710,7 +710,8 @@ class VASATrainer:
         self.loss_module = VASALossModule(
             volumetric_avatar=model.volumetric_avatar,
             config=config,
-            device=self.accelerator.device
+            device=self.accelerator.device,
+            model=model  # Pass model for Flow-DPO access to reward/ref models
         )
         
         # Initialize volumetric avatar bridge for proper frame generation
@@ -1374,13 +1375,15 @@ class VASATrainer:
                                             if getattr(self.config.train, 'use_gt_translation', False) and 'translation' in motion_data:
                                                 outputs['translation'] = motion_data['translation'].clone()
 
-                                            if self.global_step % 100 == 0:
-                                                # VERIFY: Confirm injection by comparing
-                                                diff = (outputs['theta'] - original_predicted_theta).abs().mean().item()
-                                                match = (outputs['theta'] - motion_data['theta']).abs().mean().item()
-                                                logger.info(f"[GT THETA] Injected GT theta for frame generation (isolating expression learning)")
-                                                logger.info(f"  ✓ Diff from predicted: {diff:.6f} (should be >0)")
-                                                logger.info(f"  ✓ Match with GT: {match:.10f} (should be ~0)")
+                                            # ALWAYS log GT theta injection (not just on step % 100)
+                                            # VERIFY: Confirm injection by comparing
+                                            diff = (outputs['theta'] - original_predicted_theta).abs().mean().item()
+                                            match = (outputs['theta'] - motion_data['theta']).abs().mean().item()
+                                            gt_variance = outputs['theta'].var(dim=1).mean().item()
+                                            logger.info(f"✅ [GT THETA] Injected GT theta for frame generation (isolating expression learning)")
+                                            logger.info(f"  ✓ Diff from predicted: {diff:.6f} (should be >0)")
+                                            logger.info(f"  ✓ Match with GT: {match:.10f} (should be ~0)")
+                                            logger.info(f"  📊 GT theta variance: {gt_variance:.6f} (variance check in VA bridge uses 0.01 threshold)")
 
                                         if use_sparse_frames:
                                             # OPTIMIZATION: Only generate first and last frame (90% memory savings)

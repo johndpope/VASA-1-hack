@@ -170,6 +170,14 @@ def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True,
                     logger.info(f"   'frames' in window_data: {'frames' in window_data}")
                     logger.info(f"   'emo_frames' in window_data: {'emo_frames' in window_data}")
 
+                # CRITICAL CHECK: Ensure emo_frames exist (required for training)
+                if 'emo_frames' not in window_data:
+                    quality_filtered_count += 1
+                    logger.error(f"❌ CRITICAL: Window {idx} has NO emo_frames! Cannot train without them. Skipping window.")
+                    if video_path:
+                        logger.error(f"   Video: {video_path}, window_idx: {window_idx_in_video}")
+                    continue  # Skip this window entirely
+
                 # Save frames to disk if enabled
                 if frame_cache and video_path and 'frames' in window_data:
                     try:

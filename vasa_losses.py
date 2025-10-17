@@ -162,11 +162,13 @@ class VASALossModule:
         self,
         volumetric_avatar: nn.Module,
         config: Dict,
-        device: str = 'cuda'
+        device: str = 'cuda',
+        model: Optional[nn.Module] = None
     ):
         self.volumetric_avatar = volumetric_avatar
         self.config = config
         self.device = device
+        self.model = model  # Store reference to VASAModel for Flow-DPO
         
 
         self.speed_handler = SpeedLossHandler(num_buckets=9)
@@ -226,6 +228,11 @@ class VASALossModule:
         # Audio-lip correlation loss weight
         self.lambda_audio_lip = getattr(config.loss, 'lambda_audio_lip', 2.0)
         self.lambda_mouth_openness = getattr(config.loss, 'lambda_mouth_openness', 10.0)
+
+        # Flow-DPO loss weight (VideoReward framework - Liu et al., 2025)
+        self.lambda_flow_dpo = getattr(config.loss, 'lambda_flow_dpo', 0.5)
+        self.flow_dpo_start_epoch = getattr(config.loss, 'flow_dpo_start_epoch', 20)
+        self.flow_beta_scale = getattr(config.loss, 'flow_beta_scale', 1.0)
 
         # L1 regularization for UV warps to prevent collapse
         self.lambda_warp_l1 = getattr(config.loss, 'lambda_warp_l1', 0.1)
@@ -1074,7 +1081,51 @@ class VASALossModule:
             # Add mouth-focused perceptual term
             mouth_perceptual_term = losses.get('mouth_perceptual', torch.tensor(0.0, device=device))
 
-            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + warp_term + diversity_term + perceptual_term + mouth_perceptual_term + audio_lip_term + audio_expr_term
+            # 10. Flow-DPO Loss (VideoReward framework - Liu et al., 2025)
+            flow_dpo_term = torch.tensor(0.0, device=device)
+            if self.lambda_flow_dpo > 0 and 'velocity_gt' in targets and 'velocity_dispreferred' in targets:
+                # Check if model has Flow-DPO components
+                model = getattr(self, 'model', None)
+                if model is None:
+                    # Try to get model from volumetric_avatar
+                    model = getattr(self.volumetric_avatar, 'motion_transformer', None)
+
+                if model is not None and hasattr(model, 'reward_model') and hasattr(model, 'ref_model'):
+                    if model.reward_model is not None and model.ref_model is not None:
+                        # Get hidden states from model output
+                        # Assume outputs contains 'hidden_states' from the motion transformer
+                        if 'hidden_states' in outputs:
+                            hidden_states = outputs['hidden_states']  # [B, T, hidden_dim]
+                            velocity_gt = targets['velocity_gt']  # [B, T, flow_dim]
+                            velocity_dispreferred = targets['velocity_dispreferred']  # [B, T, flow_dim]
+
+                            flow_dpo_loss, flow_metrics = self._compute_flow_dpo_loss(
+                                hidden_states=hidden_states,
+                                velocity_gt=velocity_gt,
+                                velocity_dispreferred=velocity_dispreferred,
+                                reward_model=model.reward_model,
+                                ref_model=model.ref_model,
+                                beta_t=self.flow_beta_scale,
+                                epoch=current_epoch if current_epoch is not None else 0
+                            )
+
+                            losses['flow_dpo'] = flow_dpo_loss
+                            flow_dpo_term = flow_dpo_loss * self.lambda_flow_dpo
+                            metrics.update(flow_metrics)
+                            logger.debug(f"  Flow-DPO loss: {flow_dpo_loss.item():.6f} (weighted: {flow_dpo_term.item():.6f})")
+                        else:
+                            logger.debug("  No hidden_states in outputs, skipping Flow-DPO")
+                    else:
+                        logger.debug("  Model missing Flow-DPO models (reward_model or ref_model is None)")
+                else:
+                    logger.debug("  Model does not support Flow-DPO")
+            else:
+                if self.lambda_flow_dpo == 0:
+                    logger.debug("  Flow-DPO disabled (lambda_flow_dpo=0)")
+                else:
+                    logger.debug("  Flow-DPO skipped: missing velocity_gt or velocity_dispreferred in targets")
+
+            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + warp_term + diversity_term + perceptual_term + mouth_perceptual_term + audio_lip_term + audio_expr_term + flow_dpo_term
             losses['total'] = total_loss
             logger.debug(f"Total loss (with perceptual): {total_loss.item():.6f}")
 
@@ -3400,7 +3451,90 @@ class VASALossModule:
         det_error = torch.abs(det - 1)
         
         return orth_error < eps and det_error < eps
-    
+
+    def _compute_flow_dpo_loss(
+        self,
+        hidden_states: torch.Tensor,  # [B, T, hidden_dim]
+        velocity_gt: torch.Tensor,  # [B, T, flow_dim] - ground truth velocity
+        velocity_dispreferred: torch.Tensor,  # [B, T, flow_dim] - dispreferred velocity
+        reward_model: nn.Module,
+        ref_model: nn.Module,
+        beta_t: float = 1.0,
+        epoch: int = 0
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Compute Flow-DPO loss for preference-based alignment (VideoReward framework).
+
+        Flow-DPO Loss Formula (Liu et al., 2025):
+        L_DPO = -E[log σ(- β_t/2 * (regret_w - regret_l))]
+
+        where:
+        - regret_w = ||v_w - v_θ(h)||² - ||v_w - v_ref(h)||²  (preferred sample)
+        - regret_l = ||v_l - v_θ(h)||² - ||v_l - v_ref(h)||²  (dispreferred sample)
+        - v_w: ground-truth velocity (preferred)
+        - v_l: noisy velocity (dispreferred)
+        - v_θ: reward model prediction
+        - v_ref: reference model prediction (frozen)
+        - β_t: scale factor for regret difference
+
+        Args:
+            hidden_states: Hidden states from motion transformer [B, T, hidden_dim]
+            velocity_gt: Ground-truth velocity flows (preferred) [B, T, flow_dim]
+            velocity_dispreferred: Noisy velocity flows (dispreferred) [B, T, flow_dim]
+            reward_model: Learned reward model (v_θ)
+            ref_model: Frozen reference model (v_ref)
+            beta_t: Scale factor for regret computation
+            epoch: Current epoch for ramping up loss weight
+
+        Returns:
+            Tuple of (flow_dpo_loss, metrics_dict)
+        """
+        device = self.device
+
+        # Skip Flow-DPO loss before start epoch
+        if epoch < self.flow_dpo_start_epoch:
+            return torch.tensor(0.0, device=device), {
+                'flow_dpo_loss': 0.0,
+                'regret_w': 0.0,
+                'regret_l': 0.0,
+                'regret_diff': 0.0
+            }
+
+        # Predict velocity flows using reward model and reference model
+        v_theta = reward_model(hidden_states)  # [B, T, flow_dim]
+        with torch.no_grad():
+            v_ref = ref_model(hidden_states)  # [B, T, flow_dim]
+
+        # Compute regret for preferred sample (ground-truth velocity)
+        # regret_w = ||v_w - v_θ||² - ||v_w - v_ref||²
+        regret_w = (
+            F.mse_loss(velocity_gt, v_theta, reduction='none').sum(dim=-1)  # [B, T]
+            - F.mse_loss(velocity_gt, v_ref, reduction='none').sum(dim=-1)
+        )
+
+        # Compute regret for dispreferred sample (noisy velocity)
+        # regret_l = ||v_l - v_θ||² - ||v_l - v_ref||²
+        regret_l = (
+            F.mse_loss(velocity_dispreferred, v_theta, reduction='none').sum(dim=-1)  # [B, T]
+            - F.mse_loss(velocity_dispreferred, v_ref, reduction='none').sum(dim=-1)
+        )
+
+        # Compute regret difference (advantage of preferred over dispreferred)
+        regret_diff = regret_w - regret_l  # [B, T]
+
+        # Flow-DPO loss: -E[log σ(- β_t/2 * regret_diff)]
+        # = E[log(1 + exp(β_t/2 * regret_diff))]  (using log-sum-exp trick)
+        flow_dpo_loss = F.softplus(beta_t / 2.0 * regret_diff).mean()
+
+        # Collect metrics for logging
+        metrics = {
+            'flow_dpo_loss': flow_dpo_loss.item(),
+            'regret_w': regret_w.mean().item(),
+            'regret_l': regret_l.mean().item(),
+            'regret_diff': regret_diff.mean().item()
+        }
+
+        return flow_dpo_loss, metrics
 
     def compute_disentanglement_loss(
         self, 

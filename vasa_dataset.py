@@ -2708,7 +2708,16 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         )
                         if emo_frames is not None:
                             cached_data['emo_frames'] = emo_frames
-                            logger.debug(f"📀 Loaded emo_frames from disk cache for window {idx}")
+                            logger.info(f"📀 Loaded emo_frames from disk cache for window {idx}")
+                        else:
+                            # FAIL HARD: emo_frames are REQUIRED for training
+                            logger.error(f"❌ CRITICAL: emo_frames missing from disk for window {idx}")
+                            logger.error(f"   Video: {video_path}, window_idx: {window['window_idx']}")
+                            logger.error(f"   Expected at: {self.emo_frame_cache.get_window_dir(video_path, window['window_idx'])}")
+                            logger.error(f"   This window CANNOT be used for training without emo_frames!")
+                            logger.error(f"   ACTION: Re-run preprocessing with --cache-emo-frames to generate missing emo_frames")
+                            # Return None to exclude this window from training
+                            return None
 
                     # Ensure emotion_label exists (add default if missing from old cache)
                     if 'emotion_label' not in cached_data:
@@ -2721,6 +2730,22 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         # Create default neutral labels for all frames
                         cached_data['emotion_label'] = ['neutral'] * seq_len
                         logger.debug(f"Added default emotion_label for window {idx} (length: {seq_len})")
+
+                    # Flow-DPO: Compute velocities if not in cache (for old caches)
+                    if 'velocity_gt' not in cached_data and 'theta' in cached_data and 'expression_embed' in cached_data:
+                        motion_gt = {
+                            'theta': cached_data['theta'],
+                            'expression_embed': cached_data['expression_embed']
+                        }
+                        cached_data['velocity_gt'] = self._compute_velocity(motion_gt)
+
+                        # Generate dispreferred motion
+                        noise_level = getattr(self, 'flow_noise_level', 0.1)
+                        motion_dispreferred = self._generate_dispreferred_motion(motion_gt, noise_level)
+                        cached_data['velocity_dispreferred'] = self._compute_velocity(motion_dispreferred)
+                        cached_data['theta_dispreferred'] = motion_dispreferred['theta']
+                        cached_data['expression_dispreferred'] = motion_dispreferred['expression_embed']
+                        logger.debug(f"Computed Flow-DPO velocities for cached window {idx}")
 
                     return cached_data
             elif self.cache_type == 'chunked':
@@ -2753,6 +2778,22 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         cached_data['emotion_label'] = ['neutral'] * seq_len
                         logger.debug(f"Added default emotion_label for window {window['window_idx']} (length: {seq_len})")
 
+                    # Flow-DPO: Compute velocities if not in cache (for old caches)
+                    if 'velocity_gt' not in cached_data and 'theta' in cached_data and 'expression_embed' in cached_data:
+                        motion_gt = {
+                            'theta': cached_data['theta'],
+                            'expression_embed': cached_data['expression_embed']
+                        }
+                        cached_data['velocity_gt'] = self._compute_velocity(motion_gt)
+
+                        # Generate dispreferred motion
+                        noise_level = getattr(self, 'flow_noise_level', 0.1)
+                        motion_dispreferred = self._generate_dispreferred_motion(motion_gt, noise_level)
+                        cached_data['velocity_dispreferred'] = self._compute_velocity(motion_dispreferred)
+                        cached_data['theta_dispreferred'] = motion_dispreferred['theta']
+                        cached_data['expression_dispreferred'] = motion_dispreferred['expression_embed']
+                        logger.debug(f"Computed Flow-DPO velocities for cached window {window['window_idx']}")
+
                     return cached_data
             else:
                 # For built-in cache
@@ -2782,8 +2823,24 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         cached_data['emotion_label'] = ['neutral'] * seq_len
                         logger.debug(f"Added default emotion_label for window {window['window_idx']} (length: {seq_len})")
 
+                    # Flow-DPO: Compute velocities if not in cache (for old caches)
+                    if 'velocity_gt' not in cached_data and 'theta' in cached_data and 'expression_embed' in cached_data:
+                        motion_gt = {
+                            'theta': cached_data['theta'],
+                            'expression_embed': cached_data['expression_embed']
+                        }
+                        cached_data['velocity_gt'] = self._compute_velocity(motion_gt)
+
+                        # Generate dispreferred motion
+                        noise_level = getattr(self, 'flow_noise_level', 0.1)
+                        motion_dispreferred = self._generate_dispreferred_motion(motion_gt, noise_level)
+                        cached_data['velocity_dispreferred'] = self._compute_velocity(motion_dispreferred)
+                        cached_data['theta_dispreferred'] = motion_dispreferred['theta']
+                        cached_data['expression_dispreferred'] = motion_dispreferred['expression_embed']
+                        logger.debug(f"Computed Flow-DPO velocities for cached window {window['window_idx']}")
+
                     return cached_data
-            
+
             # Process the single window
             try:
                 # Extract frames
@@ -2908,13 +2965,18 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     # Create window data with correct key names
                     # Squeeze batch dimension from EMO features (they come as [1, T, ...])
                     # NOTE: Frames will be saved to disk cache and excluded from H5 cache
+
+                    # Extract motion parameters (needed for velocity computation)
+                    theta_gt = emo_features['theta'].squeeze(0)  # [1, T, 3, 4] -> [T, 3, 4]
+                    expression_gt = emo_features['expression_embed'].squeeze(0)  # [1, T, 128] -> [T, 128]
+
                     window_data = {
                         'frames': torch.stack(frames),  # Include frames so they can be saved to disk cache
-                        'theta': emo_features['theta'].squeeze(0),  # [1, T, 3, 4] -> [T, 3, 4]
+                        'theta': theta_gt,  # [T, 3, 4]
                         'scale': emo_features['scale'].squeeze(0),  # [1, T, 3] -> [T, 3]
                         'rotation': emo_features['rotation'].squeeze(0),  # [1, T, 3] -> [T, 3]
                         'translation': emo_features['translation'].squeeze(0),  # [1, T, 3] -> [T, 3]
-                        'expression_embed': emo_features['expression_embed'].squeeze(0),  # [1, T, 128] -> [T, 128]
+                        'expression_embed': expression_gt,  # [T, 128]
                         'audio_features': wav2vec_features.squeeze(0) if wav2vec_features.ndim == 3 else wav2vec_features,  # [1, T, 768] -> [T, 768]
                         'audio_mfcc': mfcc_features.squeeze(0) if mfcc_features.ndim == 3 else mfcc_features,  # [1, T, 13] -> [T, 13]
                         'audio_waveform': audio_segment.squeeze(0),  # [1, samples] -> [samples] - raw audio for legacy
@@ -2961,7 +3023,25 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                             'window_idx': window['window_idx']
                         }
                     }
-                    
+
+                    # Flow-DPO: Compute velocity flows for preferred (ground-truth) motion
+                    motion_gt = {
+                        'theta': theta_gt,
+                        'expression_embed': expression_gt
+                    }
+                    velocity_gt = self._compute_velocity(motion_gt)  # [T, 140]
+                    window_data['velocity_gt'] = velocity_gt
+
+                    # Flow-DPO: Generate dispreferred motion by adding noise
+                    noise_level = getattr(self, 'flow_noise_level', 0.1)  # Default 10% noise
+                    motion_dispreferred = self._generate_dispreferred_motion(motion_gt, noise_level)
+                    velocity_dispreferred = self._compute_velocity(motion_dispreferred)  # [T, 140]
+                    window_data['velocity_dispreferred'] = velocity_dispreferred
+
+                    # Store dispreferred motion parameters for later use in loss computation
+                    window_data['theta_dispreferred'] = motion_dispreferred['theta']
+                    window_data['expression_dispreferred'] = motion_dispreferred['expression_embed']
+
                     # Verify shapes
                     expected_shapes = {
                         'lips': (self.sequence_length, 20, 3),
@@ -3154,6 +3234,58 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
         except Exception as e:
             logger.error(f"Error saving pending windows: {str(e)}")
+
+    def _compute_velocity(self, motion: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Compute ground-truth velocity flows from motion parameters for Flow-DPO.
+        Concatenates frame differences in theta and expression.
+
+        Args:
+            motion: Dict with 'theta' [T, 3, 4] and 'expression_embed' [T, 128]
+
+        Returns:
+            velocity: [T, flow_dim] where flow_dim = 12 + 128 = 140
+        """
+        theta = motion['theta']  # [T, 3, 4]
+        expr = motion['expression_embed']  # [T, 128]
+
+        # Velocity: frame differences
+        theta_vel = theta[1:] - theta[:-1]  # [T-1, 3, 4]
+        expr_vel = expr[1:] - expr[:-1]  # [T-1, 128]
+
+        # Pad to T with zeros at the beginning (first frame has zero velocity)
+        theta_vel = torch.cat([torch.zeros(1, 3, 4, dtype=theta.dtype, device=theta.device), theta_vel], dim=0)  # [T, 3, 4]
+        expr_vel = torch.cat([torch.zeros(1, 128, dtype=expr.dtype, device=expr.device), expr_vel], dim=0)  # [T, 128]
+
+        # Flatten theta and concatenate
+        theta_flat = theta_vel.reshape(theta_vel.shape[0], -1)  # [T, 12]
+        velocity = torch.cat([theta_flat, expr_vel], dim=-1)  # [T, 140]
+
+        return velocity.float()
+
+    def _generate_dispreferred_motion(self, motion: Dict[str, torch.Tensor], noise_level: float = 0.1) -> Dict[str, torch.Tensor]:
+        """
+        Generate dispreferred motion samples by adding controlled noise to theta and expression.
+        Used for Flow-DPO preference learning.
+
+        Args:
+            motion: Dict with 'theta' and 'expression_embed'
+            noise_level: Standard deviation of Gaussian noise (default 0.1 = 10% of signal)
+
+        Returns:
+            dispreferred_motion: Dict with noisy theta and expression_embed
+        """
+        dispreferred = {}
+
+        # Add noise to theta [T, 3, 4]
+        theta_noise = torch.randn_like(motion['theta']) * noise_level
+        dispreferred['theta'] = motion['theta'] + theta_noise
+
+        # Add noise to expression [T, 128]
+        expr_noise = torch.randn_like(motion['expression_embed']) * noise_level
+        dispreferred['expression_embed'] = motion['expression_embed'] + expr_noise
+
+        return dispreferred
 
     def _get_zero_sample(self) -> Dict[str, torch.Tensor]:
         """Return a zero-filled sample with all required features including landmarks and lip motion"""

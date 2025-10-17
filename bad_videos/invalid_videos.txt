@@ -1,67 +1,16 @@
 # Failed Videos Report
 
 
-junk2/11.mp4:
-  2025-10-12 08:02:46 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:02:47 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:02:48 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:02:49 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:02:49 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:02:50 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:02:51 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:02:51 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:02:58 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:02:59 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:00 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:00 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:02 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:03 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:12 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:13 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:16 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-
-junk2/videovideo-hOQAsNg8aw-scene3_scene3.mp4:
-  2025-10-12 08:02:52 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:02:53 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:07 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:08 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-
-junk2/videovideoeI2V8Bd5X9s-scene6_scene1.mp4:
-  2025-10-12 08:02:53 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:02:54 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:15 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:16 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-
-junk2/videovideozqKyByqbSs8-scene18_scene2.mp4:
-  2025-10-12 08:02:54 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:02:55 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:10 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:11 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-
-junk2/videovideo_0MTaef81jQQ-scene23_scene4.mp4:
-  2025-10-12 08:02:56 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:02:56 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:11 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:12 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-
-junk2/videovideokUUhJtbrIwU-scene241_scene6.mp4:
-  2025-10-12 08:02:57 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:02:58 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-
-junk2/videovideoIfai_9UFDSU-scene1_scene7.mp4:
-  2025-10-12 08:03:01 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:02 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:09 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:09 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-
-junk2/videovideo_dvrizT3014o-scene1_scene20.mp4:
-  2025-10-12 08:03:04 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:04 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:06 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:07 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-
-junk2/videovideoAl5MFMZvpY4-scene2_scene1.mp4:
-  2025-10-12 08:03:05 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:05 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:14 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
-  2025-10-12 08:03:14 - processing_error: {'error': "Face attribute error: name 'audio_segment' is not defined"}
+junk2/videovideoTwqES24jgRA-scene32_scene10.mp4:
+  2025-10-16 11:31:15 - face_detection_failed: {'frame_shape': (512, 512, 3), 'error': 'No face landmarks detected'}
+  2025-10-16 11:31:15 - landmark_detection_failed: {'error': 'Failed to extract valid landmarks'}
+  2025-10-16 11:31:17 - face_detection_failed: {'frame_shape': (512, 512, 3), 'error': 'No face landmarks detected'}
+  2025-10-16 11:31:17 - landmark_detection_failed: {'error': 'Failed to extract valid landmarks'}
+  2025-10-16 11:38:27 - face_detection_failed: {'frame_shape': (512, 512, 3), 'error': 'No face landmarks detected'}
+  2025-10-16 11:38:27 - landmark_detection_failed: {'error': 'Failed to extract valid landmarks'}
+  2025-10-16 11:38:29 - face_detection_failed: {'frame_shape': (512, 512, 3), 'error': 'No face landmarks detected'}
+  2025-10-16 11:38:29 - landmark_detection_failed: {'error': 'Failed to extract valid landmarks'}
+  2025-10-16 11:54:01 - face_detection_failed: {'frame_shape': (512, 512, 3), 'error': 'No face landmarks detected'}
+  2025-10-16 11:54:01 - landmark_detection_failed: {'error': 'Failed to extract valid landmarks'}
+  2025-10-16 11:54:03 - face_detection_failed: {'frame_shape': (512, 512, 3), 'error': 'No face landmarks detected'}
+  2025-10-16 11:54:03 - landmark_detection_failed: {'error': 'Failed to extract valid landmarks'}

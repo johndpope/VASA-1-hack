@@ -941,7 +941,8 @@ class MotionTransformer(nn.Module):
         if C > 0:
             out = out[:, C:]  # [B, T, d_model]
 
-       
+        # Store hidden states for Flow-DPO (before prediction heads)
+        hidden_states = out  # [B, T, d_model] - this is what Flow-DPO needs
 
         # Log output statistics
         logger.debug(f" Transformer output variance: {out.var().item():.6f}")
@@ -980,6 +981,7 @@ class MotionTransformer(nn.Module):
             'scale': scale_pred,  # SRT scale
             'rotation': rotation_pred,  # SRT rotation
             'translation': translation_pred,  # SRT translation
+            'hidden_states': hidden_states,  # [B, T, d_model] - for Flow-DPO loss
             # Note: uv_warps will be added by VASAModel.forward() via implicit generation
         }
 
@@ -1050,6 +1052,62 @@ class VASAModel(nn.Module):
         # NOTE: Warp generation uses volumetric_avatar's predict_embed pipeline
         # This leverages the full nemo architecture with identity conditioning
         # See: compute_warps_from_zdyn() method below
+
+        # Flow-DPO: Reward model and reference model for preference-based alignment
+        if config.loss.get('use_flow_dpo', False):
+            flow_dim = config.loss.get('flow_dim', 140)  # 12 theta + 128 expression = 140
+            hidden_dim = config.model.hidden_dim
+
+            # Reward model: Learns to predict velocity flows from hidden states
+            self.reward_model = nn.Sequential(
+                nn.Linear(hidden_dim, flow_dim),
+                nn.ReLU(),
+                nn.Linear(flow_dim, flow_dim)
+            )
+
+            # Reference model: Frozen copy of reward model for Flow-DPO baseline
+            self.ref_model = nn.Sequential(
+                nn.Linear(hidden_dim, flow_dim),
+                nn.ReLU(),
+                nn.Linear(flow_dim, flow_dim)
+            )
+            self.ref_model.load_state_dict(self.reward_model.state_dict())
+            for param in self.ref_model.parameters():
+                param.requires_grad = False  # Freeze reference model
+
+            logger.info(f"Flow-DPO enabled: reward_model and ref_model initialized (flow_dim={flow_dim})")
+        else:
+            self.reward_model = None
+            self.ref_model = None
+            logger.info("Flow-DPO disabled")
+
+    def compute_velocity(self, motion: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Compute velocity flows from motion parameters for Flow-DPO.
+        Concatenates frame differences in theta and expression.
+
+        Args:
+            motion: Dict with 'theta' [B, T, 3, 4] and 'expression_embed' [B, T, 128]
+
+        Returns:
+            velocity: [B, T, flow_dim] where flow_dim = 12 + 128 = 140
+        """
+        theta = motion['theta']  # [B, T, 3, 4]
+        expr = motion['expression_embed']  # [B, T, 128]
+
+        # Velocity: frame differences
+        theta_vel = theta[:, 1:] - theta[:, :-1]  # [B, T-1, 3, 4]
+        expr_vel = expr[:, 1:] - expr[:, :-1]  # [B, T-1, 128]
+
+        # Pad to T with zeros at the beginning
+        theta_vel = F.pad(theta_vel, (0, 0, 0, 0, 1, 0))  # [B, T, 3, 4]
+        expr_vel = F.pad(expr_vel, (0, 0, 1, 0))  # [B, T, 128]
+
+        # Flatten theta and concatenate
+        theta_flat = theta_vel.reshape(theta_vel.shape[0], theta_vel.shape[1], -1)  # [B, T, 12]
+        velocity = torch.cat([theta_flat, expr_vel], dim=-1)  # [B, T, 140]
+
+        return velocity
 
     def compute_warps_from_zdyn(
         self,
