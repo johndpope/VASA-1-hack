@@ -1521,7 +1521,8 @@ class VASAModel(nn.Module):
                             window_motion,
                             timesteps,
                             conditions=uncond_conditions,
-                            prev_context=prev_context
+                            prev_context=prev_context,
+                            idt_embed=idt_embed  # FIXED: Pass idt_embed for warp generation
                         )
 
                     # Conditional prediction
@@ -1529,14 +1530,19 @@ class VASAModel(nn.Module):
                         window_motion,
                         timesteps,
                         conditions=window_conditions,
-                        prev_context=prev_context
+                        prev_context=prev_context,
+                        idt_embed=idt_embed  # FIXED: Pass idt_embed for warp generation
                     )
 
                     # Apply classifier-free guidance if scales provided
                     if cfg_scales:
                         pred_motion = {}
                         for k in cond_motion:
-                            if k == 'noise':
+                            if k == 'noise' or k == 'warp_source' or k == 'hidden_states':
+                                # Skip special keys that aren't motion parameters
+                                continue
+                            # Skip non-tensor values (like string tags)
+                            if not isinstance(cond_motion[k], torch.Tensor):
                                 continue
                             # Use audio scale for expression (since audio drives expression)
                             if k == 'expression_embed':

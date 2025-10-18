@@ -171,7 +171,10 @@ def create_four_panel_thumbnail(
     motion_params: Optional[Dict[str, torch.Tensor]] = None,
     size: Tuple[int, int] = (1024, 256),  # Wider for 4 panels
     add_overlay: bool = True,
-    compute_loss: bool = True
+    compute_loss: bool = True,
+    emotion_label_pred: Optional[str] = None,  # NEW: Predicted emotion label
+    emotion_label_target: Optional[str] = None,  # NEW: Target emotion label
+    use_gt_theta: bool = False  # NEW: Whether theta is ground truth (hide SRT if True)
 ) -> Tuple[np.ndarray, Optional[float]]:
     """
     Create a four-panel thumbnail: Identity | Target | EMO Generated | VASA Generated.
@@ -259,6 +262,13 @@ def create_four_panel_thumbnail(
         # Calculate motion indicators
         indicators = []
 
+        # Add emotion labels first (PRIORITY)
+        if emotion_label_pred is not None or emotion_label_target is not None:
+            if emotion_label_target:
+                indicators.append(f"Emo GT: {emotion_label_target}")
+            if emotion_label_pred:
+                indicators.append(f"Emo Pred: {emotion_label_pred}")
+
         # Add EMO-VASA loss if computed
         if emo_vasa_loss is not None:
             indicators.append(f"EMO Loss: {emo_vasa_loss:.4f}")
@@ -267,8 +277,8 @@ def create_four_panel_thumbnail(
         if '_frame_idx' in motion_params:
             indicators.append(f"Frame: {motion_params['_frame_idx']}")
 
-        # Add motion stats
-        if 'theta' in motion_params:
+        # Add motion stats (hide SRT if use_gt_theta=True, only show theta diff)
+        if 'theta' in motion_params and not use_gt_theta:
             theta = motion_params['theta']
             if isinstance(theta, torch.Tensor):
                 if theta.dim() > 1 and theta.shape[0] > 1:
@@ -285,7 +295,7 @@ def create_four_panel_thumbnail(
         # Add text overlay
         font_scale = max(1.0, size[0] / 512)
         text_y = 0.98
-        for indicator in indicators[:4]:  # Allow 4 indicators for more info
+        for indicator in indicators[:5]:  # Allow 5 indicators (2 emotion + 3 motion)
             ax.text(0.02, text_y, indicator, transform=ax.transAxes,
                    fontsize=7 * font_scale, color='white',
                    bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.5),
@@ -991,7 +1001,10 @@ def generate_window_thumbnail(
     window: Optional[Dict] = None,
     motion_data: Optional[Dict] = None,
     outputs: Optional[Dict] = None,
-    size: Tuple[int, int] = (512, 512)
+    size: Tuple[int, int] = (512, 512),
+    emotion_label_pred: Optional[str] = None,  # NEW: Predicted emotion label
+    emotion_label_target: Optional[str] = None,  # NEW: Target emotion label
+    config: Optional[object] = None  # NEW: Config to check use_gt_theta
 ) -> np.ndarray:
     """
     Generate thumbnail from generated and target frames with identity reference and EMO comparison.
@@ -1122,6 +1135,11 @@ def generate_window_thumbnail(
 
     # Use 4-panel if EMO frame is available, otherwise 3-panel
     if selected_emo is not None:
+        # Determine if theta is ground truth (hide SRT predictions)
+        use_gt_theta = False
+        if config is not None and hasattr(config, 'train') and hasattr(config.train, 'use_gt_theta'):
+            use_gt_theta = config.train.use_gt_theta
+
         # Create 4-panel thumbnail: Identity | Target | EMO | VASA
         thumbnail, emo_vasa_loss = create_four_panel_thumbnail(
             identity_frame=selected_identity,
@@ -1129,7 +1147,10 @@ def generate_window_thumbnail(
             emo_frame=selected_emo,
             vasa_frame=selected_generated,
             motion_params=random_motion_params,
-            size=(1024, 256)  # Wider for 4 panels
+            size=(1024, 256),  # Wider for 4 panels
+            emotion_label_pred=emotion_label_pred,
+            emotion_label_target=emotion_label_target,
+            use_gt_theta=use_gt_theta
         )
 
         # Log EMO-VASA loss if available

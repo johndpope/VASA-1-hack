@@ -826,23 +826,23 @@ class VASAInference:
                 motion_sequence['translation'] = temporal_smooth(motion_sequence['translation'], kernel_size=5, sigma=1.5)
                 # Note: NOT smoothing expression_embed to preserve perfect expression dynamics
 
-                # EXPRESSION STABILITY FIX: Clamp expressions to nearest valid expression in database
-                if self.expression_db is not None:
-                    logger.info("🔒 Clamping expressions to nearest valid expressions in database...")
-                    original_expr = motion_sequence['expression_embed'].clone()
+                # EXPRESSION STABILITY FIX: DISABLED - Clamp expressions to nearest valid expression in database
+                # if self.expression_db is not None:
+                #     logger.info("🔒 Clamping expressions to nearest valid expressions in database...")
+                #     original_expr = motion_sequence['expression_embed'].clone()
 
-                    # Clamp to nearest valid expression from database
-                    motion_sequence['expression_embed'] = self.expression_db.get_closest(
-                        motion_sequence['expression_embed']  # [B, T, 128]
-                    )
+                #     # Clamp to nearest valid expression from database
+                #     motion_sequence['expression_embed'] = self.expression_db.get_closest(
+                #         motion_sequence['expression_embed']  # [B, T, 128]
+                #     )
 
-                    # Log how much clamping changed expressions
-                    expr_change = (motion_sequence['expression_embed'] - original_expr).abs().mean().item()
-                    logger.info(f"  Expression change from clamping: {expr_change:.6f}")
-                    if expr_change < 0.001:
-                        logger.info("  ✅ Expressions were already close to valid embeddings")
-                    else:
-                        logger.info(f"  📌 Expressions clamped to valid embeddings (avg change: {expr_change:.6f})")
+                #     # Log how much clamping changed expressions
+                #     expr_change = (motion_sequence['expression_embed'] - original_expr).abs().mean().item()
+                #     logger.info(f"  Expression change from clamping: {expr_change:.6f}")
+                #     if expr_change < 0.001:
+                #         logger.info("  ✅ Expressions were already close to valid embeddings")
+                #     else:
+                #         logger.info(f"  📌 Expressions clamped to valid embeddings (avg change: {expr_change:.6f})")
 
                 logger.info(f"Generated sequence shape: {motion_sequence['expression_embed'].shape}")
                 
@@ -1796,7 +1796,7 @@ if __name__ == "__main__":
                         help='Path to config file (default: overfit_config.yaml)')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='Path to checkpoint file (default: auto-detect from config)')
-    parser.add_argument('--input', type=str, default='./videovideoeI2V8Bd5X9s-scene6_scene1.mp4',
+    parser.add_argument('--input', type=str, default='./junk/videovideoeI2V8Bd5X9s-scene6_scene1.mp4',
                         help='Input video path')
     parser.add_argument('--output', type=str, default=None,
                         help='Output video path (default: auto-generate)')

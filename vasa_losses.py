@@ -3531,7 +3531,12 @@ class VASALossModule:
             'flow_dpo_loss': flow_dpo_loss.item(),
             'regret_w': regret_w.mean().item(),
             'regret_l': regret_l.mean().item(),
-            'regret_diff': regret_diff.mean().item()
+            'regret_diff': regret_diff.mean().item(),
+            # Add velocity prediction stats for visualization
+            'v_theta_norm': v_theta.norm(dim=-1).mean().item(),
+            'v_ref_norm': v_ref.norm(dim=-1).mean().item(),
+            'v_gt_norm': velocity_gt.norm(dim=-1).mean().item(),
+            'v_dispref_norm': velocity_dispreferred.norm(dim=-1).mean().item()
         }
 
         return flow_dpo_loss, metrics

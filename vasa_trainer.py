@@ -1610,7 +1610,7 @@ class VASATrainer:
                             # Log visualizations before cleanup (every 5 batches)
                             if batch_idx % 5 == 0 and window_idx == 0:  # Only log first window
                                 if 'outputs' in locals():
-                                    self._log_visualizations(outputs, motion_data, self.global_step)
+                                    self._log_visualizations(outputs, motion_data, self.global_step, metrics)
                                     # Gradient stats disabled for performance
                                     # self._log_gradient_stats(self.global_step)
                             
@@ -1842,13 +1842,29 @@ class VASATrainer:
                                     else:
                                         logger.debug(f"No EMO frame available - will use 3-panel thumbnail")
 
+                                    # Extract emotion labels if available
+                                    emotion_label_target = None
+                                    emotion_label_pred = None
+                                    if 'emotion_label' in window and window['emotion_label'] is not None:
+                                        # emotion_label is a list of strings for each frame
+                                        if isinstance(window['emotion_label'], list) and len(window['emotion_label']) > frame_idx:
+                                            emotion_label_target = window['emotion_label'][frame_idx]
+                                        elif isinstance(window['emotion_label'], str):
+                                            emotion_label_target = window['emotion_label']
+
+                                    # TODO: Add predicted emotion label when model outputs it
+                                    # For now, emotion_label_pred remains None
+
                                     thumbnail = generate_window_thumbnail(
                                         generated_frames=single_frame_generated,  # VASA generated frame
                                         target_frames=single_frame_target,        # Ground truth frame
                                         identity_frame=identity_for_thumbnail,    # Identity/source frame
                                         emo_generated_frames=emo_frames_for_thumbnail,  # EMO generated frame (4-panel if available)
                                         motion_outputs=stored_outputs,            # For motion stats overlay
-                                        size=(1024, 256) if emo_frames_for_thumbnail is not None else (768, 256)  # Wider if 4-panel
+                                        size=(1024, 256) if emo_frames_for_thumbnail is not None else (768, 256),  # Wider if 4-panel
+                                        emotion_label_pred=emotion_label_pred,    # Predicted emotion (currently None)
+                                        emotion_label_target=emotion_label_target,  # Ground truth emotion
+                                        config=self.config                         # Config for use_gt_theta flag
                                     )
 
                                     # Log to wandb with more descriptive caption
@@ -3280,7 +3296,7 @@ class VASATrainer:
             logger.error(traceback.format_exc())
             raise
 
-    def _log_visualizations(self, outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], step: int):
+    def _log_visualizations(self, outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], step: int, metrics: Optional[Dict[str, Any]] = None):
         """Log visualizations to WandB for training inspection."""
         if not self.config.wandb.enabled or not self.accelerator.is_local_main_process:
             return
@@ -3373,41 +3389,200 @@ class VASATrainer:
                         wandb.log({"visuals/audio_to_expression": wandb.Image(fig_audio_expr)}, step=step)
                         plt.close(fig_audio_expr)
             
-            # Log motion parameter comparison
+            # Log motion parameter comparison (skip if using ground truth)
+            # When use_gt_theta/scale/rotation/translation are True, there's no prediction to compare
+            use_gt_theta = getattr(self.config.train, 'use_gt_theta', False)
+            use_gt_scale = getattr(self.config.train, 'use_gt_scale', False)
+            use_gt_rotation = getattr(self.config.train, 'use_gt_rotation', False)
+            use_gt_translation = getattr(self.config.train, 'use_gt_translation', False)
+
+            # Map parameters to their GT flags
+            param_gt_flags = {
+                'theta': use_gt_theta,
+                'scale': use_gt_scale,
+                'rotation': use_gt_rotation,
+                'translation': use_gt_translation
+            }
+
             motion_params = ['theta', 'rotation', 'translation', 'scale']
             for param in motion_params:
+                # Skip comparison if this parameter is using ground truth
+                if param_gt_flags.get(param, False):
+                    logger.debug(f"Skipping {param}_comparison visualization (using GT)")
+                    continue
+
                 if param in outputs and param in targets:
                     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-                    
+
                     # Get first frame of first batch item
                     pred_val = outputs[param][0, 0]
                     if isinstance(pred_val, torch.Tensor):
                         pred_val = pred_val.detach().cpu().numpy().flatten()[:10]
                     else:
                         pred_val = np.array(pred_val).flatten()[:10]
-                    
+
                     target_val = targets[param][0, 0]
                     if isinstance(target_val, torch.Tensor):
                         target_val = target_val.detach().cpu().numpy().flatten()[:10]
                     else:
                         target_val = np.array(target_val).flatten()[:10]
-                    
+
                     axes[0].plot(pred_val, 'b-', label='Predicted')
                     axes[0].plot(target_val, 'r--', label='Target')
                     axes[0].set_title(f'{param.capitalize()} Comparison')
                     axes[0].legend()
                     axes[0].grid(True)
-                    
+
                     # Plot difference
                     diff = pred_val - target_val
                     axes[1].bar(range(len(diff)), diff)
                     axes[1].set_title(f'{param.capitalize()} Difference')
                     axes[1].grid(True)
-                    
+
                     plt.tight_layout()
                     wandb.log({f"visuals/{param}_comparison": wandb.Image(fig)}, step=step)
                     plt.close(fig)
-                    
+
+            # Flow-DPO visualizations (only if Flow-DPO is active)
+            lambda_flow_dpo = getattr(self.config.loss, 'lambda_flow_dpo', 0)
+            if lambda_flow_dpo > 0 and metrics:
+                # Check if Flow-DPO metrics exist in metrics dict
+                flow_dpo_metrics = [
+                    'v_theta_norm', 'v_ref_norm', 'v_gt_norm', 'v_dispref_norm',
+                    'regret_w', 'regret_l', 'regret_diff', 'flow_dpo_loss'
+                ]
+
+                has_flow_metrics = any(k in metrics for k in flow_dpo_metrics)
+
+                # Debug: Log what metrics we have
+                logger.debug(f"Flow-DPO viz check: lambda={lambda_flow_dpo}, has_metrics={has_flow_metrics}")
+                if metrics:
+                    flow_keys_present = [k for k in flow_dpo_metrics if k in metrics]
+                    logger.debug(f"  Flow metrics present: {flow_keys_present}")
+
+                if has_flow_metrics:
+                    # Create 2x2 subplot for Flow-DPO visualizations
+                    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+                    # 1. Velocity norms comparison (top-left)
+                    ax = axes[0, 0]
+                    velocity_norms = []
+                    velocity_labels = []
+                    if 'v_gt_norm' in metrics:
+                        velocity_norms.append(metrics['v_gt_norm'])
+                        velocity_labels.append('Ground Truth')
+                    if 'v_dispref_norm' in metrics:
+                        velocity_norms.append(metrics['v_dispref_norm'])
+                        velocity_labels.append('Dispreferred')
+                    if 'v_theta_norm' in metrics:
+                        velocity_norms.append(metrics['v_theta_norm'])
+                        velocity_labels.append('Reward Model')
+                    if 'v_ref_norm' in metrics:
+                        velocity_norms.append(metrics['v_ref_norm'])
+                        velocity_labels.append('Reference Model')
+
+                    x_pos = np.arange(len(velocity_labels))
+                    bars = ax.bar(x_pos, velocity_norms, color=['green', 'red', 'blue', 'orange'])
+                    ax.set_xticks(x_pos)
+                    ax.set_xticklabels(velocity_labels, rotation=15, ha='right')
+                    ax.set_ylabel('Velocity Norm')
+                    ax.set_title('Flow Velocity Magnitudes')
+                    ax.grid(True, alpha=0.3)
+
+                    # 2. Regret values (top-right)
+                    ax = axes[0, 1]
+                    regret_values = []
+                    regret_labels = []
+                    regret_colors = []
+                    if 'regret_w' in metrics:
+                        regret_values.append(metrics['regret_w'])
+                        regret_labels.append('Preferred\n(GT)')
+                        regret_colors.append('green')
+                    if 'regret_l' in metrics:
+                        regret_values.append(metrics['regret_l'])
+                        regret_labels.append('Dispreferred\n(Noisy)')
+                        regret_colors.append('red')
+                    if 'regret_diff' in metrics:
+                        regret_values.append(metrics['regret_diff'])
+                        regret_labels.append('Advantage\n(Diff)')
+                        regret_colors.append('purple')
+
+                    x_pos = np.arange(len(regret_labels))
+                    bars = ax.bar(x_pos, regret_values, color=regret_colors)
+                    ax.set_xticks(x_pos)
+                    ax.set_xticklabels(regret_labels)
+                    ax.set_ylabel('Regret Value')
+                    ax.set_title('Flow-DPO Regret Analysis')
+                    ax.axhline(y=0, color='black', linestyle='--', alpha=0.5)
+                    ax.grid(True, alpha=0.3)
+
+                    # Add value labels on bars
+                    for i, (bar, val) in enumerate(zip(bars, regret_values)):
+                        height = bar.get_height()
+                        ax.text(bar.get_x() + bar.get_width()/2., height,
+                               f'{val:.3f}',
+                               ha='center', va='bottom' if height >= 0 else 'top',
+                               fontsize=9)
+
+                    # 3. Model prediction comparison (bottom-left)
+                    ax = axes[1, 0]
+                    if 'v_theta_norm' in metrics and 'v_ref_norm' in metrics:
+                        models = ['Reward\nModel', 'Reference\nModel']
+                        values = [metrics['v_theta_norm'], metrics['v_ref_norm']]
+                        bars = ax.bar(models, values, color=['blue', 'orange'])
+                        ax.set_ylabel('Velocity Norm')
+                        ax.set_title('Reward vs Reference Model')
+                        ax.grid(True, alpha=0.3)
+
+                        # Show relative difference
+                        diff_pct = 100 * (values[0] - values[1]) / (values[1] + 1e-8)
+                        ax.text(0.5, 0.95, f'Diff: {diff_pct:+.1f}%',
+                               transform=ax.transAxes,
+                               ha='center', va='top',
+                               bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.3))
+
+                    # 4. Preference signal strength (bottom-right)
+                    ax = axes[1, 1]
+                    if 'regret_diff' in metrics and 'flow_dpo_loss' in metrics:
+                        # Show preference margin and corresponding loss
+                        metrics_to_plot = {
+                            'Preference\nMargin': metrics['regret_diff'],
+                            'DPO Loss': metrics['flow_dpo_loss']
+                        }
+
+                        x_pos = np.arange(len(metrics_to_plot))
+                        values = list(metrics_to_plot.values())
+                        bars = ax.bar(x_pos, values, color=['purple', 'darkred'])
+                        ax.set_xticks(x_pos)
+                        ax.set_xticklabels(list(metrics_to_plot.keys()))
+                        ax.set_ylabel('Value')
+                        ax.set_title('Preference Signal Strength')
+                        ax.grid(True, alpha=0.3)
+
+                        # Add interpretation text
+                        margin = metrics['regret_diff']
+                        if margin > 0:
+                            interpretation = "✓ GT preferred"
+                            color = 'green'
+                        elif margin < 0:
+                            interpretation = "✗ Noisy preferred (BAD)"
+                            color = 'red'
+                        else:
+                            interpretation = "= No preference"
+                            color = 'gray'
+
+                        ax.text(0.5, 0.95, interpretation,
+                               transform=ax.transAxes,
+                               ha='center', va='top',
+                               fontsize=10, fontweight='bold',
+                               bbox=dict(boxstyle='round,pad=0.5', facecolor=color, alpha=0.3))
+
+                    plt.tight_layout()
+                    wandb.log({"visuals/flow_dpo_analysis": wandb.Image(fig)}, step=step)
+                    plt.close(fig)
+
+                    logger.debug("Generated Flow-DPO visualization")
+
         except Exception as e:
             logger.warning(f"Error in visualization logging: {str(e)}")
 
