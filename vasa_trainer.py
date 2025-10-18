@@ -3028,13 +3028,26 @@ class VASATrainer:
                 'train/speed_accuracy': metrics.get('speed_accuracy', 0.0)
             })
 
+        # Add Flow-DPO metrics if available
+        if 'metric_flow_dpo_loss' in metrics:
+            step_metrics.update({
+                'train/flow_dpo_loss': metrics['metric_flow_dpo_loss'],
+                'train/flow_dpo_regret_w': metrics.get('metric_regret_w', 0.0),
+                'train/flow_dpo_regret_l': metrics.get('metric_regret_l', 0.0),
+                'train/flow_dpo_regret_diff': metrics.get('metric_regret_diff', 0.0),
+                'train/flow_dpo_v_theta_norm': metrics.get('metric_v_theta_norm', 0.0),
+                'train/flow_dpo_v_ref_norm': metrics.get('metric_v_ref_norm', 0.0),
+                'train/flow_dpo_v_gt_norm': metrics.get('metric_v_gt_norm', 0.0),
+                'train/flow_dpo_v_dispref_norm': metrics.get('metric_v_dispref_norm', 0.0),
+            })
+
         # Log to wandb using accelerator
         logger.debug("Logging metrics to wandb:")
         for k, v in step_metrics.items():
             if isinstance(v, torch.Tensor):
                 v = v.item()
             logger.debug(f"  {k}: {v:.6f}")
-        
+
         wandb.log(step_metrics, step=self.global_step)
 
 

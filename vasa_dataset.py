@@ -2749,7 +2749,18 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         cached_data['velocity_dispreferred'] = self._compute_velocity(motion_dispreferred)
                         cached_data['theta_dispreferred'] = motion_dispreferred['theta']
                         cached_data['expression_dispreferred'] = motion_dispreferred['expression_embed']
-                        logger.debug(f"Computed Flow-DPO velocities for cached window {idx}")
+                        logger.info(f"✅ Computed Flow-DPO velocities for cached window {idx}: velocity_gt={cached_data['velocity_gt'].shape}, velocity_dispreferred={cached_data['velocity_dispreferred'].shape}")
+                    else:
+                        # Log status if already cached
+                        if 'velocity_gt' in cached_data:
+                            logger.info(f"✅ Flow-DPO velocities already in cache for window {idx}")
+                        else:
+                            logger.warning(f"⚠️  Cannot compute Flow-DPO velocities for window {idx}: theta={'theta' in cached_data}, expression_embed={'expression_embed' in cached_data}")
+
+                    # ASSERT: Verify velocity fields are present before returning
+                    assert 'velocity_gt' in cached_data, f"ASSERTION FAILED: velocity_gt missing from cached_data for window {idx}"
+                    assert 'velocity_dispreferred' in cached_data, f"ASSERTION FAILED: velocity_dispreferred missing from cached_data for window {idx}"
+                    logger.info(f"🔍 DATASET ASSERTION PASSED: velocity_gt and velocity_dispreferred present in window {idx}")
 
                     return cached_data
             elif self.cache_type == 'chunked':
@@ -2796,7 +2807,12 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         cached_data['velocity_dispreferred'] = self._compute_velocity(motion_dispreferred)
                         cached_data['theta_dispreferred'] = motion_dispreferred['theta']
                         cached_data['expression_dispreferred'] = motion_dispreferred['expression_embed']
-                        logger.debug(f"Computed Flow-DPO velocities for cached window {window['window_idx']}")
+                        logger.info(f"✅ Computed Flow-DPO velocities for chunked window {window['window_idx']}")
+                    else:
+                        if 'velocity_gt' in cached_data:
+                            logger.info(f"✅ Flow-DPO velocities already in chunked cache for window {window['window_idx']}")
+                        else:
+                            logger.warning(f"⚠️  Cannot compute Flow-DPO velocities for chunked window {window['window_idx']}")
 
                     return cached_data
             else:

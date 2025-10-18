@@ -345,6 +345,11 @@ def create_window_sequence_collate_fn(context_size: int = 10):
         # Log final batched keys for debugging
         logger.info(f"📦 Final batched keys: {sorted(batched.keys())}")
 
+        # ASSERT: Verify Flow-DPO velocity fields are present in batched output
+        assert 'velocity_gt' in batched, f"ASSERTION FAILED: velocity_gt missing from batched output. Available keys: {sorted(batched.keys())}"
+        assert 'velocity_dispreferred' in batched, f"ASSERTION FAILED: velocity_dispreferred missing from batched output. Available keys: {sorted(batched.keys())}"
+        logger.info(f"🔍 COLLATE ASSERTION PASSED: velocity_gt shape={batched['velocity_gt'].shape}, velocity_dispreferred shape={batched['velocity_dispreferred'].shape}")
+
         return batched
     
     return collate_fn

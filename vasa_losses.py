@@ -234,10 +234,7 @@ class VASALossModule:
         self.flow_dpo_start_epoch = getattr(config.loss, 'flow_dpo_start_epoch', 20)
         self.flow_beta_scale = getattr(config.loss, 'flow_beta_scale', 1.0)
 
-        # L1 regularization for UV warps to prevent collapse
-        self.lambda_warp_l1 = getattr(config.loss, 'lambda_warp_l1', 0.1)
-        self.lambda_warp_tv = getattr(config.loss, 'lambda_warp_tv', 0.05)  # Total variation regularization
-        self.lambda_warp_magnitude = getattr(config.loss, 'lambda_warp_magnitude', 5.0)  # UV warp magnitude matching
+
 
         # Check if using derived warps (disable warp loss if true)
         self.use_derived_warps = getattr(config.model, 'use_derived_warps', False)
@@ -1083,6 +1080,12 @@ class VASALossModule:
 
             # 10. Flow-DPO Loss (VideoReward framework - Liu et al., 2025)
             flow_dpo_term = torch.tensor(0.0, device=device)
+
+            # ASSERT: Log what keys are actually in targets for debugging
+            logger.info(f"🔍 LOSS FUNCTION - Checking targets keys: {sorted(targets.keys())}")
+            logger.info(f"🔍 LOSS FUNCTION - velocity_gt in targets: {'velocity_gt' in targets}")
+            logger.info(f"🔍 LOSS FUNCTION - velocity_dispreferred in targets: {'velocity_dispreferred' in targets}")
+
             if self.lambda_flow_dpo > 0 and 'velocity_gt' in targets and 'velocity_dispreferred' in targets:
                 # Check if model has Flow-DPO components
                 model = getattr(self, 'model', None)
@@ -1123,7 +1126,7 @@ class VASALossModule:
                 if self.lambda_flow_dpo == 0:
                     logger.debug("  Flow-DPO disabled (lambda_flow_dpo=0)")
                 else:
-                    logger.debug("  Flow-DPO skipped: missing velocity_gt or velocity_dispreferred in targets")
+                    logger.error("  Flow-DPO skipped: missing velocity_gt or velocity_dispreferred in targets")
 
             total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + warp_term + diversity_term + perceptual_term + mouth_perceptual_term + audio_lip_term + audio_expr_term + flow_dpo_term
             losses['total'] = total_loss

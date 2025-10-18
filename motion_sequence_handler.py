@@ -172,6 +172,16 @@ class MotionSequenceHandler:
         if 'mfcc' in window:
             motion_data['mfcc'] = window['mfcc']
 
+        # Include Flow-DPO velocity fields for preference-based alignment
+        if 'velocity_gt' in window:
+            motion_data['velocity_gt'] = window['velocity_gt']  # [B, T, flow_dim] - ground truth velocity
+        if 'velocity_dispreferred' in window:
+            motion_data['velocity_dispreferred'] = window['velocity_dispreferred']  # [B, T, flow_dim] - dispreferred velocity
+        if 'theta_dispreferred' in window:
+            motion_data['theta_dispreferred'] = window['theta_dispreferred']  # [B, T, 3, 4] - dispreferred theta
+        if 'expression_dispreferred' in window:
+            motion_data['expression_dispreferred'] = window['expression_dispreferred']  # [B, T, 128] - dispreferred expression
+
         return motion_data  
 
     def merge_windows(self, windows, total_frames, device):

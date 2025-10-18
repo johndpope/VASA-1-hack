@@ -224,13 +224,11 @@ loss:
 
   # Expression-specific losses (CRITICAL FOR PREVENTING COLLAPSE)
   lambda_expression_l1: 0.0   # DISABLED - conflicts with L2, too weak (was 0.1)
-  lambda_expression_variance: 10.0  # INCREASED to force variance matching (was 5.0)
-  lambda_expression_temporal: 5.0  # INCREASED to force temporal variation (was 2.0)
-  lambda_audio_expr_coupling: 3.0  # INCREASED to tie expression to audio changes (was 2.0)
+  lambda_expression_variance: 0.1 # INCREASED to force variance matching (was 5.0)
+  lambda_expression_temporal: 0.1  # INCREASED to force temporal variation (was 2.0)
+  lambda_audio_expr_coupling: 0.1  # INCREASED to tie expression to audio changes (was 2.0)
 
-  # Warp regularization (CLEANED UP - removed conflicts)
-  lambda_warp_l1: 0.0         # DISABLED - conflicts with magnitude loss (was 0.1)
-  lambda_warp_tv: 0.05        # REDUCED from 0.1 - spatial smoothness only (removed redundant warp_smooth)
+
 
   # EMO (Volumetric Avatar) Matching Loss - ensures VASA matches high-quality EMO output
   use_emo_matching: false             # DISABLED - EMO keyframes are static, causing expression collapse
