@@ -537,7 +537,7 @@ def recover_disk_cache_from_h5(cache_dir: Path, cache_frames: bool = True,
 
 def main():
     parser = argparse.ArgumentParser(description='Preprocess windows for single-bucket cache')
-    parser.add_argument('--video_folder', type=str, default='junk2',
+    parser.add_argument('--video_folder', type=str, default='s1',
                         help='Path to video folder')
     parser.add_argument('--cache_dir', type=str, default='cache_single_bucket',
                         help='Cache directory')

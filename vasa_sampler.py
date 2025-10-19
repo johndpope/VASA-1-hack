@@ -291,13 +291,11 @@ def create_window_sequence_collate_fn(context_size: int = 10):
             'lip_motion', 'blink_state',
             'prev_theta', 'prev_rotation', 'prev_translation',
             'prev_expression', 'prev_audio',
-            # REQUIRED warping fields for MotionTransformer
+            # REQUIRED warping fields for MotionTransformerg
             'xy_warps', 'rigid_warps', 'uv_warps', 'source_theta_warp',
             # EMO (Volumetric Avatar) generated frames for comparison
             'emo_frames', 'emo_keyframe_indices',
-            # Flow-DPO velocity fields for preference-based alignment (VideoReward)
-            'velocity_gt', 'velocity_dispreferred',
-            'theta_dispreferred', 'expression_dispreferred'
+
         ]
 
         for key in keys_to_stack:
@@ -345,10 +343,9 @@ def create_window_sequence_collate_fn(context_size: int = 10):
         # Log final batched keys for debugging
         logger.info(f"📦 Final batched keys: {sorted(batched.keys())}")
 
-        # ASSERT: Verify Flow-DPO velocity fields are present in batched output
-        assert 'velocity_gt' in batched, f"ASSERTION FAILED: velocity_gt missing from batched output. Available keys: {sorted(batched.keys())}"
-        assert 'velocity_dispreferred' in batched, f"ASSERTION FAILED: velocity_dispreferred missing from batched output. Available keys: {sorted(batched.keys())}"
-        logger.info(f"🔍 COLLATE ASSERTION PASSED: velocity_gt shape={batched['velocity_gt'].shape}, velocity_dispreferred shape={batched['velocity_dispreferred'].shape}")
+        # FLOW-DPO REMOVED: No longer asserting velocity fields presence
+        # assert 'velocity_gt' in batched
+        # assert 'velocity_dispreferred' in batched
 
         return batched
     

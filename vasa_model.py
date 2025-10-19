@@ -166,9 +166,16 @@ class TalkVidAudioProjection(nn.Module):
             meanpooled_latents = meanpooled_latents.view(meanpooled_latents.size(0), -1, latents.size(-1))
             latents = torch.cat((meanpooled_latents, latents), dim=-2)
 
-        for attn, ff in self.layers:
+        # Cross-layer skip connections for better gradient flow in deep perceiver
+        block_residual = latents  # Save input to first block
+        for idx, (attn, ff) in enumerate(self.layers):
             latents = attn(x, latents) + latents
             latents = ff(latents) + latents
+
+            # Add block-level residual every 2 layers for stability
+            if (idx + 1) % 2 == 0:
+                latents = latents + block_residual  # Cross-layer skip connection
+                block_residual = latents  # Update residual for next block
 
         latents = self.proj_out(latents)
         return self.norm_out(latents)
@@ -926,7 +933,12 @@ class MotionTransformer(nn.Module):
         # Audio cross-attention: explicit causal mask prevents future audio leakage
         # Result: frame t can ONLY see motion AND audio from frames 0..t-1
         out = tgt
-        for layer in self.decoder_layers:
+
+        # Cross-layer skip connections: Add block-level residuals every 2 layers
+        # This improves gradient flow in deep transformers (8 layers)
+        # Prevents vanishing gradients in later layers common in audio-conditioned sequence generation
+        block_residual = out  # Save input to first block
+        for idx, layer in enumerate(self.decoder_layers):
             # Pass cached audio_memory (not recomputed)
             out = layer(
                 out,
@@ -934,6 +946,11 @@ class MotionTransformer(nn.Module):
                 audio_memory=audio_memory,  # Cached - no recomputation
                 is_causal=True  # Enables causal masking for both self-attn and audio cross-attn
             )
+
+            # Add block-level residual every 2 layers (indices 1, 3, 5, 7 for 8 layers)
+            if (idx + 1) % 2 == 0:
+                out = out + block_residual  # Cross-layer skip connection
+                block_residual = out  # Update residual for next block
 
         out = self.decoder_norm(out)
 

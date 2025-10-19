@@ -643,8 +643,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         self.audio_cache_dir.mkdir(exist_ok=True)
         logger.info(f"Using audio cache directory: {self.audio_cache_dir}")
         
-        # Get all videos
-        all_videos = [str(f) for f in self.video_folder.rglob("*.mp4")]
+        self.video_folder = Path(self.video_folder)  # Ensure it's a Path object
+        all_videos = [str(f) for ext in ("*.mp4", "*.mpg") for f in self.video_folder.rglob(ext)]
         logger.info(f"Found {len(all_videos)} total videos")
         
         # Sample videos if needed
@@ -1069,8 +1069,9 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             fps = cap.get(cv2.CAP_PROP_FPS)
             cap.release()
 
-            # Minimum frames needed for window + context
-            min_frames = self.window_size + self.context_size + self.stride  # 50 + 10 + 25 = 85
+            # Minimum frames needed for 2 windows (window_size + stride)
+            # Example: window_size=50, stride=25 -> window1=[0-49], window2=[25-74] -> need 75 frames
+            min_frames = self.window_size + self.stride  # 50 + 25 = 75
             
             logger.debug(f"\nVideo length check for {video_path}:")
             logger.debug(f"  Total frames: {total_frames}")
@@ -2735,32 +2736,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         cached_data['emotion_label'] = ['neutral'] * seq_len
                         logger.debug(f"Added default emotion_label for window {idx} (length: {seq_len})")
 
-                    # Flow-DPO: Compute velocities if not in cache (for old caches)
-                    if 'velocity_gt' not in cached_data and 'theta' in cached_data and 'expression_embed' in cached_data:
-                        motion_gt = {
-                            'theta': cached_data['theta'],
-                            'expression_embed': cached_data['expression_embed']
-                        }
-                        cached_data['velocity_gt'] = self._compute_velocity(motion_gt)
-
-                        # Generate dispreferred motion
-                        noise_level = getattr(self, 'flow_noise_level', 0.1)
-                        motion_dispreferred = self._generate_dispreferred_motion(motion_gt, noise_level)
-                        cached_data['velocity_dispreferred'] = self._compute_velocity(motion_dispreferred)
-                        cached_data['theta_dispreferred'] = motion_dispreferred['theta']
-                        cached_data['expression_dispreferred'] = motion_dispreferred['expression_embed']
-                        logger.info(f"✅ Computed Flow-DPO velocities for cached window {idx}: velocity_gt={cached_data['velocity_gt'].shape}, velocity_dispreferred={cached_data['velocity_dispreferred'].shape}")
-                    else:
-                        # Log status if already cached
-                        if 'velocity_gt' in cached_data:
-                            logger.info(f"✅ Flow-DPO velocities already in cache for window {idx}")
-                        else:
-                            logger.warning(f"⚠️  Cannot compute Flow-DPO velocities for window {idx}: theta={'theta' in cached_data}, expression_embed={'expression_embed' in cached_data}")
-
-                    # ASSERT: Verify velocity fields are present before returning
-                    assert 'velocity_gt' in cached_data, f"ASSERTION FAILED: velocity_gt missing from cached_data for window {idx}"
-                    assert 'velocity_dispreferred' in cached_data, f"ASSERTION FAILED: velocity_dispreferred missing from cached_data for window {idx}"
-                    logger.info(f"🔍 DATASET ASSERTION PASSED: velocity_gt and velocity_dispreferred present in window {idx}")
+                   
 
                     return cached_data
             elif self.cache_type == 'chunked':
@@ -2793,27 +2769,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         cached_data['emotion_label'] = ['neutral'] * seq_len
                         logger.debug(f"Added default emotion_label for window {window['window_idx']} (length: {seq_len})")
 
-                    # Flow-DPO: Compute velocities if not in cache (for old caches)
-                    if 'velocity_gt' not in cached_data and 'theta' in cached_data and 'expression_embed' in cached_data:
-                        motion_gt = {
-                            'theta': cached_data['theta'],
-                            'expression_embed': cached_data['expression_embed']
-                        }
-                        cached_data['velocity_gt'] = self._compute_velocity(motion_gt)
-
-                        # Generate dispreferred motion
-                        noise_level = getattr(self, 'flow_noise_level', 0.1)
-                        motion_dispreferred = self._generate_dispreferred_motion(motion_gt, noise_level)
-                        cached_data['velocity_dispreferred'] = self._compute_velocity(motion_dispreferred)
-                        cached_data['theta_dispreferred'] = motion_dispreferred['theta']
-                        cached_data['expression_dispreferred'] = motion_dispreferred['expression_embed']
-                        logger.info(f"✅ Computed Flow-DPO velocities for chunked window {window['window_idx']}")
-                    else:
-                        if 'velocity_gt' in cached_data:
-                            logger.info(f"✅ Flow-DPO velocities already in chunked cache for window {window['window_idx']}")
-                        else:
-                            logger.warning(f"⚠️  Cannot compute Flow-DPO velocities for chunked window {window['window_idx']}")
-
+                   
                     return cached_data
             else:
                 # For built-in cache
@@ -2843,22 +2799,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         cached_data['emotion_label'] = ['neutral'] * seq_len
                         logger.debug(f"Added default emotion_label for window {window['window_idx']} (length: {seq_len})")
 
-                    # Flow-DPO: Compute velocities if not in cache (for old caches)
-                    if 'velocity_gt' not in cached_data and 'theta' in cached_data and 'expression_embed' in cached_data:
-                        motion_gt = {
-                            'theta': cached_data['theta'],
-                            'expression_embed': cached_data['expression_embed']
-                        }
-                        cached_data['velocity_gt'] = self._compute_velocity(motion_gt)
-
-                        # Generate dispreferred motion
-                        noise_level = getattr(self, 'flow_noise_level', 0.1)
-                        motion_dispreferred = self._generate_dispreferred_motion(motion_gt, noise_level)
-                        cached_data['velocity_dispreferred'] = self._compute_velocity(motion_dispreferred)
-                        cached_data['theta_dispreferred'] = motion_dispreferred['theta']
-                        cached_data['expression_dispreferred'] = motion_dispreferred['expression_embed']
-                        logger.debug(f"Computed Flow-DPO velocities for cached window {window['window_idx']}")
-
+                   
                     return cached_data
 
             # Process the single window
@@ -3044,24 +2985,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         }
                     }
 
-                    # Flow-DPO: Compute velocity flows for preferred (ground-truth) motion
-                    motion_gt = {
-                        'theta': theta_gt,
-                        'expression_embed': expression_gt
-                    }
-                    velocity_gt = self._compute_velocity(motion_gt)  # [T, 140]
-                    window_data['velocity_gt'] = velocity_gt
-
-                    # Flow-DPO: Generate dispreferred motion by adding noise
-                    noise_level = getattr(self, 'flow_noise_level', 0.1)  # Default 10% noise
-                    motion_dispreferred = self._generate_dispreferred_motion(motion_gt, noise_level)
-                    velocity_dispreferred = self._compute_velocity(motion_dispreferred)  # [T, 140]
-                    window_data['velocity_dispreferred'] = velocity_dispreferred
-
-                    # Store dispreferred motion parameters for later use in loss computation
-                    window_data['theta_dispreferred'] = motion_dispreferred['theta']
-                    window_data['expression_dispreferred'] = motion_dispreferred['expression_embed']
-
+                   
                     # Verify shapes
                     expected_shapes = {
                         'lips': (self.sequence_length, 20, 3),
