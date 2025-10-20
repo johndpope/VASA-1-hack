@@ -184,16 +184,16 @@ loss:
 
   # Progressive losses (unlock based on thresholds)
   # Stage 2: Blinking (unlocks at epoch 5 if reconstruction < 0.1)
-  lambda_blink: 0.1           # Will ramp to 2.0
+  lambda_blink: 2           # Will ramp to 2.0
 
   # Stage 3: Eye Gaze (unlocks at epoch 15 if blink < 0.15)
-  lambda_gaze_direction: 0.1  # DISABLED until TDD converges (was 0.1)
+  lambda_gaze_direction: 2  # DISABLED until TDD converges (was 0.1)
 
   # Stage 4: Head Pose (unlocks at epoch 25 if gaze < 0.2)
   lambda_head_distance: 0.0   # DISABLED until TDD converges (was 0.1)
 
   # Stage 5: Emotion (unlocks at epoch 35 if head pose < 0.25)
-  lambda_emotion: 0.0        # DISABLED until TDD converges
+  lambda_emotion: 2.0        # DISABLED until TDD converges
 
   # Stage 6: Lip Sync (unlocks at epoch 45 if emotion < 0.3)
   lambda_lips: 2.0              # DISABLED to test mouth_perceptual in isolation
@@ -203,7 +203,7 @@ loss:
   lambda_nonlip: 1.0          # DISABLED until TDD converges (was 0.1)
   lambda_speed: 0.0           # DISABLED until TDD converges (was 0.1)
   lambda_control: 1.0         # DISABLED until TDD converges - focus on theta+expression first
-  lambda_lip: 0.0
+
   lambda_cfg: 0.5
   lambda_perceptual: 1      # Increased perceptual loss for better quality
   lambda_mouth_perceptual: 100  # Mouth-focused LPIPS loss (TalkVid style) - 100x weight on mouth region
@@ -304,7 +304,7 @@ dataset:
   preextract_audio: true
   cache_audio: true
   hop_length: 10
-  max_videos: 1000              # REDUCED from 1000 to 50 - use only the best quality videos
+  max_videos: 10              # REDUCED from 1000 to 50 - use only the best quality videos
   max_sequence_samples: 1000 # Maximum samples per epoch
   use_identity_image: true    # UNSTABLE - Use high-quality identity image instead of video frame
   identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image
