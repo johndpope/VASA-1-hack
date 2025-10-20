@@ -121,7 +121,7 @@ def main():
             logger.info("Single-bucket cache not found. Consider running preprocess_single_bucket.py first.")
         else:
             cache_info = train_dataset.cache.get_cache_info()
-            logger.info(f"Using single-bucket cache: {cache_info['num_windows']} windows, {cache_info['file_size_mb']:.1f} MB")
+            # logger.info(f"Using single-bucket cache: windows, {cache_info['file_size_mb']:.1f} MB")
     
     # Debug: Check what windows are available
     logger.info(f"Dataset has {len(train_dataset.windows)} windows")

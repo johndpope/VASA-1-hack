@@ -392,13 +392,22 @@ logging:
 
   # Validation
   validation:
-    enabled: false            # Set to false to disable validation completely
-    frequency: 10            # Validate every N epochs (was 5, now 10 for less overhead)
+    enabled: true             # Enable validation to track lip-sync metrics
+    frequency: 5              # Validate every 5 epochs
     num_samples: 4           # Fewer samples for speed (was 10, now 4)
     max_batches: 2           # Process at most N batches during validation (new)
-    metrics: ["reconstruction_loss"]  # Only compute essential metrics
+    metrics: ["reconstruction_loss", "lip_sync", "mel_spectrogram_sync", "audio_projection", "temporal_alignment"]
     # Full metric list (enable when needed): ["lip_sync", "id_similarity", "motion_naturalness", "reconstruction_loss"]
     skip_expensive_metrics: true  # Skip compute-heavy metrics like id_similarity
+
+    # Lip-sync specific validation settings
+    lipsync:
+      compute_mel_correlation: true    # Compute mel spectrogram correlation with lip motion
+      compute_audio_projection: true   # Measure audio-to-visual projection quality
+      compute_temporal_alignment: true # Detect sync lag using cross-correlation
+      mel_spec_n_mels: 128             # Number of mel frequency bins
+      mel_spec_n_fft: 1024             # FFT window size
+      temporal_lag_frames: 5           # Check +/- N frames for temporal alignment
 
 # Distributed training
 distributed:

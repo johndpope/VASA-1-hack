@@ -63,6 +63,15 @@ except ImportError:
     FrameDiskCache = None
     USE_FRAME_DISK_CACHE = False
     logger.info("FrameDiskCache not available")
+
+try:
+    from per_video_cache import PerVideoCache
+    USE_PER_VIDEO_CACHE = True
+    logger.info("PerVideoCache available for per-video H5 files")
+except ImportError:
+    PerVideoCache = None
+    USE_PER_VIDEO_CACHE = False
+    logger.info("PerVideoCache not available")
 from torchvision.utils import save_image
 from datetime import datetime
 import hashlib
@@ -606,7 +615,21 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             logger.info(f"✅ EMO frame disk cache enabled for loading at {self.emo_frame_cache.root}")
 
         # Choose cache implementation based on preference
-        if use_single_bucket and USE_SINGLE_BUCKET and SingleBucketCache:
+        # Priority: PerVideoCache > SingleBucketCache > ChunkedCache > Built-in
+        per_video_index = self.cache_dir / 'cache_index.json'
+        single_bucket_h5 = self.cache_dir / 'all_windows_cache.h5'
+
+        if per_video_index.exists() and USE_PER_VIDEO_CACHE and PerVideoCache:
+            # Use per-video cache (MD5-indexed folders with separate H5 files)
+            self.cache = PerVideoCache(
+                cache_dir=self.cache_dir,
+                compression='gzip',
+                compression_level=4
+            )
+            self.cache_type = 'per_video'
+            logger.info(f"✅ Using PerVideoCache at {self.cache_dir}")
+            logger.info(f"   Per-video H5 files with MD5-indexed folders")
+        elif single_bucket_h5.exists() and use_single_bucket and USE_SINGLE_BUCKET and SingleBucketCache:
             # Use single-bucket cache for all windows
             self.cache = SingleBucketCache(
                 cache_dir=self.cache_dir,
@@ -2655,7 +2678,40 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             # logger.debug(f"Processing window {idx} from video: {video_path}")
             
             # Check if we have cached data for this specific window
-            if self.cache_type == 'single_bucket':
+            if self.cache_type == 'per_video':
+                # For per-video cache, load by video path and window index
+                cached_data = self.cache.load_window(
+                    video_path=video_path,
+                    window_idx=window['window_idx'],
+                    load_frames=True  # Load frames from disk
+                )
+                if cached_data is not None:
+                    logger.info(f"👽 Getting cached window {window['window_idx']} from per-video cache for {Path(video_path).name}")
+                    # Ensure metadata contains required fields from the window
+                    if 'metadata' not in cached_data:
+                        cached_data['metadata'] = {}
+                    cached_data['metadata'].update({
+                        'video_path': str(video_path),
+                        'start_frame': window['start_frame'],
+                        'window_idx': window['window_idx'],
+                        'fps': window.get('fps', 30),
+                        'has_context': window.get('has_context', False)
+                    })
+
+                    # Ensure emotion_label exists (add default if missing from old cache)
+                    if 'emotion_label' not in cached_data:
+                        # Get sequence length from any tensor in the data
+                        seq_len = 50  # default
+                        for key in ['theta', 'expression_embed', 'emotion']:
+                            if key in cached_data and isinstance(cached_data[key], torch.Tensor):
+                                seq_len = cached_data[key].shape[0]
+                                break
+                        # Create default neutral labels for all frames
+                        cached_data['emotion_label'] = ['neutral'] * seq_len
+                        logger.debug(f"Added default emotion_label for window {window['window_idx']} (length: {seq_len})")
+
+                    return cached_data
+            elif self.cache_type == 'single_bucket':
                 # For single-bucket cache, load by index directly
                 cached_data = self.cache.load_window(idx)
                 if cached_data is not None:

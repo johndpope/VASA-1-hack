@@ -343,7 +343,7 @@ paths:
   volumetric_config: "nemo/models/stage_1/volumetric_avatar/va.yaml"
   data_dir: "data"
   video_folder: "s1"
-  cache_dir: "cache_single_bucket"
+  cache_dir: "cache_per_video"  # Using per-video cache structure
 
 # Hardware/environment settings
 device: "cuda"
@@ -392,8 +392,8 @@ logging:
 
   # Validation
   validation:
-    enabled: false            # Set to false to disable validation completely
-    frequency: 10            # Validate every N epochs (was 5, now 10 for less overhead)
+    enabled: true             # Enable validation to track lip-sync metrics
+    frequency: 5              # Validate every 5 epochs
     num_samples: 4           # Fewer samples for speed (was 10, now 4)
     max_batches: 2           # Process at most N batches during validation (new)
     metrics: ["reconstruction_loss", "lip_sync", "mel_spectrogram_sync", "audio_projection", "temporal_alignment"]
