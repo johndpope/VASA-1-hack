@@ -89,7 +89,7 @@ train:
   # To increase GPU utilization:
   # - Increase batch_size (e.g., from 28 to 56)
   # - This processes more windows per step but maintains temporal continuity
-  batch_size: 16               # Batch size for training
+  batch_size: 16              # Batch size for training
 
   windows_per_batch: 2          # Reduced from 14 to 4 for better sequence diversity
   gradient_accumulation_steps: 4  # Increase effective batch size to break plateau
@@ -187,26 +187,26 @@ loss:
 
   # Progressive losses (unlock based on thresholds)
   # Stage 2: Blinking (unlocks at epoch 5 if reconstruction < 0.1)
-  lambda_blink: 0.1           # Will ramp to 2.0
+  lambda_blink: 2           # Will ramp to 2.0
 
   # Stage 3: Eye Gaze (unlocks at epoch 15 if blink < 0.15)
-  lambda_gaze_direction: 0.0  # DISABLED until TDD converges (was 0.1)
+  lambda_gaze_direction: 2  # DISABLED until TDD converges (was 0.1)
 
   # Stage 4: Head Pose (unlocks at epoch 25 if gaze < 0.2)
   lambda_head_distance: 0.0   # DISABLED until TDD converges (was 0.1)
 
   # Stage 5: Emotion (unlocks at epoch 35 if head pose < 0.25)
-  lambda_emotion: 0.0        # DISABLED until TDD converges
+  lambda_emotion: 2.0        # DISABLED until TDD converges
 
   # Stage 6: Lip Sync (unlocks at epoch 45 if emotion < 0.3)
-  lambda_lips: 0              # DISABLED to test mouth_perceptual in isolation
+  lambda_lips: 2.0              # DISABLED to test mouth_perceptual in isolation
   lambda_sync: 0.5            # REDUCED from 2.0 - Synchformer designed for evaluation, not training gradients
   
   # Other losses
-  lambda_nonlip: 0.0          # DISABLED until TDD converges (was 0.1)
+  lambda_nonlip: 1.0          # DISABLED until TDD converges (was 0.1)
   lambda_speed: 0.0           # DISABLED until TDD converges (was 0.1)
-  lambda_control: 0.0         # DISABLED until TDD converges - focus on theta+expression first
-  lambda_lip: 0.0
+  lambda_control: 1.0         # DISABLED until TDD converges - focus on theta+expression first
+
   lambda_cfg: 0.5
   lambda_perceptual: 1      # Increased perceptual loss for better quality
   lambda_mouth_perceptual: 100  # Mouth-focused LPIPS loss (TalkVid style) - 100x weight on mouth region
@@ -227,7 +227,7 @@ loss:
 
   # Expression-specific losses (CRITICAL FOR PREVENTING COLLAPSE)
   lambda_expression_l1: 0.0   # DISABLED - conflicts with L2, too weak (was 0.1)
-  lambda_expression_variance: 0.1  # INCREASED to force variance matching (was 5.0)
+  lambda_expression_variance: 0.1 # INCREASED to force variance matching (was 5.0)
   lambda_expression_temporal: 0.1  # INCREASED to force temporal variation (was 2.0)
   lambda_audio_expr_coupling: 0.1  # INCREASED to tie expression to audio changes (was 2.0)
 
@@ -274,9 +274,9 @@ loss:
     final_weight: 0.0
 
   # Flow-DPO loss parameters (VideoReward framework - Liu et al., 2025)
-  use_flow_dpo: true   # Enable Flow-DPO loss for preference-based alignment
-  lambda_flow_dpo: 0.5 # Weight for Flow-DPO loss (start at 0.5x sync loss, ramp up)
-  flow_dpo_start_epoch: 20  # When to start using Flow-DPO (after dynamics stage)
+  use_flow_dpo: false   # DISABLED - Flow-DPO removed from codebase
+  lambda_flow_dpo: 0.0 # DISABLED - Flow-DPO removed from codebase
+  flow_dpo_start_epoch: 0  # When to start using Flow-DPO (after dynamics stage)
   flow_dim: 140        # Dimension for velocity flows (12 theta + 128 expression = 140)
   flow_noise_level: 0.1  # Noise level for generating dispreferred samples (10% of signal)
   flow_beta_scale: 1.0 # Scale factor for beta_t in regret computation
@@ -345,8 +345,8 @@ paths:
   volumetric_model: "nemo/logs/Retrain_with_17_V1_New_rand_MM_SEC_4_drop_02_stm_10_CV_05_1_1/checkpoints/328_model.pth"
   volumetric_config: "nemo/models/stage_1/volumetric_avatar/va.yaml"
   data_dir: "data"
-  video_folder: "junk2"
-  cache_dir: "cache_single_bucket"
+  video_folder: "s1"
+  cache_dir: "cache_per_video"  # Using per-video cache structure
 
 # Hardware/environment settings
 device: "cuda"
