@@ -17,6 +17,9 @@ model:
   max_motion_length: 1000      # Maximum motion sequence length
   use_relative_position: true  # Use relative position encoding
 
+  # Audio projection settings (moved from channel_config.yaml)
+  use_talkvid_audio_projection: true  # Set to true to use TalkVid-style Perceiver architecture instead of JoyVASA linear layer
+
 # Diffusion parameters - SIMPLIFIED
 diffusion:
   num_steps: 1000                # Increased to 1000 for better sampling (was previously 50 in generation)
@@ -86,9 +89,9 @@ train:
   # To increase GPU utilization:
   # - Increase batch_size (e.g., from 28 to 56)
   # - This processes more windows per step but maintains temporal continuity
-  batch_size: 32              # Batch size for training
+  batch_size: 16              # Batch size for training
 
-  windows_per_batch: 1          # Reduced from 14 to 4 for better sequence diversity
+  windows_per_batch: 2          # Reduced from 14 to 4 for better sequence diversity
   gradient_accumulation_steps: 4  # Increase effective batch size to break plateau
   num_epochs: 4000            # Reduced for quick testing
 
@@ -304,7 +307,7 @@ dataset:
   preextract_audio: true
   cache_audio: true
   hop_length: 10
-  max_videos: 10              # REDUCED from 1000 to 50 - use only the best quality videos
+  max_videos: 50              # REDUCED from 1000 to 50 - use only the best quality videos
   max_sequence_samples: 1000 # Maximum samples per epoch
   use_identity_image: true    # UNSTABLE - Use high-quality identity image instead of video frame
   identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image

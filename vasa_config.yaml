@@ -17,6 +17,9 @@ model:
   max_motion_length: 1000      # Maximum motion sequence length
   use_relative_position: true  # Use relative position encoding
 
+  # Audio projection settings (moved from channel_config.yaml)
+  use_talkvid_audio_projection: true  # Set to true to use TalkVid-style Perceiver architecture instead of JoyVASA linear layer
+
 # Diffusion parameters - SIMPLIFIED
 diffusion:
   num_steps: 1000                # Increased to 1000 for better sampling (was previously 50 in generation)

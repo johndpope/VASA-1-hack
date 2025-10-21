@@ -586,9 +586,11 @@ class VASALossModule:
             logger.debug(f"Audio type: {'SILENT' if is_silent else 'SPEECH'} (mean energy: {audio_energy.mean():.6f})")
 
             # Normalize both signals for better correlation
-            # Normalize to [0, 1] range
-            lip_openness_norm = (lip_openness - lip_openness.min()) / (lip_openness.max() - lip_openness.min() + 1e-8)
-            audio_energy_norm = (audio_energy - audio_energy.min()) / (audio_energy.max() - audio_energy.min() + 1e-8)
+            # Use L2 normalization (like SyncNet) instead of min-max for better gradient flow
+            # Reshape to [B*T, 1] for normalization, then reshape back
+            B, T = lip_openness.shape
+            lip_openness_norm = F.normalize(lip_openness.reshape(-1, 1), p=2, dim=0).reshape(B, T)
+            audio_energy_norm = F.normalize(audio_energy.reshape(-1, 1), p=2, dim=0).reshape(B, T)
 
             logger.debug(f"Normalized lip openness - min: {lip_openness_norm.min():.6f}, max: {lip_openness_norm.max():.6f}, "
                         f"mean: {lip_openness_norm.mean():.6f}")

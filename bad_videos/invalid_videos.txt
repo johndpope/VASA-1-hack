@@ -1,17 +1,5 @@
 # Failed Videos Report
 
 
-s1/srwi5a.mpg:
-  2025-10-20 14:08:39 - video_too_short: {'total_frames': 74, 'min_frames': 75}
-
 s1/sbbbzp.mpg:
-  2025-10-20 14:08:39 - video_too_short: {'total_frames': 74, 'min_frames': 75}
-
-s1/swao7a.mpg:
-  2025-10-20 14:08:40 - video_too_short: {'total_frames': 74, 'min_frames': 75}
-
-s1/srbb4n.mpg:
-  2025-10-20 14:08:40 - video_too_short: {'total_frames': 74, 'min_frames': 75}
-
-s1/lrae3s.mpg:
-  2025-10-20 14:08:40 - video_too_short: {'total_frames': 74, 'min_frames': 75}
+  2025-10-21 23:05:35 - video_too_short: {'total_frames': 74, 'min_frames': 75}

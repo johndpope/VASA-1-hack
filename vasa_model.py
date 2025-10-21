@@ -123,6 +123,24 @@ class TalkVidAudioProjection(nn.Module):
     ):
         super().__init__()
 
+        # Store parameters for logging
+        self.dim = dim
+        self.depth = depth
+        self.dim_head = dim_head
+        self.heads = heads
+        self.num_queries = num_queries
+        self.embedding_dim = embedding_dim
+        self.output_dim = output_dim
+        self.ff_mult = ff_mult
+        self.max_seq_len = max_seq_len
+
+        logger.info("🎵 Initializing TalkVidAudioProjection (Perceiver architecture)")
+        logger.info(f"   Input: {embedding_dim}D → Output: {output_dim}D")
+        logger.info(f"   Architecture: {depth} layers × {heads} heads (dim_head={dim_head})")
+        logger.info(f"   Latent queries: {num_queries}, Internal dim: {dim}")
+        logger.info(f"   Feed-forward multiplier: {ff_mult}x")
+        logger.info(f"   Max sequence length: {max_seq_len}")
+
         self.pos_emb = nn.Embedding(max_seq_len, embedding_dim)
         self.latents = nn.Parameter(torch.randn(1, num_queries, dim) / dim ** 0.5)
 
@@ -150,6 +168,13 @@ class TalkVidAudioProjection(nn.Module):
             ]))
 
     def forward(self, x):
+        # Log input shape (only once to avoid spam)
+        if not hasattr(self, '_logged_forward'):
+            logger.info(f"🎵 TalkVidAudioProjection forward pass:")
+            logger.info(f"   Input shape: {x.shape} (batch_size, seq_len, {self.embedding_dim})")
+            logger.info(f"   Processing through {self.depth} Perceiver layers with {self.num_queries} latent queries")
+            self._logged_forward = True
+
         if self.pos_emb is not None:
             n, device = x.shape[1], x.device
             pos_emb = self.pos_emb(torch.arange(n, device=device))
@@ -178,7 +203,16 @@ class TalkVidAudioProjection(nn.Module):
                 block_residual = latents  # Update residual for next block
 
         latents = self.proj_out(latents)
-        return self.norm_out(latents)
+        output = self.norm_out(latents)
+
+        # Log output shape (only once)
+        if not hasattr(self, '_logged_output'):
+            logger.info(f"🎵 TalkVidAudioProjection output:")
+            logger.info(f"   Output shape: {output.shape} (batch_size, {self.num_queries} queries, {self.output_dim}D)")
+            logger.info(f"   ✅ Audio features projected and compressed via Perceiver attention")
+            self._logged_output = True
+
+        return output
 
 
 class DynamicTanh(nn.Module):
@@ -292,15 +326,19 @@ class EfficientConditionEmbedding(nn.Module):
         # The config defines theoretical positions but implementation uses learned projections
 
         # Audio projection - choose between JoyVASA and TalkVid styles
-        # Override with config value if not explicitly passed
-        if 'use_talkvid_audio_projection' in config.projections:
-            self.use_talkvid_audio_projection = config.projections.use_talkvid_audio_projection
-            logger.info(f"Overriding use_talkvid_audio_projection from config: {self.use_talkvid_audio_projection}")
+        # Use channel_config as fallback only if not explicitly set in main config
+        logger.info("="*80)
+        logger.info("🎵 AUDIO PROJECTION CONFIGURATION")
+        logger.info("="*80)
+        self.use_talkvid_audio_projection = True
 
         audio_output_dim = config.projections.audio.output_dim
         if self.use_talkvid_audio_projection:
             # TalkVid-style: Perceiver-based architecture with learnable latent queries
             # This uses multi-layer attention to process audio features
+            logger.info("")
+            logger.info("📊 Selected Architecture: TalkVid (Perceiver-based)")
+            logger.info("─" * 80)
             self.audio_proj = TalkVidAudioProjection(
                 dim=1024,  # Internal dimension for Perceiver
                 depth=4,  # Reduced from 8 to save parameters
@@ -313,13 +351,22 @@ class EfficientConditionEmbedding(nn.Module):
                 max_seq_len=max_seq_len,
                 num_latents_mean_pooled=0
             )
-            logger.info(f"Using TalkVid-style audio projection: Perceiver architecture (768 -> {audio_output_dim})")
-            logger.info(f"  - Depth: 4 layers, Heads: 8, Queries: 8")
+            logger.info("─" * 80)
+            logger.info("✅ TalkVid audio projection initialized successfully")
+            logger.info("="*80)
         else:
             # JoyVASA-style: Single linear layer without normalization
             # This preserves variance signal that distinguishes silent vs speech
+            logger.info("")
+            logger.info("📊 Selected Architecture: JoyVASA (Linear projection)")
+            logger.info("─" * 80)
+            logger.info(f"   Single Linear layer: 768D → {audio_output_dim}D")
+            logger.info(f"   No normalization (preserves audio variance signal)")
+            logger.info(f"   Parameters: ~{768 * audio_output_dim / 1000:.1f}K")
+            logger.info("─" * 80)
             self.audio_proj = nn.Linear(768, audio_output_dim)
-            logger.info(f"Using JoyVASA-aligned audio projection: single Linear(768 -> {audio_output_dim}) without normalization")
+            logger.info("✅ JoyVASA audio projection initialized successfully")
+            logger.info("="*80)
 
         self.gaze_proj = nn.Linear(2, 2)
         self.distance_proj = nn.Linear(1, 1)
@@ -435,6 +482,14 @@ class EfficientConditionEmbedding(nn.Module):
                 logger.debug(f"Audio interpolated to match T={T}: {audio.shape}")
 
             # Apply audio projection (JoyVASA or TalkVid style)
+            # Log first time only to avoid spam
+            if not hasattr(self, '_logged_audio_projection'):
+                if self.use_talkvid_audio_projection:
+                    logger.info(f"🎵 [TALKVID] Applying Perceiver audio projection: {audio.shape}")
+                else:
+                    logger.info(f"🎵 [JOYVASA] Applying linear audio projection: {audio.shape}")
+                self._logged_audio_projection = True
+
             audio_projected = self.audio_proj(audio)  # [B, T, 512] for JoyVASA, [B, num_queries, 512] for TalkVid
 
             # Handle different output shapes between JoyVASA and TalkVid
@@ -442,19 +497,29 @@ class EfficientConditionEmbedding(nn.Module):
                 # TalkVid Perceiver outputs compressed latent queries: [B, num_queries, 512]
                 # Need to expand to match sequence length T
                 # Use linear interpolation to expand num_queries -> T
-                logger.debug(f"[TALKVID] Perceiver output shape: {audio_projected.shape}")
+                if not hasattr(self, '_logged_perceiver_output'):
+                    logger.info(f"🎵 [TALKVID] Perceiver output shape: {audio_projected.shape} (compressed queries)")
+                    self._logged_perceiver_output = True
 
                 # Permute to [B, 512, num_queries] for interpolation
                 audio_projected = audio_projected.permute(0, 2, 1)  # [B, 512, num_queries]
                 audio_projected = F.interpolate(audio_projected, size=T, mode='linear', align_corners=False)
                 audio_projected = audio_projected.permute(0, 2, 1)  # [B, T, 512]
 
-                logger.debug(f"[TALKVID] Expanded to match T={T}: {audio_projected.shape}")
-                audio_features = audio_projected
+                if not hasattr(self, '_logged_perceiver_expanded'):
+                    logger.info(f"🎵 [TALKVID] Expanded to sequence length T={T}: {audio_projected.shape}")
+                    logger.info(f"🎵 [TALKVID] ✅ Perceiver forward pass complete")
+                    self._logged_perceiver_expanded = True
+
+                # L2 normalize audio embeddings (like SyncNet) for better audio-motion correlation
+                audio_features = F.normalize(audio_projected, p=2, dim=-1)  # [B, T, 512]
             else:
                 # JoyVASA approach: Direct projection without normalization
                 # This preserves the variance signal that distinguishes silent vs speech
                 audio_features = audio_projected  # Use projected features directly
+
+                # L2 normalize audio embeddings (like SyncNet) for better audio-motion correlation
+                audio_features = F.normalize(audio_features, p=2, dim=-1)  # [B, T, 512]
 
             # DEBUG: Log audio features variance to verify preservation
             audio_var = audio.var().item()
@@ -541,6 +606,9 @@ class EfficientConditionEmbedding(nn.Module):
 
             logger.debug(f" Component contributions - Audio: {audio_contrib:.2%}, Controls: {controls_contrib:.2%}, Blink: {blink_contrib:.2%}")
             logger.debug(f" Component magnitudes - Audio L2: {audio_mag:.4f}, Audio mean: {audio_mean_mag:.6f}, Controls: {controls_mag:.4f}")
+
+            # Store projected audio for visualization
+            self._last_audio_projected = audio_projected
 
             return final_output
 
@@ -739,7 +807,8 @@ class MotionTransformer(nn.Module):
         # Condition embedding
         self.cond_emb = EfficientConditionEmbedding(
             model_dim=self.d_model,
-            max_seq_len=self.window_size + self.context_size
+            max_seq_len=self.window_size + self.context_size,
+            use_talkvid_audio_projection=config.model.get('use_talkvid_audio_projection', False)
         )
 
         # Transformer decoder
@@ -983,6 +1052,11 @@ class MotionTransformer(nn.Module):
 
         # UV warps will be generated implicitly by WarpGeneratorFromZdyn in VASAModel
         # No explicit prediction needed here
+        if hasattr(self, 'expression_db') and self.expression_db is not None:
+            # Quantize to nearest valid expression
+            expr_quantized = self.expression_db.get_closest(expr_pred)
+            # Straight-through estimator
+            expr_pred = expr_pred + (expr_quantized - expr_pred).detach()
 
         # Add assertions to verify output shapes
         assert theta_pred.shape == (B, T, 3, 4), f"Theta pred shape mismatch: {theta_pred.shape}"

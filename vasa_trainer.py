@@ -3391,13 +3391,22 @@ class VASATrainer:
                     
                     # Add audio-to-expression visualization if audio features are available
                     if 'audio_features' in targets:
+                        # Get projected audio from condition embedding module
+                        audio_projected = None
+                        use_perceiver = False
+                        if hasattr(self.model.motion_transformer.cond_emb, '_last_audio_projected'):
+                            audio_projected = self.model.motion_transformer.cond_emb._last_audio_projected
+                            use_perceiver = self.model.motion_transformer.cond_emb.use_talkvid_audio_projection
+
                         fig_audio_expr = create_audio_expression_visualization(
                             audio_features=targets['audio_features'][0],  # First batch item
                             target_expression=targets['expression_embed'][0],
                             predicted_expression=outputs['expression_embed'][0],
                             window_idx=step // 100,
                             audio_reduce_to=32,
-                            expr_reduce_to=32
+                            expr_reduce_to=32,
+                            audio_projected=audio_projected[0] if audio_projected is not None else None,
+                            use_perceiver=use_perceiver
                         )
                         wandb.log({"visuals/audio_to_expression": wandb.Image(fig_audio_expr)}, step=step)
                         plt.close(fig_audio_expr)

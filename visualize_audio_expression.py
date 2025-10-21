@@ -19,11 +19,13 @@ def create_audio_expression_visualization(
     window_idx: int,
     save_path: Optional[Path] = None,
     audio_reduce_to: int = 32,
-    expr_reduce_to: int = 32
+    expr_reduce_to: int = 32,
+    audio_projected: Optional[torch.Tensor] = None,
+    use_perceiver: bool = False
 ) -> plt.Figure:
     """
     Create visualization showing audio features and resulting expressions.
-    
+
     Args:
         audio_features: Wav2vec features [B, T, 768] or [T, 768]
         target_expression: Target expression tensor [B, T, 128] or [T, 128]
@@ -32,7 +34,9 @@ def create_audio_expression_visualization(
         save_path: Optional path to save the figure
         audio_reduce_to: Number of audio dimensions to reduce to (default 32)
         expr_reduce_to: Number of expression dimensions to reduce to (default 32)
-    
+        audio_projected: Optional projected audio features (from Perceiver or linear projection) [B, T, 512]
+        use_perceiver: Whether using TalkVid Perceiver (changes title/labels)
+
     Returns:
         matplotlib figure
     """
@@ -43,23 +47,38 @@ def create_audio_expression_visualization(
         target_expression = target_expression[0]  # [T, 128]
     if predicted_expression.dim() == 3:
         predicted_expression = predicted_expression[0]  # [T, 128]
-    
+
+    # Handle projected audio if provided
+    if audio_projected is not None:
+        if audio_projected.dim() == 3:
+            audio_projected = audio_projected[0]  # [T, 512]
+        audio_proj_np = audio_projected.detach().cpu().numpy()
+
     # Convert to numpy
     audio = audio_features.detach().cpu().numpy()
     target = target_expression.detach().cpu().numpy()
     predicted = predicted_expression.detach().cpu().numpy()
-    
+
     # Get dimensions
     T = audio.shape[0]
     audio_dim = audio.shape[1]
     expr_dim = target.shape[1]
-    
-    # Reduce audio dimension (768 -> 32)
+
+    # Choose which audio to visualize: projected (if available) or raw wav2vec
+    if audio_projected is not None:
+        audio_to_viz = audio_proj_np
+        audio_dim = audio_proj_np.shape[1]
+        audio_label = "Perceiver Output" if use_perceiver else "Audio Projection"
+    else:
+        audio_to_viz = audio
+        audio_label = "Wav2Vec Audio Features"
+
+    # Reduce audio dimension (768/512 -> 32)
     if audio_dim > audio_reduce_to:
         group_size = audio_dim // audio_reduce_to
-        audio_reduced = audio.reshape(T, audio_reduce_to, group_size).mean(axis=2)
+        audio_reduced = audio_to_viz.reshape(T, audio_reduce_to, group_size).mean(axis=2)
     else:
-        audio_reduced = audio
+        audio_reduced = audio_to_viz
         audio_reduce_to = audio_dim
     
     # Reduce expression dimension (128 -> 32)
@@ -91,9 +110,9 @@ def create_audio_expression_visualization(
         cmap='viridis',
         interpolation='nearest'
     )
-    ax_audio.set_title(f'Window {window_idx} - Wav2Vec Audio Features (reduced to {audio_reduce_to} dims)', fontsize=14, fontweight='bold')
+    ax_audio.set_title(f'Window {window_idx} - {audio_label} (reduced to {audio_reduce_to} dims)', fontsize=14, fontweight='bold')
     ax_audio.set_xlabel('Frame Number', fontsize=12)
-    ax_audio.set_ylabel('Audio Feature Dim', fontsize=12)
+    ax_audio.set_ylabel(f'{audio_label} Dim', fontsize=12)
     
     # Set ticks
     ax_audio.set_xticks(np.arange(0, T, 5))
