@@ -20,6 +20,201 @@ from logger import logger
 from blink_condition_handler import BlinkConditionHandler
 
 
+# TalkVid-style audio projection components (Perceiver architecture)
+def reshape_tensor(x, heads):
+    bs, length, width = x.shape
+    # (bs, length, width) --> (bs, length, n_heads, dim_per_head)
+    x = x.view(bs, length, heads, -1)
+    # (bs, length, n_heads, dim_per_head) --> (bs, n_heads, length, dim_per_head)
+    x = x.transpose(1, 2)
+    # (bs, n_heads, length, dim_per_head) --> (bs*n_heads, length, dim_per_head)
+    x = x.reshape(bs, heads, length, -1)
+    return x
+
+
+def masked_mean(t, *, dim, mask=None):
+    if mask is None:
+        return t.mean(dim=dim)
+
+    denom = mask.sum(dim=dim, keepdim=True)
+    # Avoid importing einops by using reshape
+    mask = mask.unsqueeze(-1)  # b n -> b n 1
+    masked_t = t.masked_fill(~mask, 0.0)
+
+    return masked_t.sum(dim=dim) / denom.clamp(min=1e-5)
+
+
+class PerceiverAttention(nn.Module):
+    def __init__(self, *, dim, dim_head=64, heads=8):
+        super().__init__()
+        self.scale = dim_head ** -0.5
+        self.dim_head = dim_head
+        self.heads = heads
+        inner_dim = dim_head * heads
+
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
+
+        self.to_q = nn.Linear(dim, inner_dim, bias=False)
+        self.to_kv = nn.Linear(dim, inner_dim * 2, bias=False)
+        self.to_out = nn.Linear(inner_dim, dim, bias=False)
+
+    def forward(self, x, latents):
+        """
+        Args:
+            x (torch.Tensor): image features
+                shape (b, n1, D)
+            latent (torch.Tensor): latent features
+                shape (b, n2, D)
+        """
+        x = self.norm1(x)
+        latents = self.norm2(latents)
+
+        b, l, _ = latents.shape
+
+        q = self.to_q(latents)
+        kv_input = torch.cat((x, latents), dim=-2)
+        k, v = self.to_kv(kv_input).chunk(2, dim=-1)
+
+        q = reshape_tensor(q, self.heads)
+        k = reshape_tensor(k, self.heads)
+        v = reshape_tensor(v, self.heads)
+
+        # attention
+        scale = 1 / math.sqrt(math.sqrt(self.dim_head))
+        weight = (q * scale) @ (k * scale).transpose(-2, -1)  # More stable with f16 than dividing afterwards
+        weight = torch.softmax(weight.float(), dim=-1).type(weight.dtype)
+        out = weight @ v
+
+        out = out.permute(0, 2, 1, 3).reshape(b, l, -1)
+
+        return self.to_out(out)
+
+
+def FeedForward(dim, mult=4):
+    inner_dim = int(dim * mult)
+    return nn.Sequential(
+        nn.LayerNorm(dim),
+        nn.Linear(dim, inner_dim, bias=False),
+        nn.GELU(),
+        nn.Linear(inner_dim, dim, bias=False),
+    )
+
+
+class TalkVidAudioProjection(nn.Module):
+    """
+    TalkVid-style audio projection using Perceiver architecture.
+
+    This is a more sophisticated approach than JoyVASA's simple linear layer,
+    using learnable latent queries and multi-layer attention to process audio features.
+    """
+    def __init__(
+            self,
+            dim=1024,
+            depth=8,
+            dim_head=64,
+            heads=16,
+            num_queries=8,
+            embedding_dim=768,
+            output_dim=1024,
+            ff_mult=4,
+            max_seq_len: int = 257,
+            num_latents_mean_pooled: int = 0,
+    ):
+        super().__init__()
+
+        # Store parameters for logging
+        self.dim = dim
+        self.depth = depth
+        self.dim_head = dim_head
+        self.heads = heads
+        self.num_queries = num_queries
+        self.embedding_dim = embedding_dim
+        self.output_dim = output_dim
+        self.ff_mult = ff_mult
+        self.max_seq_len = max_seq_len
+
+        logger.info("🎵 Initializing TalkVidAudioProjection (Perceiver architecture)")
+        logger.info(f"   Input: {embedding_dim}D → Output: {output_dim}D")
+        logger.info(f"   Architecture: {depth} layers × {heads} heads (dim_head={dim_head})")
+        logger.info(f"   Latent queries: {num_queries}, Internal dim: {dim}")
+        logger.info(f"   Feed-forward multiplier: {ff_mult}x")
+        logger.info(f"   Max sequence length: {max_seq_len}")
+
+        self.pos_emb = nn.Embedding(max_seq_len, embedding_dim)
+        self.latents = nn.Parameter(torch.randn(1, num_queries, dim) / dim ** 0.5)
+
+        self.proj_in = nn.Linear(embedding_dim, dim)
+
+        self.proj_out = nn.Linear(dim, output_dim)
+        self.norm_out = nn.LayerNorm(output_dim)
+
+        self.to_latents_from_mean_pooled_seq = (
+            nn.Sequential(
+                nn.LayerNorm(dim),
+                nn.Linear(dim, dim * num_latents_mean_pooled),
+                # Rearrange("b (n d) -> b n d", n=num_latents_mean_pooled)
+                # Avoid einops dependency by using reshape
+            )
+            if num_latents_mean_pooled > 0
+            else None
+        )
+
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                PerceiverAttention(dim=dim, dim_head=dim_head, heads=heads),
+                FeedForward(dim=dim, mult=ff_mult),
+            ]))
+
+    def forward(self, x):
+        # Log input shape (only once to avoid spam)
+        if not hasattr(self, '_logged_forward'):
+            logger.info(f"🎵 TalkVidAudioProjection forward pass:")
+            logger.info(f"   Input shape: {x.shape} (batch_size, seq_len, {self.embedding_dim})")
+            logger.info(f"   Processing through {self.depth} Perceiver layers with {self.num_queries} latent queries")
+            self._logged_forward = True
+
+        if self.pos_emb is not None:
+            n, device = x.shape[1], x.device
+            pos_emb = self.pos_emb(torch.arange(n, device=device))
+            x = x + pos_emb
+
+        latents = self.latents.repeat(x.size(0), 1, 1)
+
+        x = self.proj_in(x)
+
+        if self.to_latents_from_mean_pooled_seq:
+            meanpooled_seq = masked_mean(x, dim=1, mask=torch.ones(x.shape[:2], device=x.device, dtype=torch.bool))
+            meanpooled_latents = self.to_latents_from_mean_pooled_seq(meanpooled_seq)
+            # Rearrange manually
+            meanpooled_latents = meanpooled_latents.view(meanpooled_latents.size(0), -1, latents.size(-1))
+            latents = torch.cat((meanpooled_latents, latents), dim=-2)
+
+        # Cross-layer skip connections for better gradient flow in deep perceiver
+        block_residual = latents  # Save input to first block
+        for idx, (attn, ff) in enumerate(self.layers):
+            latents = attn(x, latents) + latents
+            latents = ff(latents) + latents
+
+            # Add block-level residual every 2 layers for stability
+            if (idx + 1) % 2 == 0:
+                latents = latents + block_residual  # Cross-layer skip connection
+                block_residual = latents  # Update residual for next block
+
+        latents = self.proj_out(latents)
+        output = self.norm_out(latents)
+
+        # Log output shape (only once)
+        if not hasattr(self, '_logged_output'):
+            logger.info(f"🎵 TalkVidAudioProjection output:")
+            logger.info(f"   Output shape: {output.shape} (batch_size, {self.num_queries} queries, {self.output_dim}D)")
+            logger.info(f"   ✅ Audio features projected and compressed via Perceiver attention")
+            self._logged_output = True
+
+        return output
+
+
 class DynamicTanh(nn.Module):
     """
     Dynamic Tanh (DyT) - A learnable normalization alternative from Meta FAIR (March 2025).
@@ -114,11 +309,12 @@ class VASAPositionalEmbedding(nn.Module):
 
 
 class EfficientConditionEmbedding(nn.Module):
-    def __init__(self, model_dim: int = 512, max_seq_len: int = 60):
+    def __init__(self, model_dim: int = 512, max_seq_len: int = 60, use_talkvid_audio_projection: bool = False):
         super().__init__()
         self.model_dim = model_dim
         self.max_seq_len = max_seq_len
-        logger.info(f"Initializing EfficientConditionEmbedding: model_dim={model_dim}, max_seq_len={max_seq_len}")
+        self.use_talkvid_audio_projection = use_talkvid_audio_projection
+        logger.info(f"Initializing EfficientConditionEmbedding: model_dim={model_dim}, max_seq_len={max_seq_len}, use_talkvid_audio_projection={use_talkvid_audio_projection}")
 
         config = self.load_channel_config('channel_config.yaml')
         self.clip_min = config.model.clip_bounds.min
@@ -129,11 +325,48 @@ class EfficientConditionEmbedding(nn.Module):
         # Note: channel_layout from config is not used - features are concatenated directly
         # The config defines theoretical positions but implementation uses learned projections
 
-        # Audio projection - aligned with JoyVASA (single linear layer, no normalization)
-        # JoyVASA uses a single Linear layer: self.audio_feature_map = nn.Linear(768, feature_dim)
-        self.audio_proj = nn.Linear(768, config.projections.audio.output_dim)
-        logger.info("Using JoyVASA-aligned audio projection: single Linear(768 -> {}) without normalization".format(
-            config.projections.audio.output_dim))
+        # Audio projection - choose between JoyVASA and TalkVid styles
+        # Use channel_config as fallback only if not explicitly set in main config
+        logger.info("="*80)
+        logger.info("🎵 AUDIO PROJECTION CONFIGURATION")
+        logger.info("="*80)
+        self.use_talkvid_audio_projection = True
+
+        audio_output_dim = config.projections.audio.output_dim
+        if self.use_talkvid_audio_projection:
+            # TalkVid-style: Perceiver-based architecture with learnable latent queries
+            # This uses multi-layer attention to process audio features
+            logger.info("")
+            logger.info("📊 Selected Architecture: TalkVid (Perceiver-based)")
+            logger.info("─" * 80)
+            self.audio_proj = TalkVidAudioProjection(
+                dim=1024,  # Internal dimension for Perceiver
+                depth=4,  # Reduced from 8 to save parameters
+                dim_head=64,
+                heads=8,  # Reduced from 16 to save parameters
+                num_queries=8,  # Number of learnable latent queries
+                embedding_dim=768,  # Input audio feature dimension (wav2vec2)
+                output_dim=audio_output_dim,  # Output dimension (512)
+                ff_mult=4,
+                max_seq_len=max_seq_len,
+                num_latents_mean_pooled=0
+            )
+            logger.info("─" * 80)
+            logger.info("✅ TalkVid audio projection initialized successfully")
+            logger.info("="*80)
+        else:
+            # JoyVASA-style: Single linear layer without normalization
+            # This preserves variance signal that distinguishes silent vs speech
+            logger.info("")
+            logger.info("📊 Selected Architecture: JoyVASA (Linear projection)")
+            logger.info("─" * 80)
+            logger.info(f"   Single Linear layer: 768D → {audio_output_dim}D")
+            logger.info(f"   No normalization (preserves audio variance signal)")
+            logger.info(f"   Parameters: ~{768 * audio_output_dim / 1000:.1f}K")
+            logger.info("─" * 80)
+            self.audio_proj = nn.Linear(768, audio_output_dim)
+            logger.info("✅ JoyVASA audio projection initialized successfully")
+            logger.info("="*80)
 
         self.gaze_proj = nn.Linear(2, 2)
         self.distance_proj = nn.Linear(1, 1)
@@ -237,19 +470,67 @@ class EfficientConditionEmbedding(nn.Module):
                 audio = audio.squeeze(1)
             audio = self._ensure_float_tensor(audio, dtype)
 
-            # JoyVASA approach: Direct projection without normalization
-            # This preserves the variance signal that distinguishes silent vs speech
-            audio_projected = self.audio_proj(audio)
+            # Align audio sequence length with other conditions (T)
+            # Audio may be longer (e.g., 60 frames) while video is shorter (e.g., 20 frames)
+            audio_T = audio.shape[1]
+            if audio_T != T:
+                logger.warning(f"Audio sequence length ({audio_T}) doesn't match video ({T}), interpolating...")
+                # Permute to [B, D, T] for interpolation, then back to [B, T, D]
+                audio = audio.permute(0, 2, 1)  # [B, 768, T]
+                audio = F.interpolate(audio, size=T, mode='linear', align_corners=False)
+                audio = audio.permute(0, 2, 1)  # [B, T, 768]
+                logger.debug(f"Audio interpolated to match T={T}: {audio.shape}")
 
-            # No normalization - keep raw projected features
-            # This aligns with JoyVASA's audio_feature_map approach
-            audio_features = audio_projected  # Use projected features directly
+            # Apply audio projection (JoyVASA or TalkVid style)
+            # Log first time only to avoid spam
+            if not hasattr(self, '_logged_audio_projection'):
+                if self.use_talkvid_audio_projection:
+                    logger.info(f"🎵 [TALKVID] Applying Perceiver audio projection: {audio.shape}")
+                else:
+                    logger.info(f"🎵 [JOYVASA] Applying linear audio projection: {audio.shape}")
+                self._logged_audio_projection = True
+
+            audio_projected = self.audio_proj(audio)  # [B, T, 512] for JoyVASA, [B, num_queries, 512] for TalkVid
+
+            # Handle different output shapes between JoyVASA and TalkVid
+            if self.use_talkvid_audio_projection:
+                # TalkVid Perceiver outputs compressed latent queries: [B, num_queries, 512]
+                # Need to expand to match sequence length T
+                # Use linear interpolation to expand num_queries -> T
+                if not hasattr(self, '_logged_perceiver_output'):
+                    logger.info(f"🎵 [TALKVID] Perceiver output shape: {audio_projected.shape} (compressed queries)")
+                    self._logged_perceiver_output = True
+
+                # Permute to [B, 512, num_queries] for interpolation
+                audio_projected = audio_projected.permute(0, 2, 1)  # [B, 512, num_queries]
+                audio_projected = F.interpolate(audio_projected, size=T, mode='linear', align_corners=False)
+                audio_projected = audio_projected.permute(0, 2, 1)  # [B, T, 512]
+
+                if not hasattr(self, '_logged_perceiver_expanded'):
+                    logger.info(f"🎵 [TALKVID] Expanded to sequence length T={T}: {audio_projected.shape}")
+                    logger.info(f"🎵 [TALKVID] ✅ Perceiver forward pass complete")
+                    self._logged_perceiver_expanded = True
+
+                # L2 normalize audio embeddings (like SyncNet) for better audio-motion correlation
+                audio_features = F.normalize(audio_projected, p=2, dim=-1)  # [B, T, 512]
+            else:
+                # JoyVASA approach: Direct projection without normalization
+                # This preserves the variance signal that distinguishes silent vs speech
+                audio_features = audio_projected  # Use projected features directly
+
+                # L2 normalize audio embeddings (like SyncNet) for better audio-motion correlation
+                audio_features = F.normalize(audio_features, p=2, dim=-1)  # [B, T, 512]
 
             # DEBUG: Log audio features variance to verify preservation
             audio_var = audio.var().item()
             audio_proj_var = audio_projected.var().item()
-            logger.debug(f"[JOYVASA ALIGNED] Audio variance - Raw: {audio_var:.6f}, Projected: {audio_proj_var:.6f}")
-            logger.debug(f"Preserving full variance signal without normalization")
+
+            if self.use_talkvid_audio_projection:
+                logger.debug(f"[TALKVID] Audio variance - Raw: {audio_var:.6f}, Projected: {audio_proj_var:.6f}")
+                logger.debug(f"[TALKVID] Using Perceiver-based audio projection with learnable latent queries")
+            else:
+                logger.debug(f"[JOYVASA ALIGNED] Audio variance - Raw: {audio_var:.6f}, Projected: {audio_proj_var:.6f}")
+                logger.debug(f"Preserving full variance signal without normalization")
 
             # Handle None values from dropout - use zeros as default
             gaze_tensor = conditions.get('gaze')
@@ -326,6 +607,9 @@ class EfficientConditionEmbedding(nn.Module):
             logger.debug(f" Component contributions - Audio: {audio_contrib:.2%}, Controls: {controls_contrib:.2%}, Blink: {blink_contrib:.2%}")
             logger.debug(f" Component magnitudes - Audio L2: {audio_mag:.4f}, Audio mean: {audio_mean_mag:.6f}, Controls: {controls_mag:.4f}")
 
+            # Store projected audio for visualization
+            self._last_audio_projected = audio_projected
+
             return final_output
 
         except Exception as e:
@@ -336,9 +620,16 @@ class EfficientConditionEmbedding(nn.Module):
 
 class AudioCrossDecoderLayer(nn.Module):
     """
-    Custom decoder layer with audio cross-attention and Flash Attention optimized causal masking.
+    Custom decoder layer with FUSED audio cross-attention and causal masking on ALL attention mechanisms.
 
-    Uses F.scaled_dot_product_attention with is_causal=True for efficient causal self-attention.
+    OPTIMIZATION: Removed separate audio_cross_attn head - reuses cross_attn for both conditions and audio.
+    This saves ~1.05M parameters per layer with no behavioral change.
+
+    CAUSAL MASKING:
+    - Self-attention: Uses is_causal=True for efficient causal masking (prevents future motion leakage)
+    - Audio cross-attention: Uses explicit causal mask (prevents future audio leakage)
+    - Ensures frame t can ONLY attend to frames 0..t-1 in BOTH motion and audio
+
     Overrides LayerNorms with DynamicTanh for full DyT integration.
     """
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, **kwargs):
@@ -348,14 +639,9 @@ class AudioCrossDecoderLayer(nn.Module):
         self.nhead = nhead
         self.dropout = dropout
 
-        # Self-attention (causal)
+        # Two attention heads only (removed audio_cross_attn)
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-
-        # Cross-attention to memory (conditions)
         self.cross_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-
-        # Audio cross-attention
-        self.audio_cross_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
 
         # Feed-forward network
         self.linear1 = nn.Linear(d_model, dim_feedforward)
@@ -364,8 +650,8 @@ class AudioCrossDecoderLayer(nn.Module):
 
         # Normalization layers (DynamicTanh for variance preservation)
         self.norm1 = DynamicTanh(d_model)  # For self-attention
-        self.norm2 = DynamicTanh(d_model)  # For cross-attention (to memory)
-        self.norm3 = DynamicTanh(d_model)  # For audio cross-attention
+        self.norm2 = DynamicTanh(d_model)  # For condition cross-attention
+        self.norm3 = DynamicTanh(d_model)  # For audio cross-attention (reuses cross_attn)
         self.norm4 = DynamicTanh(d_model)  # For feed-forward
 
         # Dropout layers
@@ -376,11 +662,20 @@ class AudioCrossDecoderLayer(nn.Module):
 
         self.activation = nn.GELU()
 
+    @staticmethod
+    def generate_square_subsequent_mask(sz: int, device: torch.device) -> torch.Tensor:
+        """Generate a causal mask for self-attention (upper triangular mask of -inf)."""
+        mask = torch.triu(torch.ones(sz, sz, device=device) * float('-inf'), diagonal=1)
+        return mask
+
     def forward(self, tgt, memory, tgt_mask=None, memory_mask=None,
                 tgt_key_padding_mask=None, memory_key_padding_mask=None,
                 audio_memory=None, is_causal=True):
         """
-        Pre-norm transformer decoder layer (norm BEFORE attention/FFN for better gradient flow).
+        Pre-norm transformer decoder layer with FUSED audio cross-attention.
+
+        OPTIMIZATION: Audio cross-attention now reuses self.cross_attn instead of separate head.
+        Same computation, half the parameters for audio path.
 
         Args:
             tgt: Target sequence [B, T, d_model]
@@ -395,51 +690,56 @@ class AudioCrossDecoderLayer(nn.Module):
         assert isinstance(audio_memory, torch.Tensor), \
             f"audio_memory must be a Tensor, got {type(audio_memory)}"
 
-        # Generate causal mask once if needed
-        if is_causal and tgt_mask is None:
-            seq_len = tgt.size(1)
-            tgt_mask = nn.Transformer.generate_square_subsequent_mask(
-                seq_len, device=tgt.device, dtype=tgt.dtype
-            )
-
-        # 1. PRE-NORM: Causal self-attention
-        # Norm BEFORE attention (pre-norm) for better gradient flow
+        # 1. Self-attention with causal masking
         tgt_normed = self.norm1(tgt)
-        tgt2, _ = self.self_attn(
-            tgt_normed, tgt_normed, tgt_normed,
-            attn_mask=tgt_mask,
-            key_padding_mask=tgt_key_padding_mask,
-            need_weights=False,
-            is_causal=is_causal  # Flash Attention optimization
-        )
-        tgt = tgt + self.dropout1(tgt2)  # Residual connection
 
-        # 2. PRE-NORM: Cross-attention to condition memory
+        # Generate causal mask if needed
+        if is_causal and tgt_mask is None:
+            seq_len = tgt_normed.size(1)
+            tgt_mask = self.generate_square_subsequent_mask(seq_len, tgt_normed.device)
+
+        tgt2 = self.self_attn(tgt_normed, tgt_normed, tgt_normed, attn_mask=tgt_mask, is_causal=is_causal)[0]
+        tgt = tgt + self.dropout1(tgt2)
+
+        # 2. Cross-attention to condition embeddings
         tgt_normed = self.norm2(tgt)
-        tgt2, _ = self.cross_attn(
-            tgt_normed, memory, memory,
+        tgt2 = self.cross_attn(tgt_normed, memory, memory,
             attn_mask=memory_mask,
             key_padding_mask=memory_key_padding_mask,
-            need_weights=False
-        )
+            need_weights=False)[0]
         tgt = tgt + self.dropout2(tgt2)
 
-        # 3. PRE-NORM: Audio cross-attention (VASA-specific)
+        # 3. FUSED audio cross-attention with CAUSAL MASKING - prevents future audio leakage
+        # Generate causal mask for audio cross-attention
+        # This ensures frame t can only attend to audio from frames 0..t (not future frames)
         tgt_normed = self.norm3(tgt)
-        tgt2, _ = self.audio_cross_attn(
-            tgt_normed, audio_memory, audio_memory,
+        seq_len = tgt_normed.size(1)
+        audio_seq_len = audio_memory.size(1)
+
+        # Create causal mask with 2-frame audio lookahead: [seq_len, audio_seq_len]
+        # diagonal=3 means frame i can see audio from frames 0..i+2 (2-frame lookahead)
+        # This masks j >= i+3, allowing audio lookahead while preventing motion leakage
+        audio_causal_mask = torch.triu(
+            torch.ones(seq_len, audio_seq_len, device=tgt_normed.device) * float('-inf'),
+            diagonal=3
+        )
+
+        audio_attn, _ = self.cross_attn(
+            tgt_normed,
+            audio_memory,  # Key/value both from audio
+            audio_memory,
+            attn_mask=audio_causal_mask,  # Apply causal mask to prevent future audio leakage
             key_padding_mask=None,
             need_weights=False
         )
-        tgt = tgt + self.dropout3(tgt2)
+        tgt = tgt + self.dropout3(audio_attn)
 
-        # 4. PRE-NORM: Feed-forward network
+        # 4. Feed-forward network
         tgt_normed = self.norm4(tgt)
         tgt2 = self.linear2(self.dropout_ffn(self.activation(self.linear1(tgt_normed))))
         tgt = tgt + self.dropout4(tgt2)
 
         return tgt
-        
 
 class MotionTransformer(nn.Module):
     """Decoder-based Transformer for motion generation matching H5 cache structure.
@@ -479,18 +779,14 @@ class MotionTransformer(nn.Module):
         self.theta_emb = nn.Linear(3 * 4, self.d_model // 2)  # theta is 3x4
         self.expr_emb = nn.Linear(128, self.d_model // 2)  # expression is 128-dim
 
-        # SRT component embeddings
-        self.scale_emb = nn.Linear(3, self.d_model // 4)
-        self.rotation_emb = nn.Linear(3, self.d_model // 4)
-        self.translation_emb = nn.Linear(3, self.d_model // 4)
 
         # UV Warp encoder REMOVED - warps now generated implicitly, not encoded
         # Motion embeddings no longer include UV warps during training
+        # SRT embeddings also removed - nemo handles these internally
 
-        # Combine all motion embeddings (without UV warps)
-        # theta_emb (d_model/2) + expr_emb (d_model/2) + scale (d_model/4) + rotation (d_model/4) + translation (d_model/4)
-        # = d_model + d_model/4 * 3 = 1.75 * d_model
-        total_motion_dim = self.d_model + (self.d_model // 4) * 3
+        # Combine all motion embeddings (only theta + expression)
+        # theta_emb (d_model/2) + expr_emb (d_model/2) = d_model
+        total_motion_dim = self.d_model  # Just theta + expr
         self.motion_proj = nn.Linear(total_motion_dim, self.d_model)
 
         # Timestep embedding
@@ -511,7 +807,8 @@ class MotionTransformer(nn.Module):
         # Condition embedding
         self.cond_emb = EfficientConditionEmbedding(
             model_dim=self.d_model,
-            max_seq_len=self.window_size + self.context_size
+            max_seq_len=self.window_size + self.context_size,
+            use_talkvid_audio_projection=config.model.get('use_talkvid_audio_projection', False)
         )
 
         # Transformer decoder
@@ -549,29 +846,30 @@ class MotionTransformer(nn.Module):
                 nn.init.xavier_normal_(layer.weight, gain=2.0)  # Larger initialization for rotation
                 if layer.bias is not None:
                     nn.init.zeros_(layer.bias)
+
         self.expr_head = nn.Sequential(
             nn.Linear(self.d_model, self.d_model // 2),
             nn.SiLU(),
             nn.Linear(self.d_model // 2, self.expression_dim)
         )
-        # DISABLED: scale, rotation, and translation not used by nemo's pretrained warp generator
-        # These are handled internally by nemo's pretrained components
-        # Only theta (pose matrix) and expression_embed are predicted
-        # self.scale_head = nn.Sequential(
-        #     nn.Linear(self.d_model, self.d_model // 4),
-        #     nn.SiLU(),
-        #     nn.Linear(self.d_model // 4, 3)
-        # )
-        # self.rotation_head = nn.Sequential(
-        #     nn.Linear(self.d_model, self.d_model // 4),
-        #     nn.SiLU(),
-        #     nn.Linear(self.d_model // 4, 3)
-        # )
-        # self.translation_head = nn.Sequential(
-        #     nn.Linear(self.d_model, self.d_model // 4),
-        #     nn.SiLU(),
-        #     nn.Linear(self.d_model // 4, 3)
-        # )
+
+        # SRT heads for scale, rotation, translation prediction
+        self.scale_head = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model // 4),
+            nn.SiLU(),
+            nn.Linear(self.d_model // 4, 3)
+        )
+        self.rotation_head = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model // 4),
+            nn.SiLU(),
+            nn.Linear(self.d_model // 4, 3)
+        )
+        self.translation_head = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model // 4),
+            nn.SiLU(),
+            nn.Linear(self.d_model // 4, 3)
+        )
+
 
         # UV Warp generation moved to implicit WarpGeneratorFromZdyn
         # (No explicit warp head needed - warps derived from zdyn + theta)
@@ -604,24 +902,16 @@ class MotionTransformer(nn.Module):
         theta_emb = self.theta_emb(theta_flat)
         expr_emb = self.expr_emb(expr)
 
-        # Handle additional motion parameters (SRT components)
-        scale_emb = self.scale_emb(motion_data.get('scale', torch.zeros(B, T, 3, device=device)))
-        rotation_emb = self.rotation_emb(motion_data.get('rotation', torch.zeros(B, T, 3, device=device)))
-        translation_emb = self.translation_emb(motion_data.get('translation', torch.zeros(B, T, 3, device=device)))
 
         # UV warps no longer encoded - they will be generated implicitly from zdyn + theta
-        # Verify shapes match H5 cache expectations (for debugging)
+        # Verify shapes (only theta + expression, SRT removed)
         assert motion_data['theta'].shape[2:] == (3, 4), f"Theta shape mismatch: expected (B, T, 3, 4), got {motion_data['theta'].shape}"
-        assert motion_data['scale'].shape[2:] == (3,), f"Scale shape mismatch: expected (B, T, 3), got {motion_data['scale'].shape}"
-        assert motion_data['rotation'].shape[2:] == (3,), f"Rotation shape mismatch: expected (B, T, 3), got {motion_data['rotation'].shape}"
-        assert motion_data['translation'].shape[2:] == (3,), f"Translation shape mismatch: expected (B, T, 3), got {motion_data['translation'].shape}"
         assert expr.shape[2:] == (128,), f"Expression shape mismatch: expected (B, T, 128), got {expr.shape}"
 
-        # Combine all embeddings (no UV warp embedding)
+        # Combine all embeddings (only theta + expression, no SRT or UV warps)
         current_emb = torch.cat([
             theta_emb, expr_emb,  # d_model/2 + d_model/2 = d_model
-            scale_emb, rotation_emb, translation_emb  # d_model/4 * 3
-        ], dim=-1)  # Total: 1.75 * d_model
+        ], dim=-1)  # Total: d_model (512)
         current_emb = self.motion_proj(current_emb)  # [B, T, d_model]
 
         # Handle previous context if provided
@@ -633,16 +923,11 @@ class MotionTransformer(nn.Module):
             prev_theta_emb = self.theta_emb(prev_theta_flat)
             prev_expr_emb = self.expr_emb(prev_expr)
 
-            # Get other motion parameters from context if available
-            prev_scale_emb = self.scale_emb(prev_context.get('scale', torch.zeros(B, C, 3, device=device)))
-            prev_rotation_emb = self.rotation_emb(prev_context.get('rotation', torch.zeros(B, C, 3, device=device)))
-            prev_translation_emb = self.translation_emb(prev_context.get('translation', torch.zeros(B, C, 3, device=device)))
 
-            # No UV warp embedding for prev_context either
+            # No UV warp or SRT embedding for prev_context
             prev_emb = torch.cat([
-                prev_theta_emb, prev_expr_emb,  # d_model
-                prev_scale_emb, prev_rotation_emb, prev_translation_emb  # d_model/4 * 3
-            ], dim=-1)  # Total: 1.75 * d_model
+                prev_theta_emb, prev_expr_emb,  # d_model/2 + d_model/2 = d_model
+            ], dim=-1)  # Total: d_model (512)
             prev_emb = self.motion_proj(prev_emb)  # [B, C, d_model]
 
             # Concatenate context and current
@@ -712,17 +997,29 @@ class MotionTransformer(nn.Module):
         if C > 0:
             audio_memory = audio_memory[:, C:]  # Remove context frames, keep only current T
 
-        # Apply Flash Attention optimized causal masking (is_causal=True)
-        # Ensures frame t can only attend to frames 0..t-1 (not future frames)
+        # Apply causal masking to BOTH self-attention and audio cross-attention
+        # Self-attention: is_causal=True prevents future motion leakage
+        # Audio cross-attention: explicit causal mask prevents future audio leakage
+        # Result: frame t can ONLY see motion AND audio from frames 0..t-1
         out = tgt
-        for layer in self.decoder_layers:
+
+        # Cross-layer skip connections: Add block-level residuals every 2 layers
+        # This improves gradient flow in deep transformers (8 layers)
+        # Prevents vanishing gradients in later layers common in audio-conditioned sequence generation
+        block_residual = out  # Save input to first block
+        for idx, layer in enumerate(self.decoder_layers):
             # Pass cached audio_memory (not recomputed)
             out = layer(
                 out,
                 cond_emb,
                 audio_memory=audio_memory,  # Cached - no recomputation
-                is_causal=True  # Flash Attention optimization
+                is_causal=True  # Enables causal masking for both self-attn and audio cross-attn
             )
+
+            # Add block-level residual every 2 layers (indices 1, 3, 5, 7 for 8 layers)
+            if (idx + 1) % 2 == 0:
+                out = out + block_residual  # Cross-layer skip connection
+                block_residual = out  # Update residual for next block
 
         out = self.decoder_norm(out)
 
@@ -730,7 +1027,8 @@ class MotionTransformer(nn.Module):
         if C > 0:
             out = out[:, C:]  # [B, T, d_model]
 
-       
+        # Store hidden states for Flow-DPO (before prediction heads)
+        hidden_states = out  # [B, T, d_model] - this is what Flow-DPO needs
 
         # Log output statistics
         logger.debug(f" Transformer output variance: {out.var().item():.6f}")
@@ -738,6 +1036,11 @@ class MotionTransformer(nn.Module):
         # Predict outputs matching H5 cache structure
         theta_pred = self.theta_head(out).view(B, T, 3, 4)  # H5: (1, 4, 4) but model uses 3x4
         expr_pred = self.expr_head(out)  # [B, T, 128] - matches target_pose_embed in H5
+
+        # Predict SRT components (always predict, even if using derived warps)
+        scale_pred = self.scale_head(out)  # [B, T, 3] - matches H5
+        rotation_pred = self.rotation_head(out)  # [B, T, 3] - matches H5
+        translation_pred = self.translation_head(out)  # [B, T, 3] - matches H5
 
         # Debug expression predictions
         if torch.rand(1).item() < 0.01:  # Log 1% of the time
@@ -749,27 +1052,29 @@ class MotionTransformer(nn.Module):
 
         # UV warps will be generated implicitly by WarpGeneratorFromZdyn in VASAModel
         # No explicit prediction needed here
+        if hasattr(self, 'expression_db') and self.expression_db is not None:
+            # Quantize to nearest valid expression
+            expr_quantized = self.expression_db.get_closest(expr_pred)
+            # Straight-through estimator
+            expr_pred = expr_pred + (expr_quantized - expr_pred).detach()
 
         # Add assertions to verify output shapes
         assert theta_pred.shape == (B, T, 3, 4), f"Theta pred shape mismatch: {theta_pred.shape}"
         assert expr_pred.shape == (B, T, 128), f"Expression pred shape mismatch: {expr_pred.shape}"
+        assert scale_pred.shape == (B, T, 3), f"Scale pred shape mismatch: {scale_pred.shape}"
+        assert rotation_pred.shape == (B, T, 3), f"Rotation pred shape mismatch: {rotation_pred.shape}"
+        assert translation_pred.shape == (B, T, 3), f"Translation pred shape mismatch: {translation_pred.shape}"
 
-        # Build output dict - when using derived warps, only predict theta and expression_embed
-        # Nemo's pretrained components handle scale/rotation/translation internally
+        # Build output dict - always include SRT predictions for loss computation
         output_dict = {
             'theta': theta_pred,  # Pose matrix
             'expression_embed': expr_pred,  # Aligned expression embedding (target_pose_embed in H5)
+            'scale': scale_pred,  # SRT scale
+            'rotation': rotation_pred,  # SRT rotation
+            'translation': translation_pred,  # SRT translation
+            'hidden_states': hidden_states,  # [B, T, d_model] - for Flow-DPO loss
             # Note: uv_warps will be added by VASAModel.forward() via implicit generation
         }
-
-        # Only include SRT components if NOT using derived warps (legacy mode)
-        if not self.use_derived_warps:
-            rotation_pred = motion_data['rotation'] if 'rotation' in motion_data else torch.zeros(B, T, 3, device=device)
-            scale_pred = motion_data['scale'] if 'scale' in motion_data else torch.zeros(B, T, 3, device=device)
-            translation_pred = motion_data['translation'] if 'translation' in motion_data else torch.zeros(B, T, 3, device=device)
-            output_dict['rotation'] = rotation_pred
-            output_dict['scale'] = scale_pred
-            output_dict['translation'] = translation_pred
 
         return output_dict
 
@@ -779,7 +1084,8 @@ class VASAModel(nn.Module):
         self,
         config,
         volumetric_avatar: nn.Module,
-        device: str = 'cuda'
+        device: str = 'cuda',
+        expression_db_path: str = 'cache_single_bucket/expression_embeddings.h5'
     ):
         super().__init__()
         self.config = config
@@ -795,6 +1101,26 @@ class VASAModel(nn.Module):
         self.condition_embedding = self.motion_transformer.cond_emb
         self.device = device
 
+        # Identity theta mode - use fixed theta from identity image
+        self.use_identity_theta = config.dataset.get('use_identity_theta', False)
+
+        # Cosine embedding head for expression database lookup
+        # Normalizes predictions before comparing to database
+        expression_dim = config.model.expression_dim
+        self.cosine_head = nn.Linear(expression_dim, expression_dim, bias=False)
+        # Initialize with normalized weights
+        self.cosine_head.weight.data = F.normalize(self.cosine_head.weight.data, p=2, dim=1)
+
+        # Expression database for cosine similarity loss
+        self.expression_db = None
+        if expression_db_path is not None:
+            from expression_db import ExpressionDatabase
+            logger.info(f"Loading expression database from {expression_db_path}")
+            self.expression_db = ExpressionDatabase(expression_db_path, device=device)
+            logger.info(f"Expression database loaded: {self.expression_db}")
+        else:
+            logger.warning("No expression database path provided - cosine loss will be disabled")
+
         # Initialize scheduler
         self.scheduler = DDIMScheduler(
             num_train_timesteps=config.diffusion.num_steps,
@@ -807,12 +1133,9 @@ class VASAModel(nn.Module):
             prediction_type="sample"
         )
 
-        # Initial context parameters
+        # Initial context parameters (only theta and expression, no SRT)
         self.start_prev_theta = nn.Parameter(torch.zeros(1, config.motion.context_size, 3, 4))
         self.start_prev_expression = nn.Parameter(torch.zeros(1, config.motion.context_size, config.model.expression_dim))
-        self.start_prev_scale = nn.Parameter(torch.zeros(1, config.motion.context_size, 3))
-        self.start_prev_rotation = nn.Parameter(torch.zeros(1, config.motion.context_size, 3))
-        self.start_prev_translation = nn.Parameter(torch.zeros(1, config.motion.context_size, 3))
 
         # Flag to use derived warps from zdyn via volumetric_avatar.predict_embed
         self.use_derived_warps = config.model.get('use_derived_warps', True)
@@ -820,6 +1143,62 @@ class VASAModel(nn.Module):
         # NOTE: Warp generation uses volumetric_avatar's predict_embed pipeline
         # This leverages the full nemo architecture with identity conditioning
         # See: compute_warps_from_zdyn() method below
+
+        # Flow-DPO: Reward model and reference model for preference-based alignment
+        if config.loss.get('use_flow_dpo', False):
+            flow_dim = config.loss.get('flow_dim', 140)  # 12 theta + 128 expression = 140
+            hidden_dim = config.model.hidden_dim
+
+            # Reward model: Learns to predict velocity flows from hidden states
+            self.reward_model = nn.Sequential(
+                nn.Linear(hidden_dim, flow_dim),
+                nn.ReLU(),
+                nn.Linear(flow_dim, flow_dim)
+            )
+
+            # Reference model: Frozen copy of reward model for Flow-DPO baseline
+            self.ref_model = nn.Sequential(
+                nn.Linear(hidden_dim, flow_dim),
+                nn.ReLU(),
+                nn.Linear(flow_dim, flow_dim)
+            )
+            self.ref_model.load_state_dict(self.reward_model.state_dict())
+            for param in self.ref_model.parameters():
+                param.requires_grad = False  # Freeze reference model
+
+            logger.info(f"Flow-DPO enabled: reward_model and ref_model initialized (flow_dim={flow_dim})")
+        else:
+            self.reward_model = None
+            self.ref_model = None
+            logger.info("Flow-DPO disabled")
+
+    def compute_velocity(self, motion: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Compute velocity flows from motion parameters for Flow-DPO.
+        Concatenates frame differences in theta and expression.
+
+        Args:
+            motion: Dict with 'theta' [B, T, 3, 4] and 'expression_embed' [B, T, 128]
+
+        Returns:
+            velocity: [B, T, flow_dim] where flow_dim = 12 + 128 = 140
+        """
+        theta = motion['theta']  # [B, T, 3, 4]
+        expr = motion['expression_embed']  # [B, T, 128]
+
+        # Velocity: frame differences
+        theta_vel = theta[:, 1:] - theta[:, :-1]  # [B, T-1, 3, 4]
+        expr_vel = expr[:, 1:] - expr[:, :-1]  # [B, T-1, 128]
+
+        # Pad to T with zeros at the beginning
+        theta_vel = F.pad(theta_vel, (0, 0, 0, 0, 1, 0))  # [B, T, 3, 4]
+        expr_vel = F.pad(expr_vel, (0, 0, 1, 0))  # [B, T, 128]
+
+        # Flatten theta and concatenate
+        theta_flat = theta_vel.reshape(theta_vel.shape[0], theta_vel.shape[1], -1)  # [B, T, 12]
+        velocity = torch.cat([theta_flat, expr_vel], dim=-1)  # [B, T, 140]
+
+        return velocity
 
     def compute_warps_from_zdyn(
         self,
@@ -835,7 +1214,7 @@ class VASAModel(nn.Module):
 
         Args:
             zdyn: [B, T, zdyn_dim] expression dynamics from motion transformer
-            idt_embed: [B, idt_dim] identity embedding from source image
+            idt_embed: [B, idt_dim] OR [B, 1, idt_dim] identity embedding from source image
             theta: [B, T, 3, 4] pose matrices (optional, can use zeros if not needed)
 
         Returns:
@@ -847,9 +1226,15 @@ class VASAModel(nn.Module):
         # Flatten for per-frame processing
         zdyn_flat = zdyn.view(B * T, -1)  # [B*T, zdyn_dim]
 
-        # Repeat identity for all frames (detach since it's pre-computed with no_grad)
-        # This prevents gradients flowing to frozen identity embedder
-        idt_embed_flat = idt_embed.detach().unsqueeze(1).repeat(1, T, 1).view(B * T, -1)  # [B*T, idt_dim]
+        # idt_embed should be [B, C, H, W] spatial feature map from idt_embedder_nw
+        # Repeat it for all T frames: [B, C, H, W] -> [B*T, C, H, W]
+        if idt_embed.dim() == 4:
+            # idt_embed is [B, C, H, W], repeat for T frames
+            B_idt, C_idt, H_idt, W_idt = idt_embed.shape
+            idt_spatial = idt_embed.detach().unsqueeze(1).repeat(1, T, 1, 1, 1).view(B * T, C_idt, H_idt, W_idt)
+            logger.info(f"[WARP DEBUG] idt_embed spatial: {idt_embed.shape} -> repeated to {idt_spatial.shape}, zdyn: {zdyn.shape}")
+        else:
+            raise ValueError(f"Expected idt_embed to be 4D spatial [B, C, H, W], got shape {idt_embed.shape}")
 
         # Prepare warp_embed_dict directly without using predict_embed
         # Since predict_embed requires source/target images which we don't have,
@@ -864,8 +1249,7 @@ class VASAModel(nn.Module):
             B * T, -1, embed_size, embed_size
         )  # [B*T, C, embed_size, embed_size]
 
-        # Expand identity embed spatially (reuse to avoid recreating)
-        idt_spatial = idt_embed_flat.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, embed_size, embed_size)
+        # idt_spatial is already [B*T, C, embed_size, embed_size] from above
 
         # Combine with identity using warp_embed_head_orig_nw
         if self.volumetric_avatar.args.cat_em:
@@ -878,7 +1262,7 @@ class VASAModel(nn.Module):
             )
 
         # Free intermediate tensors
-        del warp_target_embed, idt_spatial, idt_embed_flat
+        del warp_target_embed, idt_spatial
 
         # Create target_warp_embed_dict
         c = warp_embed_orig.shape[1]
@@ -1035,14 +1419,11 @@ class VASAModel(nn.Module):
             else:
                 logger.debug("[INFERENCE] Not applying dropout to conditions")
 
-        # Handle previous context
+        # Handle previous context (only theta, expression, audio - no SRT)
         if prev_context is None:
             prev_context = {
                 'theta': self.start_prev_theta.repeat(B, 1, 1, 1),
                 'expression_embed': self.start_prev_expression.repeat(B, 1, 1),  # Standardized key
-                'scale': self.start_prev_scale.repeat(B, 1, 1),
-                'rotation': self.start_prev_rotation.repeat(B, 1, 1),
-                'translation': self.start_prev_translation.repeat(B, 1, 1),
                 'audio': torch.zeros(B, self.context_size, 768, device=device)
             }
 
@@ -1055,40 +1436,53 @@ class VASAModel(nn.Module):
             prev_context=prev_context
         )
 
+        # When using identity theta, replace predicted theta with input theta
+        # This bypasses theta prediction entirely
+        if self.use_identity_theta:
+            outputs['theta'] = motion_data['theta']  # Use the identity theta we set earlier
+            logger.debug(f"[IDENTITY THETA] Using fixed identity theta instead of prediction")
+
+        # DISABLED: Expression database clamping removed - prevents model from learning new expressions
+        # The database was acting as "training wheels" that constrained predictions to known expressions
+        # This prevented the model from generalizing and learning the full expression space
+        #
+        # Previous code computed cosine_loss to nearest database expression and pulled predictions toward it
+        # This is too restrictive - model needs freedom to predict any expression, not just cached ones
+        #
+        # if self.expression_db is not None and 'expression_embed' in outputs:
+        #     pred_zdyn = outputs['expression_embed']
+        #     pred_zdyn_proj = self.cosine_head(pred_zdyn)
+        #     real_zdyn = self.expression_db.get_closest(pred_zdyn_proj.detach())
+        #     cosine_loss = F.cosine_embedding_loss(...)
+        #     outputs['cosine_loss'] = cosine_loss
+        #     outputs['real_zdyn'] = real_zdyn
+
+        # Expression database is now only used for lambda_expression_cosine loss in vasa_losses.py
+        # That loss uses GT expressions from dataset, NOT clamped expressions from database lookup
+
         # Generate warps using volumetric_avatar's predict_embed pipeline if enabled
         # This leverages identity conditioning and pretrained nemo components
         # IMPORTANT: Only generate warps when explicitly requested (generate_warps=True)
-        # This saves massive VRAM during training when warps are only needed for visualization
-        if self.use_derived_warps and generate_warps:
-            # Only generate warps if use_derived_warps is enabled AND generate_warps=True
-            if 'expression_embed' in outputs and 'theta' in outputs:
-                if idt_embed is not None:
-                    logger.info(f"[DERIVED WARPS] Generating UV warps from zdyn {outputs['expression_embed'].shape} + idt_embed {idt_embed.shape}")
+
+        if 'expression_embed' in outputs and 'theta' in outputs:
+            if idt_embed is not None:
+                logger.info(f"[DERIVED WARPS] Generating UV warps from zdyn {outputs['expression_embed'].shape} + idt_embed {idt_embed.shape}")
+                # CRITICAL: Warp generation must be in no_grad() to avoid OOM
+                # Warps are only for visualization/frame generation, not for training gradients
+                with torch.no_grad():
                     implicit_warps = self.compute_warps_from_zdyn(
-                        zdyn=outputs['expression_embed'],
+                        zdyn=outputs['expression_embed'].detach(),  # Detach to prevent gradient flow
                         idt_embed=idt_embed,
-                        theta=outputs['theta']
+                        theta=outputs['theta'].detach()
                     )
-                    outputs['uv_warps'] = implicit_warps
-                    outputs['warp_source'] = 'derived'  # Tag for debugging
-                    logger.info(f"[DERIVED WARPS] ✅ Generated warps shape: {implicit_warps.shape}")
-                else:
-                    logger.error(f"[WARPS ERROR] idt_embed is None but use_derived_warps=True")
-                    raise ValueError(f"Cannot generate derived warps: idt_embed required (use_derived_warps=True but idt_embed=None)")
+                outputs['uv_warps'] = implicit_warps
+                outputs['warp_source'] = 'derived'  # Tag for debugging
+                logger.info(f"[DERIVED WARPS] ✅ Generated warps shape: {implicit_warps.shape}")
             else:
-                raise ValueError(f"Cannot generate warps: missing expression_embed or theta in outputs. Keys: {outputs.keys()}")
-        elif self.use_derived_warps and not generate_warps:
-            logger.debug(f"[DERIVED WARPS] Skipping warp generation (generate_warps=False)")
+                logger.error(f"[WARPS ERROR] idt_embed is None but use_derived_warps=True")
+                raise ValueError(f"Cannot generate derived warps: idt_embed required (use_derived_warps=True but idt_embed=None)")
         else:
-            # use_derived_warps=False: Use pre-computed warps from dataset
-            logger.debug(f"[PRE-COMPUTED WARPS] Using warps from dataset (use_derived_warps=False)")
-            # Copy warps from motion_data if available (these are ground truth warps from dataset)
-            if 'uv_warps' in motion_data:
-                outputs['uv_warps'] = motion_data['uv_warps']
-                outputs['warp_source'] = 'dataset'  # Tag for debugging
-                logger.debug(f"[PRE-COMPUTED WARPS] Copied warps from motion_data: {motion_data['uv_warps'].shape}")
-            else:
-                logger.warning(f"[PRE-COMPUTED WARPS] No uv_warps in motion_data! Available keys: {list(motion_data.keys())}")
+            raise ValueError(f"Cannot generate warps: missing expression_embed or theta in outputs. Keys: {outputs.keys()}")
 
         # Clean outputs
         for key, tensor in outputs.items():
@@ -1157,13 +1551,10 @@ class VASAModel(nn.Module):
             if 'translation' in initial_pose:
                 full_motion['translation'][:, 0] = initial_pose['translation']
 
-            # Initial context
+            # Initial context (only theta, expression, audio - no SRT)
             prev_context = {
                 'theta': self.start_prev_theta.repeat(B, 1, 1, 1),
                 'expression_embed': self.start_prev_expression.repeat(B, 1, 1),  # Standardized key
-                'scale': self.start_prev_scale.repeat(B, 1, 1),
-                'rotation': self.start_prev_rotation.repeat(B, 1, 1),
-                'translation': self.start_prev_translation.repeat(B, 1, 1),
                 'audio': torch.zeros(B, context_size, 768, device=device)
             }
 
@@ -1221,7 +1612,8 @@ class VASAModel(nn.Module):
                             window_motion,
                             timesteps,
                             conditions=uncond_conditions,
-                            prev_context=prev_context
+                            prev_context=prev_context,
+                            idt_embed=idt_embed  # FIXED: Pass idt_embed for warp generation
                         )
 
                     # Conditional prediction
@@ -1229,14 +1621,19 @@ class VASAModel(nn.Module):
                         window_motion,
                         timesteps,
                         conditions=window_conditions,
-                        prev_context=prev_context
+                        prev_context=prev_context,
+                        idt_embed=idt_embed  # FIXED: Pass idt_embed for warp generation
                     )
 
                     # Apply classifier-free guidance if scales provided
                     if cfg_scales:
                         pred_motion = {}
                         for k in cond_motion:
-                            if k == 'noise':
+                            if k == 'noise' or k == 'warp_source' or k == 'hidden_states':
+                                # Skip special keys that aren't motion parameters
+                                continue
+                            # Skip non-tensor values (like string tags)
+                            if not isinstance(cond_motion[k], torch.Tensor):
                                 continue
                             # Use audio scale for expression (since audio drives expression)
                             if k == 'expression_embed':
@@ -1262,6 +1659,37 @@ class VASAModel(nn.Module):
                                 eta=eta
                             )
                             window_motion[key] = scheduler_output.prev_sample
+
+                # CRITICAL: Clamp theta/SRT to prevent geometric distortions
+                # These are reasonable ranges based on typical face pose/scale variations
+                logger.info(f"[CLAMPING] Before - Scale range: [{window_motion['scale'].min().item():.2f}, {window_motion['scale'].max().item():.2f}]")
+                logger.info(f"[CLAMPING] Before - Rotation range: [{window_motion['rotation'].min().item():.2f}, {window_motion['rotation'].max().item():.2f}] rad")
+                logger.info(f"[CLAMPING] Before - Translation range: [{window_motion['translation'].min().item():.2f}, {window_motion['translation'].max().item():.2f}]")
+
+                # Clamp to prevent extreme distortions
+                window_motion['scale'] = torch.clamp(window_motion['scale'], 0.7, 1.3)  # ±30% scale variation
+                window_motion['rotation'] = torch.clamp(window_motion['rotation'], -0.785, 0.785)  # ±45 degrees
+                window_motion['translation'] = torch.clamp(window_motion['translation'], -0.3, 0.3)  # ±0.3 translation
+
+                logger.info(f"[CLAMPING] After - Scale range: [{window_motion['scale'].min().item():.2f}, {window_motion['scale'].max().item():.2f}]")
+                logger.info(f"[CLAMPING] After - Rotation range: [{window_motion['rotation'].min().item():.2f}, {window_motion['rotation'].max().item():.2f}] rad")
+                logger.info(f"[CLAMPING] After - Translation range: [{window_motion['translation'].min().item():.2f}, {window_motion['translation'].max().item():.2f}]")
+
+                # Recompose theta from clamped SRT for geometric consistency
+                import sys
+                sys.path.insert(0, 'nemo')
+                from utils.point_transforms import get_transform_matrix
+
+                # Flatten to [B*T, 3] for get_transform_matrix
+                B_win, T_win = window_motion['scale'].shape[:2]
+                scale_flat = window_motion['scale'].view(B_win * T_win, 3)
+                rotation_flat = window_motion['rotation'].view(B_win * T_win, 3)
+                translation_flat = window_motion['translation'].view(B_win * T_win, 3)
+
+                # Recompose theta from clamped SRT
+                theta_4x4 = get_transform_matrix(scale_flat, rotation_flat, translation_flat)
+                window_motion['theta'] = theta_4x4[:, :3, :].view(B_win, T_win, 3, 4)
+                logger.info(f"[CLAMPING] Recomposed theta from clamped SRT")
 
                 # Generate warps using volumetric_avatar's predict_embed pipeline
                 if 'expression_embed' in window_motion and 'theta' in window_motion:

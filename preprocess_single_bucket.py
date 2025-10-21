@@ -9,6 +9,7 @@ from pathlib import Path
 import logging
 from vasa_dataset import VASAIntegratedDataset
 from single_bucket_cache import SingleBucketCache
+from frame_disk_cache import FrameDiskCache
 import argparse
 import gc
 import traceback
@@ -17,13 +18,18 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True):
+def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True,
+                         cache_frames: bool = True, cache_emo_frames: bool = True,
+                         frame_format: str = 'png'):
     """Preprocess all windows and save to single-bucket cache.
 
     Args:
         dataset: The VASA dataset
         cache_dir: Directory to save cache
         resume: If True, resume from existing partial cache
+        cache_frames: If True, save original frames to disk
+        cache_emo_frames: If True, save emo frames to disk
+        frame_format: Image format for saved frames ('png' or 'jpg')
     """
 
     cache = SingleBucketCache(
@@ -32,6 +38,18 @@ def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True):
         compression='gzip',
         compression_level=4
     )
+
+    # Initialize frame disk caches if enabled
+    frame_cache = None
+    emo_frame_cache = None
+
+    if cache_frames:
+        frame_cache = FrameDiskCache(cache_dir, frame_type='frames')
+        logger.info(f"✅ Frame disk cache enabled at {frame_cache.root}")
+
+    if cache_emo_frames:
+        emo_frame_cache = FrameDiskCache(cache_dir, frame_type='emo_frames')
+        logger.info(f"✅ EMO frame disk cache enabled at {emo_frame_cache.root}")
 
     # Check if we can resume from existing cache
     existing_windows = []
@@ -139,9 +157,80 @@ def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True):
                         logger.info(f"⚠️ Filtered {quality_filtered_count} low-quality windows so far...")
                     continue  # Skip caching this window
 
+                # Get video path and window index for frame caching
+                video_path = None
+                window_idx_in_video = None
+                if 'metadata' in window_data:
+                    video_path = window_data['metadata'].get('video_path')
+                    window_idx_in_video = window_data['metadata'].get('window_idx', idx)
+
+                # DEBUG: Log what keys are in window_data
+                if idx == 0:
+                    logger.info(f"🔑 Window {idx} keys: {list(window_data.keys())}")
+                    logger.info(f"   'frames' in window_data: {'frames' in window_data}")
+                    logger.info(f"   'emo_frames' in window_data: {'emo_frames' in window_data}")
+
+                # CRITICAL CHECK: Ensure emo_frames exist (required for training)
+                if 'emo_frames' not in window_data:
+                    quality_filtered_count += 1
+                    logger.error(f"❌ CRITICAL: Window {idx} has NO emo_frames! Cannot train without them. Skipping window.")
+                    if video_path:
+                        logger.error(f"   Video: {video_path}, window_idx: {window_idx_in_video}")
+                    continue  # Skip this window entirely
+
+                # Save frames to disk if enabled
+                if frame_cache and video_path and 'frames' in window_data:
+                    try:
+                        frame_cache.save_frames(
+                            video_path=video_path,
+                            window_idx=window_idx_in_video,
+                            frames=window_data['frames'],
+                            format=frame_format
+                        )
+                        if idx % 50 == 0:
+                            logger.debug(f"💾 Saved frames for window {idx} to disk")
+                    except Exception as e:
+                        logger.warning(f"Failed to save frames for window {idx}: {e}")
+
+                # Save emo_frames to disk if enabled
+                if emo_frame_cache and video_path and 'emo_frames' in window_data:
+                    try:
+                        # DEBUG: Check EMO frame values before saving
+                        emo_frames = window_data['emo_frames']
+                        if isinstance(emo_frames, torch.Tensor):
+                            emo_min, emo_max = emo_frames.min().item(), emo_frames.max().item()
+                            emo_mean = emo_frames.mean().item()
+
+                            if idx % 10 == 0:  # Log every 10th window
+                                logger.info(f"🎨 Window {idx} EMO frames: shape={emo_frames.shape}, range=[{emo_min:.3f}, {emo_max:.3f}], mean={emo_mean:.3f}")
+
+                            if emo_max == 0:
+                                logger.error(f"❌ Window {idx}: EMO frames are all zeros BEFORE saving!")
+                            elif emo_max < 0.01:
+                                logger.warning(f"⚠️ Window {idx}: EMO frames are very dark (max={emo_max:.6f})")
+
+                        emo_frame_cache.save_frames(
+                            video_path=video_path,
+                            window_idx=window_idx_in_video,
+                            frames=window_data['emo_frames'],
+                            format=frame_format,
+                            remove_green_background=True,  # Make green chroma key transparent
+                            green_threshold=0.4  # Lower = more aggressive keying (remove more green)
+                        )
+                        if idx % 50 == 0:
+                            logger.debug(f"💾 Saved emo_frames for window {idx} to disk")
+                    except Exception as e:
+                        logger.warning(f"Failed to save emo_frames for window {idx}: {e}")
+
                 # Convert tensors to CPU and detach to avoid memory accumulation
                 window_data_cpu = {}
                 for key, value in window_data.items():
+                    # Skip frames and emo_frames if they're being cached to disk
+                    if cache_frames and key == 'frames':
+                        continue
+                    if cache_emo_frames and key == 'emo_frames':
+                        continue
+
                     if isinstance(value, torch.Tensor):
                         # Move to CPU and detach from computation graph
                         window_data_cpu[key] = value.detach().cpu()
@@ -212,19 +301,243 @@ def preprocess_and_cache(dataset, cache_dir: Path, resume: bool = True):
         if failed_indices:
             logger.warning(f"   ❌ Failed to process {len(failed_indices)} windows: {failed_indices[:10]}...")
 
+        # Log frame cache statistics
+        if frame_cache:
+            frame_stats = frame_cache.get_cache_stats()
+            logger.info(f"📊 Frame disk cache stats:")
+            logger.info(f"   Videos: {frame_stats['total_videos']}")
+            logger.info(f"   Windows: {frame_stats['total_windows']}")
+            logger.info(f"   Frames: {frame_stats['total_frames']}")
+            logger.info(f"   Size: {frame_stats['total_size_gb']:.2f} GB")
+
+        if emo_frame_cache:
+            emo_stats = emo_frame_cache.get_cache_stats()
+            logger.info(f"📊 EMO frame disk cache stats:")
+            logger.info(f"   Videos: {emo_stats['total_videos']}")
+            logger.info(f"   Windows: {emo_stats['total_windows']}")
+            logger.info(f"   Frames: {emo_stats['total_frames']}")
+            logger.info(f"   Size: {emo_stats['total_size_gb']:.2f} GB")
+
         # Validate cache
         is_valid, issues = cache.validate_cache()
         if is_valid:
             logger.info("✅ Cache validation passed!")
         else:
             logger.error(f"❌ Cache validation failed: {issues}")
+
+        # Auto-rebuild expression database if enabled
+        # Read config from dataset (if available) or use default
+        auto_rebuild = getattr(dataset, 'auto_rebuild_expression_db', False)
+        frame_stride = getattr(dataset, 'expression_db_frame_stride', 5)
+
+        if auto_rebuild and len(all_windows) > 0:
+            logger.info("")
+            logger.info("="*80)
+            logger.info("🔨 Auto-rebuilding expression database...")
+            logger.info("="*80)
+
+            try:
+                from build_expression_db import build_from_single_bucket_cache
+
+                cache_file = cache_dir / "all_windows_cache.h5"
+                db_output = cache_dir / "expression_embeddings.h5"
+
+                build_from_single_bucket_cache(
+                    cache_path=str(cache_file),
+                    output_path=str(db_output),
+                    frame_stride=frame_stride
+                )
+
+                logger.info("✅ Expression database rebuild complete!")
+                logger.info(f"   Database location: {db_output}")
+
+            except Exception as e:
+                logger.error(f"❌ Failed to rebuild expression database: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+
     else:
         logger.error("❌ No windows were successfully processed!")
 
 
+def recover_disk_cache_from_h5(cache_dir: Path, cache_frames: bool = True,
+                               cache_emo_frames: bool = True, frame_format: str = 'png'):
+    """
+    Recover disk cache (PNG/JPG files) from H5 cache.
+
+    This function reads frames from the H5 cache and recreates the disk cache files
+    that are missing. Useful when H5 cache exists but disk cache was deleted or corrupted.
+
+    Args:
+        cache_dir: Directory containing the H5 cache
+        cache_frames: If True, recover original frames to disk
+        cache_emo_frames: If True, recover emo frames to disk
+        frame_format: Image format for saved frames ('png' or 'jpg')
+    """
+    logger.info("="*80)
+    logger.info("🔧 RECOVERY MODE: Recreating disk cache from H5 cache")
+    logger.info("="*80)
+
+    # Load H5 cache
+    cache = SingleBucketCache(
+        cache_dir=cache_dir,
+        cache_name="all_windows_cache.h5",
+        compression='gzip',
+        compression_level=4
+    )
+
+    if not cache.has_cache():
+        logger.error("❌ No H5 cache found! Cannot recover disk cache.")
+        logger.error(f"   Expected at: {cache_dir / 'all_windows_cache.h5'}")
+        return
+
+    # Initialize frame disk caches
+    frame_cache = None
+    emo_frame_cache = None
+
+    if cache_frames:
+        frame_cache = FrameDiskCache(cache_dir, frame_type='frames')
+        logger.info(f"✅ Frame disk cache recovery enabled at {frame_cache.root}")
+
+    if cache_emo_frames:
+        emo_frame_cache = FrameDiskCache(cache_dir, frame_type='emo_frames')
+        logger.info(f"✅ EMO frame disk cache recovery enabled at {emo_frame_cache.root}")
+
+    # Get cache info
+    info = cache.get_cache_info()
+    total_windows = info.get('num_windows', 0)
+    logger.info(f"📊 H5 cache contains {total_windows} windows")
+
+    recovered_frames = 0
+    recovered_emo_frames = 0
+    skipped_frames = 0
+    skipped_emo_frames = 0
+    failed_windows = 0
+
+    for idx in range(total_windows):
+        try:
+            if idx % 50 == 0:
+                logger.info(f"🔄 Processing window {idx}/{total_windows} (recovered: {recovered_frames} frames, {recovered_emo_frames} emo)")
+
+            # Load window from H5
+            window_data = cache.load_window(idx)
+
+            if window_data is None:
+                logger.warning(f"❌ Window {idx} is None in H5 cache")
+                failed_windows += 1
+                continue
+
+            # Get metadata
+            if 'metadata' not in window_data:
+                logger.warning(f"⚠️ Window {idx} has no metadata, skipping")
+                failed_windows += 1
+                continue
+
+            video_path = window_data['metadata'].get('video_path')
+            window_idx_in_video = window_data['metadata'].get('window_idx', idx)
+
+            if not video_path:
+                logger.warning(f"⚠️ Window {idx} has no video_path in metadata")
+                failed_windows += 1
+                continue
+
+            # Recover frames to disk if enabled
+            if frame_cache and 'frames' in window_data:
+                # Check if already exists
+                existing_frames = frame_cache.load_frames(
+                    video_path=video_path,
+                    window_idx=window_idx_in_video,
+                    as_tensor=False  # Just check existence
+                )
+
+                if existing_frames is not None:
+                    skipped_frames += 1
+                    if idx % 100 == 0:
+                        logger.debug(f"⏭️ Frames already exist for window {idx}, skipping")
+                else:
+                    # Save frames from H5 to disk
+                    try:
+                        frame_cache.save_frames(
+                            video_path=video_path,
+                            window_idx=window_idx_in_video,
+                            frames=window_data['frames'],
+                            format=frame_format
+                        )
+                        recovered_frames += 1
+                        if recovered_frames % 10 == 0:
+                            logger.info(f"💾 Recovered {recovered_frames} frame windows to disk")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to save frames for window {idx}: {e}")
+
+            # Recover emo_frames to disk if enabled
+            if emo_frame_cache and 'emo_frames' in window_data:
+                # Check if already exists
+                existing_emo = emo_frame_cache.load_frames(
+                    video_path=video_path,
+                    window_idx=window_idx_in_video,
+                    as_tensor=False  # Just check existence
+                )
+
+                if existing_emo is not None:
+                    skipped_emo_frames += 1
+                    if idx % 100 == 0:
+                        logger.debug(f"⏭️ EMO frames already exist for window {idx}, skipping")
+                else:
+                    # Save emo_frames from H5 to disk
+                    try:
+                        emo_frame_cache.save_frames(
+                            video_path=video_path,
+                            window_idx=window_idx_in_video,
+                            frames=window_data['emo_frames'],
+                            format=frame_format,
+                            remove_green_background=True,  # Make green chroma key transparent
+                            green_threshold=0.4  # Lower = more aggressive keying
+                        )
+                        recovered_emo_frames += 1
+                        if recovered_emo_frames % 10 == 0:
+                            logger.info(f"💾 Recovered {recovered_emo_frames} emo frame windows to disk")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to save emo_frames for window {idx}: {e}")
+
+        except Exception as e:
+            logger.error(f"❌ Error recovering window {idx}: {str(e)}")
+            logger.error(traceback.format_exc())
+            failed_windows += 1
+
+        # Clean up memory periodically
+        if idx % 50 == 0 and idx > 0:
+            torch.cuda.empty_cache()
+            gc.collect()
+
+    # Summary
+    logger.info("")
+    logger.info("="*80)
+    logger.info("✅ RECOVERY COMPLETE")
+    logger.info("="*80)
+    logger.info(f"📊 Statistics:")
+    logger.info(f"   Total windows processed: {total_windows}")
+    logger.info(f"   Failed windows: {failed_windows}")
+
+    if frame_cache:
+        logger.info(f"   Frames recovered: {recovered_frames}")
+        logger.info(f"   Frames skipped (already exist): {skipped_frames}")
+
+        # Get final cache stats
+        frame_stats = frame_cache.get_cache_stats()
+        logger.info(f"   Final frame cache: {frame_stats['total_windows']} windows, {frame_stats['total_frames']} frames, {frame_stats['total_size_gb']:.2f} GB")
+
+    if emo_frame_cache:
+        logger.info(f"   EMO frames recovered: {recovered_emo_frames}")
+        logger.info(f"   EMO frames skipped (already exist): {skipped_emo_frames}")
+
+        # Get final cache stats
+        emo_stats = emo_frame_cache.get_cache_stats()
+        logger.info(f"   Final EMO cache: {emo_stats['total_windows']} windows, {emo_stats['total_frames']} frames, {emo_stats['total_size_gb']:.2f} GB")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Preprocess windows for single-bucket cache')
-    parser.add_argument('--video_folder', type=str, default='junk',
+    parser.add_argument('--video_folder', type=str, default='s1',
                         help='Path to video folder')
     parser.add_argument('--cache_dir', type=str, default='cache_single_bucket',
                         help='Cache directory')
@@ -236,8 +549,32 @@ def main():
                         help='Stride between windows')
     parser.add_argument('--no-resume', action='store_true',
                         help='Start fresh instead of resuming from existing cache')
+    parser.add_argument('--cache-frames', action='store_true', default=True,
+                        help='Cache original frames to disk (default: True)')
+    parser.add_argument('--no-cache-frames', action='store_false', dest='cache_frames',
+                        help='Disable caching original frames to disk')
+    parser.add_argument('--cache-emo-frames', action='store_true', default=True,
+                        help='Cache EMO frames to disk (default: True)')
+    parser.add_argument('--no-cache-emo-frames', action='store_false', dest='cache_emo_frames',
+                        help='Disable caching EMO frames to disk')
+    parser.add_argument('--frame-format', type=str, default='png', choices=['png', 'jpg'],
+                        help='Image format for cached frames (default: png)')
+    parser.add_argument('--recover', action='store_true',
+                        help='Recovery mode: Recreate disk cache from existing H5 cache')
     args = parser.parse_args()
 
+    # RECOVERY MODE: Recreate disk cache from H5
+    if args.recover:
+        logger.info("🔧 Running in RECOVERY mode")
+        recover_disk_cache_from_h5(
+            cache_dir=Path(args.cache_dir),
+            cache_frames=args.cache_frames,
+            cache_emo_frames=args.cache_emo_frames,
+            frame_format=args.frame_format
+        )
+        return
+
+    # NORMAL MODE: Preprocess videos
     # Load EMO model
     import importlib
     from omegaconf import OmegaConf
@@ -279,11 +616,20 @@ def main():
         generate_emo_frames=True,  # Enable EMO frame generation
         emo_identity_path="nemo/data/IMG_1.png",  # Identity image
         emo_keyframes_per_window=50,  # 50 keyframes per window
-        va_bridge=va_bridge  # Pass the bridge
+        va_bridge=va_bridge,  # Pass the bridge
+        auto_rebuild_expression_db=True,  # Auto-rebuild expression DB
+        expression_db_frame_stride=1  # Sample all frames (use 5 for every 5th)
     )
 
     # Preprocess and cache
-    preprocess_and_cache(dataset, Path(args.cache_dir), resume=not args.no_resume)
+    preprocess_and_cache(
+        dataset,
+        Path(args.cache_dir),
+        resume=not args.no_resume,
+        cache_frames=args.cache_frames,
+        cache_emo_frames=args.cache_emo_frames,
+        frame_format=args.frame_format
+    )
 
 
 if __name__ == "__main__":

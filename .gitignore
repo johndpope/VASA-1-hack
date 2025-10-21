@@ -126,3 +126,4 @@ training_log.txt
 .taskmaster/tasks/task_010.txt
 /debug_pipeline3
 /debug_pipeline4
+*.mpg

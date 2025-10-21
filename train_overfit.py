@@ -108,7 +108,11 @@ def main():
         max_videos=config.dataset.max_videos,
         cache_dir=config.paths.cache_dir,
         device=config.device,
-        use_single_bucket=use_single_bucket
+        use_single_bucket=use_single_bucket,
+        cache_frames_to_disk=config.dataset.get('cache_frames_to_disk', True),
+        cache_emo_frames_to_disk=config.dataset.get('cache_emo_frames_to_disk', True),
+        frame_format=config.dataset.get('frame_format', 'png'),
+        flow_noise_level=config.loss.get('flow_noise_level', 0.1)
     )
 
     # Check if single-bucket cache exists, preprocess if needed
@@ -117,7 +121,7 @@ def main():
             logger.info("Single-bucket cache not found. Consider running preprocess_single_bucket.py first.")
         else:
             cache_info = train_dataset.cache.get_cache_info()
-            logger.info(f"Using single-bucket cache: {cache_info['num_windows']} windows, {cache_info['file_size_mb']:.1f} MB")
+            # logger.info(f"Using single-bucket cache: windows, {cache_info['file_size_mb']:.1f} MB")
     
     # Debug: Check what windows are available
     logger.info(f"Dataset has {len(train_dataset.windows)} windows")

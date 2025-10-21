@@ -54,6 +54,24 @@ except ImportError:
     SingleBucketCache = None
     USE_SINGLE_BUCKET = False
     logger.info("SingleBucketCache not available")
+
+try:
+    from frame_disk_cache import FrameDiskCache
+    USE_FRAME_DISK_CACHE = True
+    logger.info("FrameDiskCache available for MD5-indexed frame storage")
+except ImportError:
+    FrameDiskCache = None
+    USE_FRAME_DISK_CACHE = False
+    logger.info("FrameDiskCache not available")
+
+try:
+    from per_video_cache import PerVideoCache
+    USE_PER_VIDEO_CACHE = True
+    logger.info("PerVideoCache available for per-video H5 files")
+except ImportError:
+    PerVideoCache = None
+    USE_PER_VIDEO_CACHE = False
+    logger.info("PerVideoCache not available")
 from torchvision.utils import save_image
 from datetime import datetime
 import hashlib
@@ -523,13 +541,21 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         emo_identity_path: str = "nemo/data/IMG_1.png",  # NEW: Identity image for EMO
         emo_keyframes_per_window: int = 5,  # NEW: Number of EMO keyframes to generate
         va_bridge = None,  # NEW: Volumetric avatar bridge for EMO generation
+        auto_rebuild_expression_db: bool = False,  # NEW: Auto-rebuild expression DB after preprocessing
+        expression_db_frame_stride: int = 5,  # NEW: Sample every Nth frame for expression DB
+        cache_frames_to_disk: bool = False,  # NEW: Load frames from disk cache
+        cache_emo_frames_to_disk: bool = False,  # NEW: Load EMO frames from disk cache
+        frame_format: str = 'png',  # NEW: Frame format for disk cache
+        flow_noise_level: float = 0.1,  # NEW: Noise level for Flow-DPO dispreferred samples
     ):
         VASADatasetMixin.__init__(self)
-        
+
         # Basic initialization
         self.video_folder = Path(video_folder)
         self.emo_model = emo_model
         self.window_size = window_size
+        self.auto_rebuild_expression_db = auto_rebuild_expression_db
+        self.expression_db_frame_stride = expression_db_frame_stride
         self.stride = stride
         self.max_batch_size = max_batch_size
         self.context_size = context_size
@@ -539,6 +565,9 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         self.hop_length = hop_length
         self.device = device
         self.model_device = next(emo_model.parameters()).device
+
+        # Flow-DPO parameters
+        self.flow_noise_level = flow_noise_level
 
         # Initialize LipStateAnalyzer for lip metrics computation
         self.lip_analyzer = LipStateAnalyzer()
@@ -571,8 +600,36 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.use_single_bucket = use_single_bucket
 
+        # Initialize frame disk caches if enabled
+        self.frame_cache = None
+        self.emo_frame_cache = None
+        self.cache_frames_to_disk = cache_frames_to_disk
+        self.cache_emo_frames_to_disk = cache_emo_frames_to_disk
+
+        if cache_frames_to_disk and USE_FRAME_DISK_CACHE and FrameDiskCache:
+            self.frame_cache = FrameDiskCache(self.cache_dir, frame_type='frames')
+            logger.info(f"✅ Frame disk cache enabled for loading at {self.frame_cache.root}")
+
+        if cache_emo_frames_to_disk and USE_FRAME_DISK_CACHE and FrameDiskCache:
+            self.emo_frame_cache = FrameDiskCache(self.cache_dir, frame_type='emo_frames')
+            logger.info(f"✅ EMO frame disk cache enabled for loading at {self.emo_frame_cache.root}")
+
         # Choose cache implementation based on preference
-        if use_single_bucket and USE_SINGLE_BUCKET and SingleBucketCache:
+        # Priority: PerVideoCache > SingleBucketCache > ChunkedCache > Built-in
+        per_video_index = self.cache_dir / 'cache_index.json'
+        single_bucket_h5 = self.cache_dir / 'all_windows_cache.h5'
+
+        if per_video_index.exists() and USE_PER_VIDEO_CACHE and PerVideoCache:
+            # Use per-video cache (MD5-indexed folders with separate H5 files)
+            self.cache = PerVideoCache(
+                cache_dir=self.cache_dir,
+                compression='gzip',
+                compression_level=4
+            )
+            self.cache_type = 'per_video'
+            logger.info(f"✅ Using PerVideoCache at {self.cache_dir}")
+            logger.info(f"   Per-video H5 files with MD5-indexed folders")
+        elif single_bucket_h5.exists() and use_single_bucket and USE_SINGLE_BUCKET and SingleBucketCache:
             # Use single-bucket cache for all windows
             self.cache = SingleBucketCache(
                 cache_dir=self.cache_dir,
@@ -609,8 +666,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         self.audio_cache_dir.mkdir(exist_ok=True)
         logger.info(f"Using audio cache directory: {self.audio_cache_dir}")
         
-        # Get all videos
-        all_videos = [str(f) for f in self.video_folder.rglob("*.mp4")]
+        self.video_folder = Path(self.video_folder)  # Ensure it's a Path object
+        all_videos = [str(f) for ext in ("*.mp4", "*.mpg") for f in self.video_folder.rglob(ext)]
         logger.info(f"Found {len(all_videos)} total videos")
         
         # Sample videos if needed
@@ -700,12 +757,12 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 
         # Filter to valid videos
         valid_videos = [
-            v for v in self.video_paths 
-            if isinstance(self.audio_status.get(v), dict) and 
+            v for v in self.video_paths
+            if isinstance(self.audio_status.get(v), dict) and
             self.audio_status[v].get('has_audio', False)
         ]
         self.video_paths = valid_videos
-        
+
         logger.info(f"Found {len(self.video_paths)} videos with valid audio")
         
         # Extract audio if requested
@@ -733,10 +790,16 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             
             # Create windows
             self.windows = self._create_window_indices()
+
+            # NOTE: emo_frames filtering disabled because emo_frames are generated on-the-fly
+            # and not always saved back to cache. Filtering would incorrectly exclude valid windows.
+            # If needed in future, ensure emo_frames are saved to cache after generation.
+            logger.info(f"Using all {len(self.windows)} windows (emo_frames will be generated on-the-fly if needed)")
+
             self.video_windows = defaultdict(list)
             for window in self.windows:
                 self.video_windows[window['video_path']].append(window)
-            
+
             logger.info(f"Created {len(self.windows)} total windows across {len(self.video_paths)} videos")
         else:
             logger.warning("No valid videos found with audio!")
@@ -942,39 +1005,46 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             return 0.0, 0.0
         
 
-    def _get_emotion(self, face_crop: np.ndarray) -> np.ndarray:
-        """Get emotion VA (valence-arousal) values using HSEmotion MTL model"""
+    def _get_emotion(self, face_crop: np.ndarray) -> tuple:
+        """Get emotion label and VA (valence-arousal) values using HSEmotion MTL model
+
+        Returns:
+            tuple: (emotion_label: str, va_values: np.ndarray) where va_values is shape (2,) for [valence, arousal]
+        """
         try:
             # Ensure face crop is the right size
             if face_crop.shape[0] < 64 or face_crop.shape[1] < 64:
                 face_crop = cv2.resize(face_crop, (64, 64))
-            
+
             # Get predictions - returns (label, scores) where scores includes VA values
             labels, scores = self.emotion_recognizer.predict_emotions(face_crop, logits=True)
-            
+
             # logger.debug(f"Emotion scores: {scores}")
             # logger.debug(f"Emotion labels: {labels}")
-            
+
+            # Extract emotion label
+            emotion_label = labels if isinstance(labels, str) else "neutral"
+
             # Extract VA values (last two values in scores)
             if isinstance(scores, np.ndarray) and scores.size >= 2:
                 va_values = scores[-2:]  # Get last two values (valence, arousal)
                 va_values = np.array(va_values, dtype=np.float32)
-                
+
                 # Ensure correct shape
                 if va_values.shape != (2,):
                     logger.warning(f"Unexpected VA shape: {va_values.shape}")
-                    return np.zeros(2, dtype=np.float32)
-                    
+                    return emotion_label, np.zeros(2, dtype=np.float32)
+
                 # Apply tanh to ensure values are in [-1, 1] range
                 va_values = np.tanh(va_values)
-                
-                return va_values
-                
-            return np.zeros(2, dtype=np.float32)
-                
+
+                return emotion_label, va_values
+
+            return emotion_label, np.zeros(2, dtype=np.float32)
+
         except Exception as e:
             logger.error(f"Error in emotion VA extraction: {str(e)}")
-            return np.zeros(2, dtype=np.float32)  # [valence, arousal]
+            return "neutral", np.zeros(2, dtype=np.float32)  # [label, valence-arousal]
         
             
     def _compute_main_gaze_direction(self, frames: List[np.ndarray]) -> Tuple[float, float]:
@@ -1022,8 +1092,9 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             fps = cap.get(cv2.CAP_PROP_FPS)
             cap.release()
 
-            # Minimum frames needed for window + context
-            min_frames = self.window_size + self.context_size + self.stride  # 50 + 10 + 25 = 85
+            # Minimum frames needed for 2 windows (window_size + stride)
+            # Example: window_size=50, stride=25 -> window1=[0-49], window2=[25-74] -> need 75 frames
+            min_frames = self.window_size + self.stride  # 50 + 25 = 75
             
             logger.debug(f"\nVideo length check for {video_path}:")
             logger.debug(f"  Total frames: {total_frames}")
@@ -1076,12 +1147,12 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         
         for video_path in self.video_paths:
             logger.debug(f"\nProcessing video: {video_path}")
-            
+
             # Skip if no audio
             if not self.audio_status.get(video_path, {}).get('has_audio', False):
                 logger.debug(f"Skipping - no audio available")
                 continue
-            
+
             # Check video length
             video_info = self._check_video_length(video_path)
             if video_info is None:
@@ -1685,7 +1756,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             # Check if video has audio
             has_audio = self.audio_status.get(video_path, {}).get('has_audio', False)
             logger.debug(f"Audio status for video: has_audio={has_audio}")
-            
+
             if not has_audio:
                 logger.warning(f"No audio in video: {video_path}")
                 return (
@@ -1809,16 +1880,57 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 # Return zero tensor with correct shape
                 mfcc_features = torch.zeros(1, self.window_size, 13, device=audio_segment.device)
                 logger.debug(f"Returning zero tensor with shape: {mfcc_features.shape}")
-            
 
-            return features, mfcc_features
+            # Extract mel spectrogram for Synchformer (128 mel bins, 50 time frames)
+            logger.debug("\n=== Processing Mel Spectrogram for Synchformer ===")
+            try:
+                mel_transform = torchaudio.transforms.MelSpectrogram(
+                    sample_rate=sample_rate,
+                    n_fft=1024,
+                    hop_length=audio_segment.shape[-1] // self.window_size,  # Ensure 50 frames
+                    n_mels=128,  # Standard for Synchformer
+                    f_min=0.0,
+                    f_max=8000.0
+                )
+
+                mel_spec = mel_transform(audio_segment)  # [1, n_mels, T]
+
+                # Ensure exactly window_size (50) time frames
+                if mel_spec.shape[-1] != self.window_size:
+                    # Interpolate to exact window_size
+                    mel_spec = F.interpolate(
+                        mel_spec.unsqueeze(0),  # [1, 1, n_mels, T]
+                        size=(128, self.window_size),
+                        mode='bilinear',
+                        align_corners=False
+                    ).squeeze(0)  # [1, n_mels, T]
+
+                # Convert to log scale
+                mel_spec = torch.log(mel_spec + 1e-8)
+
+                # Transpose to [1, T, n_mels] for consistency
+                mel_spec = mel_spec.transpose(1, 2)  # [1, window_size, 128]
+
+                logger.debug(f"Mel spectrogram shape: {mel_spec.shape}")
+                logger.debug(f"Mel spectrogram range: [{mel_spec.min():.3f}, {mel_spec.max():.3f}]")
+
+            except Exception as e:
+                logger.error(f"Error in mel spectrogram processing: {str(e)}")
+                logger.error(traceback.format_exc())
+                mel_spec = torch.zeros(1, self.window_size, 128, device=audio_segment.device)
+
+            return features, mfcc_features, audio_segment, mel_spec
 
         except Exception as e:
             logger.error(f"Error extracting audio features: {str(e)}")
             logger.error(traceback.format_exc())
+            # Return zero tensors including audio waveform and mel spec
+            samples_needed = int(self.window_size * sample_rate / fps)
             return (
                 torch.zeros((1, self.window_size, 384 if use_whisper else 768)),
-                torch.zeros((1, self.window_size, 13))
+                torch.zeros((1, self.window_size, 13)),
+                torch.zeros((1, samples_needed)),  # audio_segment with correct shape
+                torch.zeros((1, self.window_size, 128))  # mel_spec [1, 50, 128]
             )
                     
     def _preextract_all_audio(self):
@@ -2044,11 +2156,12 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             distance = np.array([face_size], dtype=np.float32)
 
             # Get emotion using existing emotion recognizer
-            emotion_logits = self._get_emotion(face_crop)
+            emotion_label, emotion_va = self._get_emotion(face_crop)
 
             return {
                 'landmarks': landmarks_68,
-                'emotion': emotion_logits,
+                'emotion': emotion_va,  # VA values [valence, arousal]
+                'emotion_label': emotion_label,  # String label like "sad", "happy", etc.
                 'gaze': gaze,  # L2CS gaze results
                 'head_distance': distance,
                 'bbox': bbox
@@ -2565,7 +2678,40 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             # logger.debug(f"Processing window {idx} from video: {video_path}")
             
             # Check if we have cached data for this specific window
-            if self.cache_type == 'single_bucket':
+            if self.cache_type == 'per_video':
+                # For per-video cache, load by video path and window index
+                cached_data = self.cache.load_window(
+                    video_path=video_path,
+                    window_idx=window['window_idx'],
+                    load_frames=True  # Load frames from disk
+                )
+                if cached_data is not None:
+                    logger.info(f"👽 Getting cached window {window['window_idx']} from per-video cache for {Path(video_path).name}")
+                    # Ensure metadata contains required fields from the window
+                    if 'metadata' not in cached_data:
+                        cached_data['metadata'] = {}
+                    cached_data['metadata'].update({
+                        'video_path': str(video_path),
+                        'start_frame': window['start_frame'],
+                        'window_idx': window['window_idx'],
+                        'fps': window.get('fps', 30),
+                        'has_context': window.get('has_context', False)
+                    })
+
+                    # Ensure emotion_label exists (add default if missing from old cache)
+                    if 'emotion_label' not in cached_data:
+                        # Get sequence length from any tensor in the data
+                        seq_len = 50  # default
+                        for key in ['theta', 'expression_embed', 'emotion']:
+                            if key in cached_data and isinstance(cached_data[key], torch.Tensor):
+                                seq_len = cached_data[key].shape[0]
+                                break
+                        # Create default neutral labels for all frames
+                        cached_data['emotion_label'] = ['neutral'] * seq_len
+                        logger.debug(f"Added default emotion_label for window {window['window_idx']} (length: {seq_len})")
+
+                    return cached_data
+            elif self.cache_type == 'single_bucket':
                 # For single-bucket cache, load by index directly
                 cached_data = self.cache.load_window(idx)
                 if cached_data is not None:
@@ -2580,6 +2726,74 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         'fps': window.get('fps', 30),
                         'has_context': window.get('has_context', False)
                     })
+
+                    # Load frames from disk cache if enabled and not in H5
+                    if self.cache_frames_to_disk and self.frame_cache and 'frames' not in cached_data:
+                        frames = self.frame_cache.load_frames(
+                            video_path=video_path,
+                            window_idx=window['window_idx'],
+                            as_tensor=True
+                        )
+                        if frames is not None:
+                            cached_data['frames'] = frames
+                            logger.info(f"📀 Loaded frames from disk cache for window {idx}")
+                        else:
+                            # RECOVERY: Regenerate frames from video on-the-fly
+                            logger.warning(f"⚠️ Frames missing from disk for window {idx}, regenerating from video...")
+                            start_frame = cached_data['metadata'].get('start_frame', 0)
+                            regenerated_frames, _ = self._extract_frames(video_path, start_frame, self.sequence_length)
+
+                            if regenerated_frames and len(regenerated_frames) > 0:
+                                frames_tensor = torch.stack(regenerated_frames)
+                                cached_data['frames'] = frames_tensor
+                                # Save to disk cache for future use
+                                try:
+                                    self.frame_cache.save_frames(video_path, window['window_idx'], frames_tensor, format='png')
+                                    logger.info(f"✅ Regenerated and saved {len(regenerated_frames)} frames for window {idx}")
+                                except Exception as e:
+                                    logger.warning(f"Failed to save regenerated frames: {e}")
+                            else:
+                                logger.error(f"❌ Could not regenerate frames for window {idx} from video {video_path}")
+                                # Return None to skip this window
+                                return None
+                    elif 'frames' not in cached_data:
+                        logger.error(f"❌ CRITICAL: frames not in cached_data and frame loading disabled!")
+                        logger.error(f"   cache_frames_to_disk={self.cache_frames_to_disk}, frame_cache={self.frame_cache is not None}")
+
+                    # Load emo_frames from disk cache if enabled and not in H5
+                    if self.cache_emo_frames_to_disk and self.emo_frame_cache and 'emo_frames' not in cached_data:
+                        emo_frames = self.emo_frame_cache.load_frames(
+                            video_path=video_path,
+                            window_idx=window['window_idx'],
+                            as_tensor=True
+                        )
+                        if emo_frames is not None:
+                            cached_data['emo_frames'] = emo_frames
+                            logger.info(f"📀 Loaded emo_frames from disk cache for window {idx}")
+                        else:
+                            # FAIL HARD: emo_frames are REQUIRED for training
+                            logger.error(f"❌ CRITICAL: emo_frames missing from disk for window {idx}")
+                            logger.error(f"   Video: {video_path}, window_idx: {window['window_idx']}")
+                            logger.error(f"   Expected at: {self.emo_frame_cache.get_window_dir(video_path, window['window_idx'])}")
+                            logger.error(f"   This window CANNOT be used for training without emo_frames!")
+                            logger.error(f"   ACTION: Re-run preprocessing with --cache-emo-frames to generate missing emo_frames")
+                            # Return None to exclude this window from training
+                            return None
+
+                    # Ensure emotion_label exists (add default if missing from old cache)
+                    if 'emotion_label' not in cached_data:
+                        # Get sequence length from any tensor in the data
+                        seq_len = 50  # default
+                        for key in ['theta', 'expression_embed', 'emotion']:
+                            if key in cached_data and isinstance(cached_data[key], torch.Tensor):
+                                seq_len = cached_data[key].shape[0]
+                                break
+                        # Create default neutral labels for all frames
+                        cached_data['emotion_label'] = ['neutral'] * seq_len
+                        logger.debug(f"Added default emotion_label for window {idx} (length: {seq_len})")
+
+                   
+
                     return cached_data
             elif self.cache_type == 'chunked':
                 # For chunked cache (WindowCache), load from chunk
@@ -2598,6 +2812,20 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         'fps': window.get('fps', 30),
                         'has_context': window.get('has_context', False)
                     })
+
+                    # Ensure emotion_label exists (add default if missing from old cache)
+                    if 'emotion_label' not in cached_data:
+                        # Get sequence length from any tensor in the data
+                        seq_len = 50  # default
+                        for key in ['theta', 'expression_embed', 'emotion']:
+                            if key in cached_data and isinstance(cached_data[key], torch.Tensor):
+                                seq_len = cached_data[key].shape[0]
+                                break
+                        # Create default neutral labels for all frames
+                        cached_data['emotion_label'] = ['neutral'] * seq_len
+                        logger.debug(f"Added default emotion_label for window {window['window_idx']} (length: {seq_len})")
+
+                   
                     return cached_data
             else:
                 # For built-in cache
@@ -2614,8 +2842,22 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         'fps': window.get('fps', 30),
                         'has_context': window.get('has_context', False)
                     })
+
+                    # Ensure emotion_label exists (add default if missing from old cache)
+                    if 'emotion_label' not in cached_data:
+                        # Get sequence length from any tensor in the data
+                        seq_len = 50  # default
+                        for key in ['theta', 'expression_embed', 'emotion']:
+                            if key in cached_data and isinstance(cached_data[key], torch.Tensor):
+                                seq_len = cached_data[key].shape[0]
+                                break
+                        # Create default neutral labels for all frames
+                        cached_data['emotion_label'] = ['neutral'] * seq_len
+                        logger.debug(f"Added default emotion_label for window {window['window_idx']} (length: {seq_len})")
+
+                   
                     return cached_data
-            
+
             # Process the single window
             try:
                 # Extract frames
@@ -2635,8 +2877,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     if not emo_features:
                         return self._get_zero_sample()
 
-                    # Extract both types of audio features
-                    wav2vec_features, mfcc_features = self._extract_audio_features(
+                    # Extract both types of audio features + mel spectrogram
+                    wav2vec_features, mfcc_features, audio_segment, mel_spec = self._extract_audio_features(
                         video_path,
                         start_time=window['start_frame'] / window['fps'],
                         duration=self.window_size / window['fps']
@@ -2646,6 +2888,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                     # Process face attributes
                     gaze_angles = []
                     emotion_logits = []
+                    emotion_labels = []  # Store emotion labels (e.g., "sad", "happy")
                     distances = []
                     landmarks_list = []
                     speed_buckets = []
@@ -2685,6 +2928,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                                 # Store basic attributes
                                 gaze_angles.append(attrs['gaze'])
                                 emotion_logits.append(attrs['emotion'])
+                                emotion_labels.append(attrs.get('emotion_label', 'neutral'))  # Store label
                                 distances.append(attrs['head_distance'])
                                 
                                 # Store landmarks in correct order
@@ -2709,6 +2953,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                                 # Add zero-filled arrays for missing data
                                 gaze_angles.append(np.zeros(2, dtype=np.float32))
                                 emotion_logits.append(np.zeros(2, dtype=np.float32))
+                                emotion_labels.append('neutral')  # Default label
                                 distances.append(np.array([0.5], dtype=np.float32))
                                 speed_buckets.append(4)  # Middle bucket
                                 
@@ -2736,17 +2981,26 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
 
                     # Create window data with correct key names
                     # Squeeze batch dimension from EMO features (they come as [1, T, ...])
+                    # NOTE: Frames will be saved to disk cache and excluded from H5 cache
+
+                    # Extract motion parameters (needed for velocity computation)
+                    theta_gt = emo_features['theta'].squeeze(0)  # [1, T, 3, 4] -> [T, 3, 4]
+                    expression_gt = emo_features['expression_embed'].squeeze(0)  # [1, T, 128] -> [T, 128]
+
                     window_data = {
-                        'frames': torch.stack(frames),
-                        'theta': emo_features['theta'].squeeze(0),  # [1, T, 3, 4] -> [T, 3, 4]
+                        'frames': torch.stack(frames),  # Include frames so they can be saved to disk cache
+                        'theta': theta_gt,  # [T, 3, 4]
                         'scale': emo_features['scale'].squeeze(0),  # [1, T, 3] -> [T, 3]
                         'rotation': emo_features['rotation'].squeeze(0),  # [1, T, 3] -> [T, 3]
                         'translation': emo_features['translation'].squeeze(0),  # [1, T, 3] -> [T, 3]
-                        'expression_embed': emo_features['expression_embed'].squeeze(0),  # [1, T, 128] -> [T, 128]
+                        'expression_embed': expression_gt,  # [T, 128]
                         'audio_features': wav2vec_features.squeeze(0) if wav2vec_features.ndim == 3 else wav2vec_features,  # [1, T, 768] -> [T, 768]
                         'audio_mfcc': mfcc_features.squeeze(0) if mfcc_features.ndim == 3 else mfcc_features,  # [1, T, 13] -> [T, 13]
+                        'audio_waveform': audio_segment.squeeze(0),  # [1, samples] -> [samples] - raw audio for legacy
+                        'audio_mel_spec': mel_spec.squeeze(0),  # [1, T, 128] -> [T, 128] - mel spectrogram for Synchformer
                         'gaze': torch.tensor(np.stack(gaze_angles), dtype=torch.float32),
                         'emotion': torch.tensor(np.stack(emotion_logits), dtype=torch.float32),
+                        'emotion_label': emotion_labels,  # List of strings like ["sad", "happy", "neutral", ...]
                         'head_distance': torch.tensor(np.stack(distances), dtype=torch.float32),
                         'speed_bucket': torch.tensor(speed_buckets, dtype=torch.long).unsqueeze(-1),
 
@@ -2786,7 +3040,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                             'window_idx': window['window_idx']
                         }
                     }
-                    
+
+                   
                     # Verify shapes
                     expected_shapes = {
                         'lips': (self.sequence_length, 20, 3),
@@ -2832,98 +3087,106 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         # For built-in cache, use the original save method
                         self._save_window_to_cache(video_path, window['window_idx'], window_data)
 
-                    # Generate EMO frames if enabled
+                    # Generate EMO frames if enabled AND not already in window_data (from cache)
                     if self.generate_emo_frames and self.va_bridge is not None and self.emo_identity_image is not None:
-                        try:
-                            with torch.no_grad():
-                                # Clear VA bridge cache to ensure fresh embeddings for EMO identity
-                                if hasattr(self.va_bridge, 'clear_cache'):
-                                    self.va_bridge.clear_cache()
+                        if 'emo_frames' in window_data:
+                            logger.debug(f"✅ Using cached EMO frames for window {idx} ({len(window_data['emo_frames'])} keyframes)")
+                        else:
+                            try:
+                                with torch.no_grad():
+                                    # Clear VA bridge cache to ensure fresh embeddings for EMO identity
+                                    if hasattr(self.va_bridge, 'clear_cache'):
+                                        self.va_bridge.clear_cache()
 
-                                # Select keyframe indices
-                                T = window_data['theta'].shape[0]
-                                keyframe_indices = np.linspace(0, T-1, self.emo_keyframes_per_window, dtype=int)
+                                    # Select keyframe indices
+                                    T = window_data['theta'].shape[0]
+                                    keyframe_indices = np.linspace(0, T-1, self.emo_keyframes_per_window, dtype=int)
 
-                                emo_frames = []
-                                for frame_idx in keyframe_indices:
-                                    # Extract motion for this frame and ensure all on same device
-                                    frame_motion = {
-                                        'theta': window_data['theta'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device),  # [1, 1, 3, 4]
-                                        'expression_embed': window_data['expression_embed'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device),  # [1, 1, 128]
-                                        'uv_warps': window_data['uv_warps'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device) if 'uv_warps' in window_data else None,  # [1, 1, 16, 64, 64, 3]
-                                    }
+                                    emo_frames = []
+                                    for frame_idx in keyframe_indices:
+                                        # Extract motion for this frame and ensure all on same device
+                                        frame_motion = {
+                                            'theta': window_data['theta'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device),  # [1, 1, 3, 4]
+                                            'expression_embed': window_data['expression_embed'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device),  # [1, 1, 128]
+                                            'uv_warps': window_data['uv_warps'][frame_idx:frame_idx+1].unsqueeze(0).to(self.device) if 'uv_warps' in window_data else None,  # [1, 1, 16, 64, 64, 3]
+                                        }
 
-                                    # Check if we have uv_warps (required for EMO generation)
-                                    if frame_motion['uv_warps'] is None:
-                                        logger.debug(f"Skipping EMO frame {frame_idx}: uv_warps not available")
-                                        emo_frames.append(torch.zeros(3, 512, 512, device=self.device))
-                                        continue
+                                        # Check if we have uv_warps (required for EMO generation)
+                                        if frame_motion['uv_warps'] is None:
+                                            if frame_idx == 0:  # Log once per window
+                                                logger.error(f"❌ Window {idx}: uv_warps is None - EMO frames will be black!")
+                                                logger.error(f"   'uv_warps' in window_data: {'uv_warps' in window_data}")
+                                                if 'uv_warps' in window_data:
+                                                    logger.error(f"   uv_warps shape: {window_data['uv_warps'].shape}")
+                                                    logger.error(f"   uv_warps range: [{window_data['uv_warps'].min():.6f}, {window_data['uv_warps'].max():.6f}]")
+                                            emo_frames.append(torch.zeros(3, 512, 512, device=self.device))
+                                            continue
 
-                                    # Generate EMO frame using va_bridge
-                                    # Output will be [1, 1, C, H, W]
-                                    emo_identity = self.emo_identity_image.to(self.device)
+                                        # Generate EMO frame using va_bridge
+                                        # Output will be [1, 1, C, H, W]
+                                        emo_identity = self.emo_identity_image.to(self.device)
 
-                                    # DEBUG: Save identity image once to verify it's correct
-                                    if frame_idx == 0 and idx % 100 == 0:
-                                        import torchvision
-                                        torchvision.utils.save_image(emo_identity[0], f'debug_emo_identity_window_{idx}.png')
-                                        logger.info(f"Saved debug EMO identity image for window {idx}")
+                                        # DEBUG: Save identity image once to verify it's correct
+                                        if frame_idx == 0 and idx % 100 == 0:
+                                            import torchvision
+                                            torchvision.utils.save_image(emo_identity[0], f'debug_emo_identity_window_{idx}.png')
+                                            logger.info(f"Saved debug EMO identity image for window {idx}")
 
-                                    emo_output, _ = self.va_bridge.generate_frames_from_motion(
-                                        motion_outputs=frame_motion,
-                                        source_img=emo_identity,
-                                        use_black_background=True  # Use black background to ensure clean EMO render
-                                    )
+                                        emo_output, _ = self.va_bridge.generate_frames_from_motion(
+                                            motion_outputs=frame_motion,
+                                            source_img=emo_identity,
+                                            use_black_background=True  # Use black background to ensure clean EMO render
+                                        )
 
-                                    if emo_output is not None:
-                                        # Extract the single frame [1, 1, C, H, W] -> [C, H, W]
-                                        frame = emo_output[0, 0]
-                                        emo_frames.append(frame)
-                                    else:
-                                        # Add blank frame if generation failed
-                                        emo_frames.append(torch.zeros(3, 512, 512, device=self.device))
+                                        if emo_output is not None:
+                                            # Extract the single frame [1, 1, C, H, W] -> [C, H, W]
+                                            frame = emo_output[0, 0]
+                                            emo_frames.append(frame)
+                                        else:
+                                            # Add blank frame if generation failed
+                                            emo_frames.append(torch.zeros(3, 512, 512, device=self.device))
 
-                                # Stack EMO frames [num_keyframes, C, H, W]
-                                if len(emo_frames) == 0:
-                                    raise RuntimeError(f"EMO generation is enabled but produced no frames for window {idx}")
+                                    # Stack EMO frames [num_keyframes, C, H, W]
+                                    if len(emo_frames) == 0:
+                                        raise RuntimeError(f"EMO generation is enabled but produced no frames for window {idx}")
 
-                                window_data['emo_frames'] = torch.stack(emo_frames, dim=0)
-                                window_data['emo_keyframe_indices'] = torch.tensor(keyframe_indices, dtype=torch.long)
-                                logger.info(f"✅ Generated {len(emo_frames)} EMO frames for window {idx}")
+                                    window_data['emo_frames'] = torch.stack(emo_frames, dim=0)
+                                    window_data['emo_keyframe_indices'] = torch.tensor(keyframe_indices, dtype=torch.long)
+                                    logger.info(f"✅ Generated {len(emo_frames)} EMO frames for window {idx}")
 
-                                # QUALITY CHECK: Detect bad UV warps immediately after generation
-                                if 'uv_warps' in window_data:
-                                    uv_magnitude = window_data['uv_warps'].abs().mean().item()
-                                    uv_std = window_data['uv_warps'].std().item()
+                                    # QUALITY CHECK: Detect bad UV warps immediately after generation
+                                    if 'uv_warps' in window_data:
+                                        uv_magnitude = window_data['uv_warps'].abs().mean().item()
+                                        uv_std = window_data['uv_warps'].std().item()
 
-                                    # Check for collapsed/bad UV warps
-                                    if uv_magnitude < 0.15 or uv_std < 0.01:
-                                        logger.error(f"❌ BAD UV WARPS detected for window {idx} from video {video_path}")
-                                        logger.error(f"   UV magnitude: {uv_magnitude:.6f} (threshold: 0.15)")
-                                        logger.error(f"   UV std: {uv_std:.6f} (threshold: 0.01)")
+                                        # Check for collapsed/bad UV warps
+                                        if uv_magnitude < 0.15 or uv_std < 0.01:
+                                            logger.error(f"❌ BAD UV WARPS detected for window {idx} from video {video_path}")
+                                            logger.error(f"   UV magnitude: {uv_magnitude:.6f} (threshold: 0.15)")
+                                            logger.error(f"   UV std: {uv_std:.6f} (threshold: 0.01)")
 
-                                        # Dispatch event to mark video as bad
-                                        self.tracker.dispatch(VideoEventData(
-                                            video_path=video_path,
-                                            event_type=VideoEvent.BAD_UV_WARPS,
-                                            details={
-                                                "window_idx": idx,
-                                                "uv_magnitude": uv_magnitude,
-                                                "uv_std": uv_std,
-                                                "reason": f"UV warps collapsed (magnitude={uv_magnitude:.4f}, std={uv_std:.6f})"
-                                            }
-                                        ))
+                                            # Dispatch event to mark video as bad
+                                            self.tracker.dispatch(VideoEventData(
+                                                video_path=video_path,
+                                                event_type=VideoEvent.BAD_UV_WARPS,
+                                                details={
+                                                    "window_idx": idx,
+                                                    "uv_magnitude": uv_magnitude,
+                                                    "uv_std": uv_std,
+                                                    "reason": f"UV warps collapsed (magnitude={uv_magnitude:.4f}, std={uv_std:.6f})"
+                                                }
+                                            ))
 
-                                        # Return zero sample to skip this window
-                                        logger.warning(f"⚠️ Returning zero sample for window {idx} due to bad UV warps")
-                                        return self._get_zero_sample()
+                                            # Return zero sample to skip this window
+                                            logger.warning(f"⚠️ Returning zero sample for window {idx} due to bad UV warps")
+                                            return self._get_zero_sample()
 
-                        except Exception as e:
-                            logger.error(f"❌ FAILED to generate EMO frames for window {idx}: {e}")
-                            import traceback
-                            logger.error(traceback.format_exc())
-                            # EMO frames are REQUIRED - re-raise the exception
-                            raise RuntimeError(f"EMO frame generation is mandatory but failed: {e}") from e
+                            except Exception as e:
+                                logger.error(f"❌ FAILED to generate EMO frames for window {idx}: {e}")
+                                import traceback
+                                logger.error(traceback.format_exc())
+                                # EMO frames are REQUIRED - re-raise the exception
+                                raise RuntimeError(f"EMO frame generation is mandatory but failed: {e}") from e
 
                     # Return the single window data directly
                     return window_data
@@ -2972,6 +3235,58 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
         except Exception as e:
             logger.error(f"Error saving pending windows: {str(e)}")
 
+    def _compute_velocity(self, motion: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Compute ground-truth velocity flows from motion parameters for Flow-DPO.
+        Concatenates frame differences in theta and expression.
+
+        Args:
+            motion: Dict with 'theta' [T, 3, 4] and 'expression_embed' [T, 128]
+
+        Returns:
+            velocity: [T, flow_dim] where flow_dim = 12 + 128 = 140
+        """
+        theta = motion['theta']  # [T, 3, 4]
+        expr = motion['expression_embed']  # [T, 128]
+
+        # Velocity: frame differences
+        theta_vel = theta[1:] - theta[:-1]  # [T-1, 3, 4]
+        expr_vel = expr[1:] - expr[:-1]  # [T-1, 128]
+
+        # Pad to T with zeros at the beginning (first frame has zero velocity)
+        theta_vel = torch.cat([torch.zeros(1, 3, 4, dtype=theta.dtype, device=theta.device), theta_vel], dim=0)  # [T, 3, 4]
+        expr_vel = torch.cat([torch.zeros(1, 128, dtype=expr.dtype, device=expr.device), expr_vel], dim=0)  # [T, 128]
+
+        # Flatten theta and concatenate
+        theta_flat = theta_vel.reshape(theta_vel.shape[0], -1)  # [T, 12]
+        velocity = torch.cat([theta_flat, expr_vel], dim=-1)  # [T, 140]
+
+        return velocity.float()
+
+    def _generate_dispreferred_motion(self, motion: Dict[str, torch.Tensor], noise_level: float = 0.1) -> Dict[str, torch.Tensor]:
+        """
+        Generate dispreferred motion samples by adding controlled noise to theta and expression.
+        Used for Flow-DPO preference learning.
+
+        Args:
+            motion: Dict with 'theta' and 'expression_embed'
+            noise_level: Standard deviation of Gaussian noise (default 0.1 = 10% of signal)
+
+        Returns:
+            dispreferred_motion: Dict with noisy theta and expression_embed
+        """
+        dispreferred = {}
+
+        # Add noise to theta [T, 3, 4]
+        theta_noise = torch.randn_like(motion['theta']) * noise_level
+        dispreferred['theta'] = motion['theta'] + theta_noise
+
+        # Add noise to expression [T, 128]
+        expr_noise = torch.randn_like(motion['expression_embed']) * noise_level
+        dispreferred['expression_embed'] = motion['expression_embed'] + expr_noise
+
+        return dispreferred
+
     def _get_zero_sample(self) -> Dict[str, torch.Tensor]:
         """Return a zero-filled sample with all required features including landmarks and lip motion"""
         return {
@@ -2982,6 +3297,8 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             'translation': torch.zeros((self.sequence_length, 3)),
             'audio_features': torch.zeros((self.sequence_length, 768)),   # wav2vec - no batch dim
             'audio_mfcc': torch.zeros((self.sequence_length, 13)),       # mfcc for syncnet - no batch dim
+            'audio_waveform': torch.zeros(self.sequence_length * 640),    # raw audio at 16kHz, ~40ms per frame
+            'audio_mel_spec': torch.zeros((self.sequence_length, 128)),   # mel spectrogram for Synchformer
             'gaze': torch.zeros((self.sequence_length, 2)),
             'head_distance': torch.zeros((self.sequence_length, 1)),
             'emotion': torch.zeros((self.sequence_length, 2)),

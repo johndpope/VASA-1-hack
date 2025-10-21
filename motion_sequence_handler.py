@@ -133,39 +133,53 @@ class MotionSequenceHandler:
             return []
             
     def prepare_motion_data(self, window: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Prepare motion data from window matching H5 cache structure."""
-        # Validate that UV warps are present (main warping field from H5 cache)
+        """Prepare motion data from window matching H5 cache structure.
+
+        NOTE: SRT (scale/rotation/translation) restored - model predicts theta + expression + SRT.
+        SRT values are used for direct supervision against ground truth from EMO.
+        """
+        # UV warps are optional - if not cached, use zeros (will be derived from Nemo networks)
         if 'uv_warps' not in window:
-            raise KeyError(
-                f"CRITICAL: Missing required UV warps field. "
-                f"Dataset must provide this field. Available keys: {list(window.keys())}"
-            )
+            logger.debug("UV warps not in cache, using zeros (will be derived from Nemo)")
+            B, T = window['theta'].shape[0], window['theta'].shape[1]
+            device = window['theta'].device
+            uv_warps = torch.zeros((B, T, 16, 64, 64, 3), device=device)
+        else:
+            uv_warps = window['uv_warps']
 
         motion_data = {
             'theta': window['theta'],            # [B, T, 3, 4] - pose matrix
-            'scale': window['scale'],            # [B, T, 3] - SRT scale
-            'rotation': window['rotation'],      # [B, T, 3] - SRT rotation
-            'translation': window['translation'], # [B, T, 3] - SRT translation
             'expression_embed': window['expression_embed'],  # [B, T, 128] - aligned expression
-            'uv_warps': window['uv_warps'],      # [B, T, 16, 64, 64, 3] - UV warps from H5
+            'uv_warps': uv_warps,      # [B, T, 16, 64, 64, 3] - UV warps (zeros if not cached, derived during forward)
         }
+
+        # Add SRT ground truth values if available (for direct supervision)
+        if 'scale' in window:
+            motion_data['scale'] = window['scale']  # [B, T, 3] - GT scale from EMO
+        if 'rotation' in window:
+            motion_data['rotation'] = window['rotation']  # [B, T, 3] - GT rotation from EMO
+        if 'translation' in window:
+            motion_data['translation'] = window['translation']  # [B, T, 3] - GT translation from EMO
 
         # Include audio features for sync loss and other audio-related losses
         if 'audio_features' in window:
-            motion_data['audio_features'] = window['audio_features']  # Should be [B, T, D]
+            motion_data['audio_features'] = window['audio_features']  # wav2vec features [B, T, 768]
+        if 'audio_mel_spec' in window:
+            motion_data['audio_mel_spec'] = window['audio_mel_spec']  # Mel spectrogram [B, T, 128] - for Synchformer
+        if 'audio_mfcc' in window:
+            motion_data['audio_mfcc'] = window['audio_mfcc']  # MFCC features [B, T, 13]
+        # Legacy key support
         if 'mfcc' in window:
-            motion_data['mfcc'] = window['mfcc']  # MFCC features for SyncNet
+            motion_data['mfcc'] = window['mfcc']
 
+      
         return motion_data  
 
     def merge_windows(self, windows, total_frames, device):
-        """Merge overlapping motion sequence windows."""
-        # Initialize output tensors
+        """Merge overlapping motion sequence windows (SRT removed)."""
+        # Initialize output tensors (only theta + expression)
         merged_sequence = {
             'theta': torch.zeros((1, total_frames, 3, 4), device=device),
-            'scale': torch.zeros((1, total_frames, 3), device=device),
-            'rotation': torch.zeros((1, total_frames, 3), device=device),
-            'translation': torch.zeros((1, total_frames, 3), device=device),
             'expression_embed': torch.zeros((1, total_frames, 128), device=device)  # Assuming embed dim is 128
         }
         

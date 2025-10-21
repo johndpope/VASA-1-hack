@@ -273,28 +273,48 @@ def create_window_sequence_collate_fn(context_size: int = 10):
             
         # Create batched dictionary
         batched = {}
+
+        # Debug: Log what keys are available in the first window
+        logger.info(f"🔍 Keys available in first processed window: {sorted([k for k in processed_windows[0].keys() if not k.startswith('metadata')])}")
+
+        # Check how many windows have frames
+        windows_with_frames = sum(1 for w in processed_windows if 'frames' in w)
+        logger.info(f"🖼️  Windows with 'frames': {windows_with_frames}/{len(processed_windows)}")
+
         keys_to_stack = [
             'frames', 'theta', 'scale', 'rotation', 'translation',
-            'expression_embed', 'audio_features', 'audio_mfcc',
+            'expression_embed', 'audio_features', 'audio_mfcc', 'audio_mel_spec',
+            # NOTE: audio_waveform excluded - too large for batching (26k samples), causes OOM
+            # Synchformer uses audio_mel_spec instead
             'gaze', 'emotion', 'head_distance', 'speed_bucket',
             'lips', 'right_eye', 'left_eye', 'jaw', 'nose',
             'lip_motion', 'blink_state',
             'prev_theta', 'prev_rotation', 'prev_translation',
             'prev_expression', 'prev_audio',
-            # REQUIRED warping fields for MotionTransformer
+            # REQUIRED warping fields for MotionTransformerg
             'xy_warps', 'rigid_warps', 'uv_warps', 'source_theta_warp',
             # EMO (Volumetric Avatar) generated frames for comparison
-            'emo_frames', 'emo_keyframe_indices'
+            'emo_frames', 'emo_keyframe_indices',
+
         ]
-        
+
         for key in keys_to_stack:
             if key in processed_windows[0]:
                 try:
+                    # Check if ALL windows have this key before stacking
+                    if not all(key in w for w in processed_windows):
+                        missing_count = sum(1 for w in processed_windows if key not in w)
+                        logger.warning(f"Skipping {key}: {missing_count}/{len(processed_windows)} windows missing this key")
+                        continue
+
                     # Move all tensors to CPU before stacking to avoid device mismatch
                     tensors_to_stack = [w[key].cpu() if isinstance(w[key], torch.Tensor) and w[key].is_cuda else w[key] for w in processed_windows]
                     batched[key] = torch.stack(tensors_to_stack)
                 except Exception as e:
                     logger.warning(f"Could not stack {key}: {e}")
+            else:
+                if key in ['audio_mel_spec', 'audio_mfcc']:  # Log missing audio keys
+                    logger.warning(f"⚠️ Key '{key}' not found in processed windows")
 
         # Handle lip_metrics separately as it's a dictionary of tensors
         if 'lip_metrics' in processed_windows[0]:
@@ -309,7 +329,24 @@ def create_window_sequence_collate_fn(context_size: int = 10):
 
         # Handle metadata separately (don't stack)
         batched['metadata'] = [w['metadata'] for w in processed_windows]
-        
+
+        # Handle emotion_label separately (list of strings, don't stack)
+        # Check if emotion_label exists in all windows, not just the first one
+        if 'emotion_label' in processed_windows[0]:
+            # Only include if ALL windows have it, otherwise use None
+            if all('emotion_label' in w for w in processed_windows):
+                batched['emotion_label'] = [w['emotion_label'] for w in processed_windows]
+            else:
+                # Some windows missing emotion_label, use None for all
+                batched['emotion_label'] = [w.get('emotion_label', None) for w in processed_windows]
+
+        # Log final batched keys for debugging
+        logger.info(f"📦 Final batched keys: {sorted(batched.keys())}")
+
+        # FLOW-DPO REMOVED: No longer asserting velocity fields presence
+        # assert 'velocity_gt' in batched
+        # assert 'velocity_dispreferred' in batched
+
         return batched
     
     return collate_fn

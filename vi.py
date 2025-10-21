@@ -406,8 +406,76 @@ class VASAInference:
 
                 # Extract source parameters
                 source_params = self.extract_source_params(source_tensor)
-                
-                # Generate frames with exact length match
+
+                # DIAGNOSTIC: Test with silence to verify audio is guiding expressions
+                logger.info("\n=== SILENCE TEST - Verifying Audio Guidance ===")
+                silence_windows = []
+                for window in audio_windows:
+                    silence_window = {
+                        'audio_features': torch.zeros_like(window['audio_features']),  # Zero audio
+                        'gaze': window.get('gaze', torch.zeros(1, self.window_size, 2, device=self.device)),
+                        'emotion': window.get('emotion', torch.zeros(1, self.window_size, 2, device=self.device)),
+                        'blink': window.get('blink', torch.zeros(1, self.window_size, 3, device=self.device)),
+                    }
+                    silence_windows.append(silence_window)
+
+                # Generate with silence
+                silence_frames = self.generate_frames_from_audio(
+                    source_params=source_params,
+                    audio_windows=silence_windows,
+                    initial_expression=source_params['expression_embed']
+                )
+
+                # Analyze silence output
+                silence_frames_tensor = silence_frames  # [T, C, H, W]
+                logger.info(f"Silence frames shape: {silence_frames_tensor.shape}")
+
+                # Check expression variance in silence (should be LOW if audio guides properly)
+                # We can't directly access expression_embed, but we can check visual variance
+                frame_diffs = []
+                for i in range(1, len(silence_frames_tensor)):
+                    diff = (silence_frames_tensor[i] - silence_frames_tensor[i-1]).abs().mean().item()
+                    frame_diffs.append(diff)
+
+                silence_variance = torch.tensor(frame_diffs).var().item() if frame_diffs else 0.0
+                silence_mean_diff = torch.tensor(frame_diffs).mean().item() if frame_diffs else 0.0
+
+                logger.info(f"Silence test results:")
+                logger.info(f"  Mean frame-to-frame diff: {silence_mean_diff:.6f}")
+                logger.info(f"  Frame diff variance: {silence_variance:.6f}")
+
+                if silence_mean_diff > 0.01:
+                    logger.warning("⚠️  HIGH MOTION IN SILENCE! Audio may not be guiding expressions.")
+                    logger.warning("   Model is generating motion from noise/pose instead of audio.")
+                    logger.warning("   Consider increasing audio CFG scale (currently using default 20.0)")
+                else:
+                    logger.info("✅ Low motion in silence - audio guidance is working")
+
+                # Save silence test video for inspection (without audio)
+                silence_output_path = str(output_path).replace('.mp4', '_silence_test.mp4')
+                logger.info(f"Saving silence test to: {silence_output_path}")
+
+                # Save frames without audio (silence test)
+                frames_np = silence_frames_tensor.cpu().numpy().transpose(0, 2, 3, 1)
+                if frames_np.max() <= 1.0:
+                    frames_np = (frames_np * 255).astype(np.uint8)
+
+                import cv2
+                writer = cv2.VideoWriter(
+                    silence_output_path,
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    fps,
+                    (frames_np.shape[2], frames_np.shape[1])
+                )
+
+                for frame in frames_np:
+                    writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                writer.release()
+                logger.info(f"✅ Saved silence test video: {silence_output_path}")
+
+                logger.info("=== End Silence Test ===\n")
+
+                # Generate frames with actual audio (normal inference)
                 frames = self.generate_frames_from_audio(
                     source_params=source_params,
                     audio_windows=audio_windows,
@@ -575,26 +643,25 @@ class VASAInference:
         try:
             logger.info("\n=== Starting Audio-Driven Generation ===")
             device = source_params['theta'].device
-            
+
             # Initialize motion data with source params for first frame
+            # Note: Only theta and expression are used - SRT removed from training
             motion_data = {
                 'theta': source_params['theta'],
-                'scale': source_params['scale'],
-                'rotation': source_params['rotation'], 
-                'translation': source_params['translation'],
                 'expression_embed': initial_expression
             }
-            
+
+            # Extract identity embeddings from source params for warp generation
+            idt_embed = source_params['idt_embed']
+            logger.info(f"Identity embeddings extracted: {idt_embed.shape}")
+
             # Track all generated frames and previous motion parameters
             generated_frames = []
             prev_motion = {
                 'expression': None,
-                'scale': None,
                 'theta': None,
-                'rotation': None,
-                'translation': None
             }
-            
+
             # Process each audio window
             for window_idx, window_data in enumerate(audio_windows):
                 logger.info(f"Processing window {window_idx}/{len(audio_windows)}")
@@ -608,7 +675,7 @@ class VASAInference:
                 # Get batch size and sequence length from audio features
                 B = audio_features.shape[0] if audio_features.dim() >= 2 else 1
                 T = audio_features.shape[1] if audio_features.dim() >= 2 else audio_features.shape[0]
-                
+
                 # Ensure audio features have correct shape [B, T, D]
                 if audio_features.dim() == 2:
                     audio_features = audio_features.unsqueeze(0)  # Add batch dimension
@@ -618,24 +685,20 @@ class VASAInference:
                     'audio_features': audio_features.to(device),
                     # Add default values for conditions used in training
                     'gaze': torch.zeros(B, T, 2, device=device),  # [B, T, 2]
-                    'head_distance': torch.zeros(B, T, 1, device=device),  # [B, T, 1] 
+                    'head_distance': torch.zeros(B, T, 1, device=device),  # [B, T, 1]
                     'emotion': torch.zeros(B, T, 2, device=device),  # [B, T, 2]
                     'speed_bucket': torch.ones(B, T, 1, device=device) * 4,  # Middle speed bucket
                 }
 
-                # Generate sequence using the corrected method signature
+                # Generate sequence using the corrected method signature with idt_embed
                 motion_sequence = self.model.generate_sequence(
                     initial_pose=motion_data,
                     initial_dynamics=motion_data['expression_embed'],
                     conditions=cond_signals,
-                    eta=0.5,  # FIXED: Match training config (was 0.0 causing deterministic, janky outputs)
+                    idt_embed=idt_embed,  # FIXED: Pass identity embeddings for warp generation
+                    eta=0.8,  # Match audit config for consistency
                     num_steps=50,
-                    cfg_scales={
-                        'audio': 0.5,      # From config
-                        'gaze': 1.0,       # From config
-                        'head_distance': 0.8,
-                        'emotion': 0.5
-                    }
+                    cfg_scales=None,  # Use default strong audio guidance (20.0) from model
                 )
 
                 # SMOOTHNESS FIX: Apply temporal Gaussian smoothing to pose parameters
@@ -655,7 +718,9 @@ class VASAInference:
                 logger.info(f"Motion variation - Expression: {expr_var:.6f}, Theta: {theta_var:.6f}, Rotation: {rot_var:.6f}")
 
                 # Generate frames for this window
-                for t in range(motion_sequence['expression_embed'].size(1)):
+                # Skip overlapping frames for windows after the first
+                start_idx = 0 if window_idx == 0 else self.stride
+                for t in range(start_idx, motion_sequence['expression_embed'].size(1)):
                     # Get current motion parameters
                     curr_expression = motion_sequence['expression_embed'][:, t]
                     curr_theta = motion_sequence['theta'][:, t]
@@ -721,12 +786,11 @@ class VASAInference:
                     }
 
                 # Update motion data using the last frame from this window
+                # IMPORTANT: Use [:, -1] not [:, -1:] to remove time dimension
+                # Note: Only theta and expression are used - SRT removed from training
                 motion_data = {
-                    'theta': motion_sequence['theta'][:, -1:],
-                    'rotation': motion_sequence['rotation'][:, -1:],
-                    'scale': motion_sequence['scale'][:, -1:],
-                    'translation': motion_sequence['translation'][:, -1:],
-                    'expression_embed': motion_sequence['expression_embed'][:, -1]
+                    'theta': motion_sequence['theta'][:, -1],  # [B, 3, 4] not [B, 1, 3, 4]
+                    'expression_embed': motion_sequence['expression_embed'][:, -1]  # [B, 128]
                 }
 
             logger.info(f"Total frames generated: {len(generated_frames)}")
