@@ -3445,14 +3445,15 @@ class VASATrainer:
                         use_perceiver = self.model.motion_transformer.cond_emb.use_talkvid_audio_projection
 
                     # Get phoneme ground truth and predictions for visualization
+                    # IMPORTANT: Detach and move to CPU to prevent memory accumulation on GPU
                     phoneme_gt = None
                     phoneme_pred = None
                     if 'aux_predictions' in outputs:
                         aux = outputs['aux_predictions']
                         if 'phoneme_gt' in aux:
-                            phoneme_gt = aux['phoneme_gt'][0]  # [8] for first batch item
+                            phoneme_gt = aux['phoneme_gt'][0].detach().cpu()  # [8] for first batch item
                         if 'phoneme_pred' in aux:
-                            phoneme_pred = torch.argmax(aux['phoneme_pred'][0], dim=-1)  # [8] predicted IDs
+                            phoneme_pred = torch.argmax(aux['phoneme_pred'][0], dim=-1).detach().cpu()  # [8] predicted IDs
 
                     fig_audio_expr = create_audio_expression_visualization(
                         audio_features=targets['audio_features'][0],  # First batch item
@@ -3468,6 +3469,9 @@ class VASATrainer:
                     )
                     wandb.log({"visuals/audio_to_expression": wandb.Image(fig_audio_expr)}, step=step)
                     plt.close(fig_audio_expr)
+
+                    # Clean up phoneme tensors to free memory
+                    del phoneme_gt, phoneme_pred
             
             # Log motion parameter comparison (skip if using ground truth)
             # When use_gt_theta/scale/rotation/translation are True, there's no prediction to compare

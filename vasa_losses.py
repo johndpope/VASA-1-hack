@@ -1110,23 +1110,30 @@ class VASALossModule:
 
             # CRITICAL: Clamp phoneme_gt to valid range [0, vocab_size-1]
             # Some phoneme IDs from wav2vec2 may exceed our expected 50 classes
-            phoneme_gt_clamped = torch.clamp(phoneme_gt, min=0, max=vocab_size - 1)
+            # Use in-place clamp to avoid creating new tensor
+            phoneme_gt_clamped = phoneme_gt.clamp(min=0, max=vocab_size - 1)
 
-            # Log if clamping occurred (indicates vocab size mismatch)
-            num_clamped = (phoneme_gt != phoneme_gt_clamped).sum().item()
-            if num_clamped > 0:
-                logger.warning(f"⚠️ Clamped {num_clamped} phoneme IDs to range [0, {vocab_size-1}]")
-                logger.warning(f"   Original range: [{phoneme_gt.min().item()}, {phoneme_gt.max().item()}]")
-                logger.warning(f"   This suggests vocab_size mismatch. Consider updating phoneme_head output_dim.")
+            # Log if clamping occurred (indicates vocab size mismatch) - only occasionally to reduce overhead
+            if torch.rand(1).item() < 0.01:  # Log 1% of the time
+                num_clamped = (phoneme_gt != phoneme_gt_clamped).sum().item()
+                if num_clamped > 0:
+                    logger.warning(f"⚠️ Clamped {num_clamped} phoneme IDs to range [0, {vocab_size-1}]")
+                    logger.warning(f"   Original range: [{phoneme_gt.min().item()}, {phoneme_gt.max().item()}]")
+                    logger.warning(f"   This suggests vocab_size mismatch. Consider updating phoneme_head output_dim.")
 
             # Cross-entropy loss (flatten for CE)
+            # IMPORTANT: Don't keep references to intermediate tensors
             aux_phoneme_term = F.cross_entropy(
                 phoneme_pred.view(-1, vocab_size),  # [B*num_queries, vocab_size]
                 phoneme_gt_clamped.view(-1).long()  # [B*num_queries] - ensure long type
             )
             losses['aux_phoneme'] = aux_phoneme_term
 
-            logger.debug(f"  ✅ Auxiliary phoneme loss: {aux_phoneme_term.item():.6f}")
+            # Clean up intermediate tensors to prevent memory accumulation
+            del phoneme_pred, phoneme_gt, phoneme_gt_clamped
+
+            if torch.rand(1).item() < 0.01:  # Log 1% of the time to reduce overhead
+                logger.debug(f"  ✅ Auxiliary phoneme loss: {aux_phoneme_term.item():.6f}")
 
             # ASSERT: Log what keys are actually in targets for debugging
             logger.info(f"🔍 LOSS FUNCTION - Checking targets keys: {sorted(targets.keys())}")
