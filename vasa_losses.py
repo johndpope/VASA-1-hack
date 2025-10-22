@@ -228,6 +228,7 @@ class VASALossModule:
         # Audio-lip correlation loss weight
         self.lambda_audio_lip = getattr(config.loss, 'lambda_audio_lip', 2.0)
         self.lambda_mouth_openness = getattr(config.loss, 'lambda_mouth_openness', 10.0)
+        self.lambda_aux_phoneme = getattr(config.loss, 'lambda_aux_phoneme', 0.05)
 
         # Flow-DPO loss weight (VideoReward framework - Liu et al., 2025)
         self.lambda_flow_dpo = getattr(config.loss, 'lambda_flow_dpo', 0.5)
@@ -1083,10 +1084,54 @@ class VASALossModule:
             # 10. Flow-DPO Loss (VideoReward framework - Liu et al., 2025)
             flow_dpo_term = torch.tensor(0.0, device=device)
 
+            # 11. Phoneme Prediction Loss (Self-Supervised Auxiliary Task)
+            # This helps the Perceiver audio projection explicitly learn phoneme-related features
+            # which are critical for lip sync (different phonemes → specific lip shapes)
+            # CRITICAL: This loss MUST be computed for proper training
+            aux_phoneme_term = torch.tensor(0.0, device=device)
+
+            # HARD ASSERTION: Fail training if phoneme data is missing
+            assert 'aux_predictions' in outputs, \
+                "❌ FATAL: aux_predictions missing from model outputs! Phoneme loss cannot be computed."
+
+            aux = outputs['aux_predictions']
+
+            assert 'phoneme_pred' in aux, \
+                "❌ FATAL: phoneme_pred missing from aux_predictions! Model not configured for phoneme prediction."
+
+            assert 'phoneme_gt' in aux, \
+                "❌ FATAL: phoneme_gt missing from aux_predictions! Cache does not have phoneme ground truth. Run ./upsert_phoneme.sh first!"
+
+            phoneme_pred = aux['phoneme_pred']  # [B, num_queries, vocab_size]
+            phoneme_gt = aux['phoneme_gt']      # [B, num_queries]
+
+            # Get vocab size from predictions (may be > 50 if using full wav2vec2 vocab)
+            vocab_size = phoneme_pred.size(-1)
+
+            # CRITICAL: Clamp phoneme_gt to valid range [0, vocab_size-1]
+            # Some phoneme IDs from wav2vec2 may exceed our expected 50 classes
+            phoneme_gt_clamped = torch.clamp(phoneme_gt, min=0, max=vocab_size - 1)
+
+            # Log if clamping occurred (indicates vocab size mismatch)
+            num_clamped = (phoneme_gt != phoneme_gt_clamped).sum().item()
+            if num_clamped > 0:
+                logger.warning(f"⚠️ Clamped {num_clamped} phoneme IDs to range [0, {vocab_size-1}]")
+                logger.warning(f"   Original range: [{phoneme_gt.min().item()}, {phoneme_gt.max().item()}]")
+                logger.warning(f"   This suggests vocab_size mismatch. Consider updating phoneme_head output_dim.")
+
+            # Cross-entropy loss (flatten for CE)
+            aux_phoneme_term = F.cross_entropy(
+                phoneme_pred.view(-1, vocab_size),  # [B*num_queries, vocab_size]
+                phoneme_gt_clamped.view(-1).long()  # [B*num_queries] - ensure long type
+            )
+            losses['aux_phoneme'] = aux_phoneme_term
+
+            logger.debug(f"  ✅ Auxiliary phoneme loss: {aux_phoneme_term.item():.6f}")
+
             # ASSERT: Log what keys are actually in targets for debugging
             logger.info(f"🔍 LOSS FUNCTION - Checking targets keys: {sorted(targets.keys())}")
-         
-            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + warp_term + diversity_term + perceptual_term + mouth_perceptual_term + audio_lip_term + audio_expr_term + flow_dpo_term
+
+            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + warp_term + diversity_term + perceptual_term + mouth_perceptual_term + audio_lip_term + audio_expr_term + flow_dpo_term + aux_phoneme_term * self.lambda_aux_phoneme
             losses['total'] = total_loss
             logger.debug(f"Total loss (with perceptual): {total_loss.item():.6f}")
 
@@ -1104,7 +1149,13 @@ class VASALossModule:
             logger.error(f"Conditions keys: {conditions.keys() if conditions else 'None'}")
             logger.error(f"Current epoch: {current_epoch}, Step: {step}")
             logger.error(traceback.format_exc())
-            return {'total': torch.tensor(1.0, device=device)}
+            # Return both losses and metrics to match expected return signature
+            # Use self.device as fallback if device not yet defined
+            error_device = device if 'device' in locals() else self.device
+            error_losses = {'total': torch.tensor(1.0, device=error_device)}
+            if return_metrics:
+                return error_losses, {}
+            return error_losses
 
         
 

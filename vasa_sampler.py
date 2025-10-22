@@ -295,6 +295,8 @@ def create_window_sequence_collate_fn(context_size: int = 10):
             'xy_warps', 'rigid_warps', 'uv_warps', 'source_theta_warp',
             # EMO (Volumetric Avatar) generated frames for comparison
             'emo_frames', 'emo_keyframe_indices',
+            # Phoneme ground truth for auxiliary phoneme prediction loss
+            'phoneme_gt',
 
         ]
 

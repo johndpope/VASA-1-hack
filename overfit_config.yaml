@@ -203,8 +203,8 @@ loss:
   lambda_sync: 0.5            # REDUCED from 2.0 - Synchformer designed for evaluation, not training gradients
   
   # Other losses
-  lambda_nonlip: 1.0          # DISABLED until TDD converges (was 0.1)
-  lambda_speed: 0.0           # DISABLED until TDD converges (was 0.1)
+  lambda_nonlip: 0.0          # DISABLED until TDD converges (was 0.1)
+  lambda_speed: 0.1           # DISABLED until TDD converges (was 0.1)
   lambda_control: 1.0         # DISABLED until TDD converges - focus on theta+expression first
 
   lambda_cfg: 0.5
@@ -224,6 +224,7 @@ loss:
   lambda_smoothness: 0.0      # DISABLED to allow maximum expression variance
   lambda_audio_lip: 3.0       # REDUCED from 5.0 to 3.0 - balance with lip landmark loss (2.0)
   lambda_mouth_openness: 10.0  # Direct mouth openness to audio energy supervision weight
+  lambda_aux_phoneme: 0.2    # Phoneme prediction (self-supervised) - helps Perceiver extract phoneme cues for lip sync
 
   # Expression-specific losses (CRITICAL FOR PREVENTING COLLAPSE)
   lambda_expression_l1: 0.0   # DISABLED - conflicts with L2, too weak (was 0.1)
@@ -238,7 +239,7 @@ loss:
   lambda_emo_match: 0.0               # DISABLED to prevent static pull
   emo_match_type: 'combined'          # 'l1', 'l2', 'lpips', or 'combined'
   emo_cache_dir: 'cache_emo'          # Directory for cached EMO outputs
-  emo_keyframes_per_window: 5         # Number of keyframes to compare per window
+  emo_keyframes_per_window: 50         # Number of keyframes to compare per window
   emo_match_start_epoch: 0            # Start EMO matching from epoch 0 for immediate quality
   emo_min_valid_frames: 0.1           # LOWERED for overfitting: Skip EMO matching when <10% frames are valid (was 0.5)
 
@@ -307,7 +308,7 @@ dataset:
   preextract_audio: true
   cache_audio: true
   hop_length: 10
-  max_videos: 50              # REDUCED from 1000 to 50 - use only the best quality videos
+  max_videos: 100              # REDUCED from 1000 to 50 - use only the best quality videos
   max_sequence_samples: 1000 # Maximum samples per epoch
   use_identity_image: true    # UNSTABLE - Use high-quality identity image instead of video frame
   identity_image_path: "nemo/data/IMG_1.png"  # Path to high-quality identity image

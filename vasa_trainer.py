@@ -995,6 +995,44 @@ class VASATrainer:
     def train(self):
         """Main training loop."""
         logger.info("Starting training")
+
+        # CRITICAL VALIDATION: Ensure phoneme_gt exists in dataset
+        logger.info("🔍 Validating phoneme_gt presence in dataset...")
+        try:
+            # Get first batch to check if phoneme_gt is present
+            sample_batch = next(iter(self.train_loader))
+
+            # Check if phoneme_gt exists in the batch
+            if 'phoneme_gt' not in sample_batch:
+                error_msg = (
+                    "❌ FATAL: phoneme_gt not found in training data!\n"
+                    "The phoneme prediction loss requires phoneme ground truth.\n"
+                    "Solution: Run the phoneme upsert script:\n"
+                    "  ./upsert_phoneme.sh\n"
+                    "This will add phoneme_gt to all cached windows without full reprocessing."
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+
+            phoneme_gt_shape = sample_batch['phoneme_gt'].shape
+            logger.info(f"✅ Phoneme validation passed! phoneme_gt shape: {phoneme_gt_shape}")
+            logger.info(f"   Expected: [batch_size, num_queries=8]")
+
+            # Validate shape
+            if len(phoneme_gt_shape) != 2 or phoneme_gt_shape[1] != 8:
+                error_msg = (
+                    f"❌ FATAL: phoneme_gt has wrong shape: {phoneme_gt_shape}\n"
+                    f"Expected: [batch_size, 8] for 8 latent queries.\n"
+                    f"Cache may be corrupted or using wrong num_queries setting."
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+
+        except StopIteration:
+            error_msg = "❌ FATAL: Training DataLoader is empty! Cannot validate phoneme_gt."
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
         num_epochs = self.config.train.num_epochs
 
         for epoch in range(self.current_epoch, num_epochs):
@@ -1236,7 +1274,7 @@ class VASATrainer:
                             control_signals = {}
                             control_keys = ['gaze', 'head_distance', 'emotion', 'speed_bucket',
                                           'lips', 'right_eye', 'left_eye', 'jaw', 'nose',
-                                          'blink_state', 'audio_features']
+                                          'blink_state', 'audio_features', 'phoneme_gt']
                             for key in control_keys:
                                 value = window.get(key)
                                 if value is not None:
@@ -1469,7 +1507,7 @@ class VASATrainer:
                             if self.identity_image is not None:
                                 source_identity_for_loss = self.identity_image.repeat(B, 1, 1, 1).to(self.accelerator.device)
                             
-                            # Add lip_metrics to targets if available
+                            # Add lip_metrics and phoneme_gt to targets if available
                             targets_with_lip = motion_data.copy()
                             if 'lip_metrics' in window:
                                 targets_with_lip['lip_metrics'] = window['lip_metrics']
@@ -1479,6 +1517,13 @@ class VASATrainer:
                                     logger.debug(f"  lip_metrics['openness'] shape: {window['lip_metrics']['openness'].shape}")
                             else:
                                 logger.warning(f"lip_metrics not found in window! Available keys: {list(window.keys())}")
+
+                            # Add phoneme_gt for auxiliary phoneme prediction loss
+                            if 'phoneme_gt' in window:
+                                targets_with_lip['phoneme_gt'] = window['phoneme_gt']
+                                logger.debug(f"Added phoneme_gt to targets - shape: {window['phoneme_gt'].shape}")
+                            else:
+                                logger.debug(f"phoneme_gt not found in window (cache may not have it yet)")
 
                             # Compute losses including perceptual loss
                             losses, metrics = self.loss_module.compute_losses(
@@ -3349,21 +3394,22 @@ class VASATrainer:
                 plt.close(fig)
                 
                 # Add new candle-like expression visualization
-                from visualize_expression import create_expression_candles, create_expression_difference_map
+                # DISABLED: Expression candles and diff map - too cluttered in wandb
+                # from visualize_expression import create_expression_candles, create_expression_difference_map
                 from visualize_audio_expression import create_audio_expression_visualization
                 # DISABLED: Warp visualization commented out for cleaner wandb
                 # from warp_visualization import visualize_uv_warps, log_warp_statistics
 
-                # Create candle visualization for entire window
-                if outputs['expression_embed'].shape[1] > 1:  # If we have temporal dimension
-                    fig_candles = create_expression_candles(
-                        target_expression=targets['expression_embed'][0],  # First batch item, all frames
-                        predicted_expression=outputs['expression_embed'][0],
-                        window_idx=step // 100,  # Use step to create window index
-                        reduce_to=32
-                    )
-                    wandb.log({"visuals/expression_candles": wandb.Image(fig_candles)}, step=step)
-                    plt.close(fig_candles)
+                # DISABLED: Create candle visualization for entire window
+                # if outputs['expression_embed'].shape[1] > 1:  # If we have temporal dimension
+                #     fig_candles = create_expression_candles(
+                #         target_expression=targets['expression_embed'][0],  # First batch item, all frames
+                #         predicted_expression=outputs['expression_embed'][0],
+                #         window_idx=step // 100,  # Use step to create window index
+                #         reduce_to=32
+                #     )
+                #     wandb.log({"visuals/expression_candles": wandb.Image(fig_candles)}, step=step)
+                #     plt.close(fig_candles)
 
                     # Add UV warp candles visualization
                     # DISABLED: Commenting out warp visualization for cleaner wandb
@@ -3378,38 +3424,50 @@ class VASATrainer:
                     #         plt.close(fig_warp_candles)
                     #     except Exception as e:
                     #         logger.warning(f"Failed to create warp visualization: {e}")
+
+                    # DISABLED: Create difference map
+                    # fig_diff = create_expression_difference_map(
+                    #     target_expression=targets['expression_embed'][0],
+                    #     predicted_expression=outputs['expression_embed'][0],
+                    #     window_idx=step // 100,
+                    #     reduce_to=32
+                    # )
+                    # wandb.log({"visuals/expression_diff_map": wandb.Image(fig_diff)}, step=step)
+                    # plt.close(fig_diff)
                     
-                    # Create difference map
-                    fig_diff = create_expression_difference_map(
+                # Add audio-to-expression visualization if audio features are available
+                if 'audio_features' in targets:
+                    # Get projected audio from condition embedding module
+                    audio_projected = None
+                    use_perceiver = False
+                    if hasattr(self.model.motion_transformer.cond_emb, '_last_audio_projected'):
+                        audio_projected = self.model.motion_transformer.cond_emb._last_audio_projected
+                        use_perceiver = self.model.motion_transformer.cond_emb.use_talkvid_audio_projection
+
+                    # Get phoneme ground truth and predictions for visualization
+                    phoneme_gt = None
+                    phoneme_pred = None
+                    if 'aux_predictions' in outputs:
+                        aux = outputs['aux_predictions']
+                        if 'phoneme_gt' in aux:
+                            phoneme_gt = aux['phoneme_gt'][0]  # [8] for first batch item
+                        if 'phoneme_pred' in aux:
+                            phoneme_pred = torch.argmax(aux['phoneme_pred'][0], dim=-1)  # [8] predicted IDs
+
+                    fig_audio_expr = create_audio_expression_visualization(
+                        audio_features=targets['audio_features'][0],  # First batch item
                         target_expression=targets['expression_embed'][0],
                         predicted_expression=outputs['expression_embed'][0],
                         window_idx=step // 100,
-                        reduce_to=32
+                        audio_reduce_to=32,
+                        expr_reduce_to=32,
+                        audio_projected=audio_projected[0] if audio_projected is not None else None,
+                        use_perceiver=use_perceiver,
+                        phoneme_gt=phoneme_gt,  # Add phoneme ground truth
+                        phoneme_pred=phoneme_pred  # Add phoneme predictions
                     )
-                    wandb.log({"visuals/expression_diff_map": wandb.Image(fig_diff)}, step=step)
-                    plt.close(fig_diff)
-                    
-                    # Add audio-to-expression visualization if audio features are available
-                    if 'audio_features' in targets:
-                        # Get projected audio from condition embedding module
-                        audio_projected = None
-                        use_perceiver = False
-                        if hasattr(self.model.motion_transformer.cond_emb, '_last_audio_projected'):
-                            audio_projected = self.model.motion_transformer.cond_emb._last_audio_projected
-                            use_perceiver = self.model.motion_transformer.cond_emb.use_talkvid_audio_projection
-
-                        fig_audio_expr = create_audio_expression_visualization(
-                            audio_features=targets['audio_features'][0],  # First batch item
-                            target_expression=targets['expression_embed'][0],
-                            predicted_expression=outputs['expression_embed'][0],
-                            window_idx=step // 100,
-                            audio_reduce_to=32,
-                            expr_reduce_to=32,
-                            audio_projected=audio_projected[0] if audio_projected is not None else None,
-                            use_perceiver=use_perceiver
-                        )
-                        wandb.log({"visuals/audio_to_expression": wandb.Image(fig_audio_expr)}, step=step)
-                        plt.close(fig_audio_expr)
+                    wandb.log({"visuals/audio_to_expression": wandb.Image(fig_audio_expr)}, step=step)
+                    plt.close(fig_audio_expr)
             
             # Log motion parameter comparison (skip if using ground truth)
             # When use_gt_theta/scale/rotation/translation are True, there's no prediction to compare

@@ -167,6 +167,10 @@ class WorkerState:
         self._whisper_model = None  # whisper model
         self._whisper_processor = None  # whisper processor
 
+        # Phoneme recognition properties
+        self._phoneme_model = None  # wav2vec2 for phoneme recognition
+        self._phoneme_processor = None  # phoneme processor
+
     @classmethod
     def get_instance(cls):
         """Get or create singleton instance for current process"""
@@ -243,7 +247,33 @@ class WorkerState:
                 'facebook/wav2vec2-base'
             )
         return self._audio_processor
-    
+
+    @property
+    def phoneme_model(self):
+        """Lazy initialization of phoneme recognition model"""
+        if self._phoneme_model is None:
+            from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+            logger.info("Loading phoneme recognition model...")
+            self._phoneme_processor = Wav2Vec2Processor.from_pretrained(
+                "facebook/wav2vec2-xlsr-53-espeak-cv-ft"
+            )
+            self._phoneme_model = Wav2Vec2ForCTC.from_pretrained(
+                "facebook/wav2vec2-xlsr-53-espeak-cv-ft"
+            )
+            if torch.cuda.is_available():
+                self._phoneme_model = self._phoneme_model.cuda()
+            self._phoneme_model.eval()
+            logger.info(f"Phoneme model loaded on device: {next(self._phoneme_model.parameters()).device}")
+        return self._phoneme_model
+
+    @property
+    def phoneme_processor(self):
+        """Get phoneme processor (initialized with phoneme_model)"""
+        if self._phoneme_processor is None:
+            # Trigger phoneme model initialization which also sets processor
+            _ = self.phoneme_model
+        return self._phoneme_processor
+
     @property
     def face_mesh(self):
         """Lazy initialization of face mesh"""
@@ -1932,7 +1962,79 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                 torch.zeros((1, samples_needed)),  # audio_segment with correct shape
                 torch.zeros((1, self.window_size, 128))  # mel_spec [1, 50, 128]
             )
-                    
+
+    def _extract_phoneme_sequence(
+        self,
+        audio_waveform: torch.Tensor,
+        sample_rate: int,
+        num_queries: int = 8
+    ) -> torch.Tensor:
+        """
+        Extract phoneme sequence from audio using wav2vec2 phoneme recognition.
+
+        Args:
+            audio_waveform: Raw audio tensor [samples] or [1, samples]
+            sample_rate: Audio sample rate (usually 16000 Hz)
+            num_queries: Number of latent queries to align phonemes to (default: 8)
+
+        Returns:
+            Phoneme IDs tensor [num_queries] - one phoneme per latent query
+        """
+        try:
+            # Ensure audio is 1D
+            if audio_waveform.ndim > 1:
+                audio_waveform = audio_waveform.squeeze(0)
+
+            # Process audio with phoneme model
+            inputs = self.worker_state.phoneme_processor(
+                audio_waveform.cpu().numpy(),
+                sampling_rate=sample_rate,
+                return_tensors="pt"
+            ).input_values
+
+            if torch.cuda.is_available():
+                inputs = inputs.cuda()
+
+            with torch.no_grad():
+                logits = self.worker_state.phoneme_model(inputs).logits  # [1, T_phoneme, vocab_size]
+
+            phoneme_ids = torch.argmax(logits, dim=-1)  # [1, T_phoneme]
+            phoneme_seq = phoneme_ids.squeeze(0).cpu()  # [T_phoneme]
+
+            # Align to num_queries using average pooling
+            # Handle case where phoneme_seq might be shorter than num_queries
+            if len(phoneme_seq) < num_queries:
+                # Pad with zeros if too short
+                pooled_phoneme = torch.zeros(num_queries, dtype=torch.long)
+                pooled_phoneme[:len(phoneme_seq)] = phoneme_seq
+            else:
+                # Average pool to match num_queries
+                kernel_size = max(1, len(phoneme_seq) // num_queries)
+                stride = kernel_size
+
+                # Use max pooling instead of avg for phoneme IDs (preserves discrete values)
+                pooled = torch.nn.functional.max_pool1d(
+                    phoneme_seq.unsqueeze(0).unsqueeze(0).float(),
+                    kernel_size=kernel_size,
+                    stride=stride
+                )
+                pooled_phoneme = pooled.squeeze().long()[:num_queries]
+
+                # Pad if needed (in case pooling didn't produce exactly num_queries)
+                if len(pooled_phoneme) < num_queries:
+                    padded = torch.zeros(num_queries, dtype=torch.long)
+                    padded[:len(pooled_phoneme)] = pooled_phoneme
+                    pooled_phoneme = padded
+
+            logger.debug(f"Extracted phoneme sequence: {phoneme_seq.shape} -> {pooled_phoneme.shape}")
+            return pooled_phoneme  # [num_queries]
+
+        except Exception as e:
+            logger.error(f"Error extracting phoneme sequence: {str(e)}")
+            logger.error(traceback.format_exc())
+            # Return zeros on error
+            return torch.zeros(num_queries, dtype=torch.long)
+
     def _preextract_all_audio(self):
         """Pre-extract audio with progress bar and error handling"""
         for i, video_path in enumerate(tqdm(self.video_paths, desc="Extracting audio")):
@@ -2884,6 +2986,13 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         duration=self.window_size / window['fps']
                     )
 
+                    # Extract phoneme sequence for self-supervised phoneme prediction
+                    # num_queries=8 matches TalkVidAudioProjection's default
+                    phoneme_gt = self._extract_phoneme_sequence(
+                        audio_waveform=audio_segment,
+                        sample_rate=16000,  # Standard sample rate for wav2vec2
+                        num_queries=8
+                    )
 
                     # Process face attributes
                     gaze_angles = []
@@ -2998,6 +3107,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         'audio_mfcc': mfcc_features.squeeze(0) if mfcc_features.ndim == 3 else mfcc_features,  # [1, T, 13] -> [T, 13]
                         'audio_waveform': audio_segment.squeeze(0),  # [1, samples] -> [samples] - raw audio for legacy
                         'audio_mel_spec': mel_spec.squeeze(0),  # [1, T, 128] -> [T, 128] - mel spectrogram for Synchformer
+                        'phoneme_gt': phoneme_gt,  # [num_queries=8] - phoneme IDs for self-supervised phoneme prediction
                         'gaze': torch.tensor(np.stack(gaze_angles), dtype=torch.float32),
                         'emotion': torch.tensor(np.stack(emotion_logits), dtype=torch.float32),
                         'emotion_label': emotion_labels,  # List of strings like ["sad", "happy", "neutral", ...]
@@ -3299,6 +3409,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             'audio_mfcc': torch.zeros((self.sequence_length, 13)),       # mfcc for syncnet - no batch dim
             'audio_waveform': torch.zeros(self.sequence_length * 640),    # raw audio at 16kHz, ~40ms per frame
             'audio_mel_spec': torch.zeros((self.sequence_length, 128)),   # mel spectrogram for Synchformer
+            'phoneme_gt': torch.zeros(8, dtype=torch.long),               # phoneme IDs for self-supervised phoneme prediction
             'gaze': torch.zeros((self.sequence_length, 2)),
             'head_distance': torch.zeros((self.sequence_length, 1)),
             'emotion': torch.zeros((self.sequence_length, 2)),
