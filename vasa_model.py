@@ -149,6 +149,12 @@ class TalkVidAudioProjection(nn.Module):
         self.proj_out = nn.Linear(dim, output_dim)
         self.norm_out = nn.LayerNorm(output_dim)
 
+        # Auxiliary phoneme prediction head (self-supervised)
+        # Predicts phoneme class per latent query
+        # vocab_size=392 from wav2vec2-xlsr-53-espeak-cv-ft (full multilingual vocabulary)
+        self.phoneme_head = nn.Linear(dim, 392)
+        logger.info(f"   Added phoneme prediction head: {dim}D → 392 classes (self-supervised, wav2vec2 full vocab)")
+
         self.to_latents_from_mean_pooled_seq = (
             nn.Sequential(
                 nn.LayerNorm(dim),
@@ -202,6 +208,10 @@ class TalkVidAudioProjection(nn.Module):
                 latents = latents + block_residual  # Cross-layer skip connection
                 block_residual = latents  # Update residual for next block
 
+        # Compute auxiliary phoneme prediction (before final projection)
+        # Predict per latent query [B, num_queries, vocab_size=50]
+        phoneme_pred = self.phoneme_head(latents)  # Use latents before proj_out for auxiliary task
+
         latents = self.proj_out(latents)
         output = self.norm_out(latents)
 
@@ -209,10 +219,13 @@ class TalkVidAudioProjection(nn.Module):
         if not hasattr(self, '_logged_output'):
             logger.info(f"🎵 TalkVidAudioProjection output:")
             logger.info(f"   Output shape: {output.shape} (batch_size, {self.num_queries} queries, {self.output_dim}D)")
+            logger.info(f"   Phoneme predictions shape: {phoneme_pred.shape} (batch_size, {self.num_queries} queries, 50 classes)")
             logger.info(f"   ✅ Audio features projected and compressed via Perceiver attention")
             self._logged_output = True
 
-        return output
+        # Return both output and auxiliary predictions
+        aux_predictions = {'phoneme_pred': phoneme_pred}
+        return output, aux_predictions
 
 
 class DynamicTanh(nn.Module):
@@ -490,7 +503,13 @@ class EfficientConditionEmbedding(nn.Module):
                     logger.info(f"🎵 [JOYVASA] Applying linear audio projection: {audio.shape}")
                 self._logged_audio_projection = True
 
-            audio_projected = self.audio_proj(audio)  # [B, T, 512] for JoyVASA, [B, num_queries, 512] for TalkVid
+            # Handle tuple return from TalkVidAudioProjection (includes aux_predictions)
+            audio_proj_result = self.audio_proj(audio)
+            if isinstance(audio_proj_result, tuple):
+                audio_projected, audio_aux = audio_proj_result  # [B, T, 512] or [B, num_queries, 512], aux_predictions
+            else:
+                audio_projected = audio_proj_result  # [B, T, 512] for JoyVASA (no tuple)
+                audio_aux = {}
 
             # Handle different output shapes between JoyVASA and TalkVid
             if self.use_talkvid_audio_projection:
@@ -610,7 +629,8 @@ class EfficientConditionEmbedding(nn.Module):
             # Store projected audio for visualization
             self._last_audio_projected = audio_projected
 
-            return final_output
+            # Return both output and auxiliary predictions (for phoneme loss)
+            return final_output, audio_aux
 
         except Exception as e:
             logger.error(f"Error in condition embedding: {str(e)}")
@@ -970,7 +990,13 @@ class MotionTransformer(nn.Module):
             else:
                 full_conditions = conditions
 
-            cond_emb = self.cond_emb(full_conditions)  # [B, T or C+T, d_model]
+            # Handle tuple return from condition embedding (includes aux_predictions)
+            cond_result = self.cond_emb(full_conditions)
+            if isinstance(cond_result, tuple):
+                cond_emb, aux_predictions = cond_result  # [B, T or C+T, d_model], aux_dict
+            else:
+                cond_emb = cond_result
+                aux_predictions = {}
 
         else:
             # If cond_emb provided but for T, pad with zeros for context
@@ -993,7 +1019,13 @@ class MotionTransformer(nn.Module):
         assert 'audio_features' in conditions, \
             "audio_features must be in conditions for AudioCrossDecoderLayer"
 
-        audio_memory = self.cond_emb({'audio_features': conditions['audio_features']})
+        # Handle tuple return (audio_memory doesn't need aux_predictions, already captured above)
+        audio_result = self.cond_emb({'audio_features': conditions['audio_features']})
+        if isinstance(audio_result, tuple):
+            audio_memory = audio_result[0]  # Only need the embedding, not aux_predictions
+        else:
+            audio_memory = audio_result
+
         if C > 0:
             audio_memory = audio_memory[:, C:]  # Remove context frames, keep only current T
 
@@ -1075,6 +1107,10 @@ class MotionTransformer(nn.Module):
             'hidden_states': hidden_states,  # [B, T, d_model] - for Flow-DPO loss
             # Note: uv_warps will be added by VASAModel.forward() via implicit generation
         }
+
+        # Add auxiliary predictions (e.g., phoneme predictions from TalkVidAudioProjection)
+        if aux_predictions:
+            output_dict['aux_predictions'] = aux_predictions
 
         return output_dict
 
@@ -1384,7 +1420,8 @@ class VASAModel(nn.Module):
                 'jaw': (B, T, 10, 3),
                 'nose': (B, T, 4, 3),
                 'blink_state': (B, T, 3),
-                'audio_features': (B, T, 768)  # CRITICAL: Must include audio_features!
+                'audio_features': (B, T, 768),  # CRITICAL: Must include audio_features!
+                'phoneme_gt': (B, 8)  # Phoneme ground truth for auxiliary loss (8 latent queries)
             }
 
             for key, expected_shape in expected_shapes.items():
@@ -1399,12 +1436,21 @@ class VASAModel(nn.Module):
                     if key == 'audio_features' and len(tensor.shape) == 4:
                         tensor = tensor.squeeze(1)  # Remove the extra dimension
 
-                    if tensor.shape[:2] != (B, T):
+                    # Special handling for phoneme_gt which doesn't have time dimension
+                    # Shape: [B, 8] for 8 latent queries, NOT [B, T, ...]
+                    if key == 'phoneme_gt':
+                        # phoneme_gt should already be [B, 8], just validate batch size
+                        if tensor.shape[0] != B:
+                            raise ValueError(f"phoneme_gt batch size {tensor.shape[0]} doesn't match B={B}")
+                        validated_conditions[key] = tensor
+                    elif tensor.shape[:2] != (B, T):
                         if len(tensor.shape) == 2:
                             tensor = tensor.unsqueeze(1).expand(-1, T, -1)
                         elif len(tensor.shape) == 3 and tensor.shape[0] == 1:
                             tensor = tensor.expand(B, -1, -1)
-                    validated_conditions[key] = tensor
+                        validated_conditions[key] = tensor
+                    else:
+                        validated_conditions[key] = tensor
 
             # Add blink state if missing
             if 'blink_state' not in validated_conditions:
@@ -1486,7 +1532,8 @@ class VASAModel(nn.Module):
 
         # Clean outputs
         for key, tensor in outputs.items():
-            if isinstance(tensor, str):  # Skip string tags like 'warp_source'
+            # Skip non-tensor values (strings, dicts like aux_predictions)
+            if not isinstance(tensor, torch.Tensor):
                 continue
             if torch.isnan(tensor).any():
                 tensor = torch.nan_to_num(tensor, nan=0.0, posinf=10.0, neginf=-10.0)
@@ -1498,6 +1545,16 @@ class VASAModel(nn.Module):
         # Add noise for loss computation if provided
         if noise is not None:
             outputs['noise'] = noise
+
+        # Add phoneme_gt to aux_predictions if available (from conditions/targets)
+        # aux_predictions should already be in outputs from motion_transformer if phoneme head exists
+        if 'aux_predictions' in outputs:
+            # Add phoneme_gt from validated_conditions if available
+            if validated_conditions is not None and 'phoneme_gt' in validated_conditions:
+                outputs['aux_predictions']['phoneme_gt'] = validated_conditions['phoneme_gt']
+            # Also check raw conditions in case it wasn't validated
+            elif conditions is not None and 'phoneme_gt' in conditions:
+                outputs['aux_predictions']['phoneme_gt'] = conditions['phoneme_gt']
 
         return outputs
 

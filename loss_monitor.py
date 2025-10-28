@@ -289,6 +289,14 @@ class LossRangeMonitor:
             'description': 'Motion diversity loss (currently disabled)'
         },
 
+        # Auxiliary losses
+        'aux_phoneme': {
+            'healthy': (1.0, 6.0),  # Higher range - 392 classes is harder than 50
+            'warning': 8.0,
+            'critical': 10.0,
+            'description': 'Auxiliary phoneme prediction loss (self-supervised, 392 classes). Helps Perceiver extract phoneme cues for lip sync.'
+        },
+
         # Aggregated losses
         'reconstruction': {
             'healthy': (0.1, 1.0),

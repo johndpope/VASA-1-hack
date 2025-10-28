@@ -21,10 +21,13 @@ def create_audio_expression_visualization(
     audio_reduce_to: int = 32,
     expr_reduce_to: int = 32,
     audio_projected: Optional[torch.Tensor] = None,
-    use_perceiver: bool = False
+    use_perceiver: bool = False,
+    phoneme_gt: Optional[torch.Tensor] = None,
+    phoneme_pred: Optional[torch.Tensor] = None,
+    audio_filename: Optional[str] = None
 ) -> plt.Figure:
     """
-    Create visualization showing audio features and resulting expressions.
+    Create visualization showing audio features and resulting expressions with phoneme labels.
 
     Args:
         audio_features: Wav2vec features [B, T, 768] or [T, 768]
@@ -36,9 +39,15 @@ def create_audio_expression_visualization(
         expr_reduce_to: Number of expression dimensions to reduce to (default 32)
         audio_projected: Optional projected audio features (from Perceiver or linear projection) [B, T, 512]
         use_perceiver: Whether using TalkVid Perceiver (changes title/labels)
+        phoneme_gt: Optional ground truth phoneme IDs [8] for 8 latent queries
+        phoneme_pred: Optional predicted phoneme IDs [8] for 8 latent queries
+        audio_filename: Optional audio filename to display in title
 
     Returns:
-        matplotlib figure
+        matplotlib figure with phoneme labels overlaid on audio visualization
+        - Green labels at top: Ground truth phonemes
+        - Blue labels at bottom: Correct predictions (match GT)
+        - Red labels at bottom: Incorrect predictions (don't match GT)
     """
     # Remove batch dimension if present
     if audio_features.dim() == 3:
@@ -126,7 +135,51 @@ def create_audio_expression_visualization(
     
     # Add grid
     ax_audio.grid(True, alpha=0.2, linewidth=0.5, color='white')
-    
+
+    # Add phoneme labels if available (8 latent queries mapped to 50 frames)
+    if phoneme_gt is not None or phoneme_pred is not None:
+        # Phoneme vocab mapping (simplified for common phonemes)
+        # Full vocab is 392, so we'll show common ones and use fallback for others
+        PHONEME_LABELS = {
+            0: '<pad>', 1: '<s>', 2: '</s>', 3: '<unk>',
+            4: 'n', 5: 's', 6: 't', 7: 'ə', 8: 'l', 9: 'a',
+            10: 'i', 11: 'k', 12: 'd', 13: 'm', 14: 'ɛ', 15: 'ɾ',
+            16: 'e', 17: 'ɪ', 18: 'p', 19: 'o', 20: 'b', 21: 'ʃ',
+            22: 'u', 23: 'ŋ', 24: 'ʊ', 25: 'ɑ', 26: 'ɔ', 27: 'f',
+            28: 'v', 29: 'h', 30: 'z', 31: 'ʌ', 32: 'ɡ', 33: 'æ',
+            34: 'w', 35: 'j', 36: 'r', 37: 'ð', 38: 'θ', 39: 'ʒ'
+        }
+
+        # Each phoneme spans roughly T/8 frames
+        frames_per_phoneme = T / 8.0
+
+        if phoneme_gt is not None:
+            phoneme_gt_np = phoneme_gt.detach().cpu().numpy() if isinstance(phoneme_gt, torch.Tensor) else phoneme_gt
+            # Add GT phoneme labels at top
+            for i, phoneme_id in enumerate(phoneme_gt_np):
+                frame_pos = int(i * frames_per_phoneme + frames_per_phoneme / 2)
+                label = PHONEME_LABELS.get(int(phoneme_id), f'{int(phoneme_id)}')
+                ax_audio.text(frame_pos, audio_reduce_to + 1, f'GT:{label}',
+                            ha='center', va='bottom', fontsize=8, color='green',
+                            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7, edgecolor='green'))
+
+        if phoneme_pred is not None:
+            phoneme_pred_np = phoneme_pred.detach().cpu().numpy() if isinstance(phoneme_pred, torch.Tensor) else phoneme_pred
+            # Add predicted phoneme labels at bottom (below x-axis)
+            for i, phoneme_id in enumerate(phoneme_pred_np):
+                frame_pos = int(i * frames_per_phoneme + frames_per_phoneme / 2)
+                label = PHONEME_LABELS.get(int(phoneme_id), f'{int(phoneme_id)}')
+                match_gt = (phoneme_gt is not None and
+                          i < len(phoneme_gt_np) and
+                          int(phoneme_pred_np[i]) == int(phoneme_gt_np[i]))
+                color = 'blue' if match_gt else 'red'
+                ax_audio.text(frame_pos, -2, f'Pred:{label}',
+                            ha='center', va='top', fontsize=8, color=color,
+                            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7, edgecolor=color))
+
+        # Adjust plot limits to show labels
+        ax_audio.set_ylim(-3, audio_reduce_to + 2)
+
     # === Second row: Target Expression ===
     ax_target = fig.add_subplot(gs[1, :])
     
@@ -215,8 +268,13 @@ def create_audio_expression_visualization(
     audio_expr_corr = np.corrcoef(audio_norm.flatten()[:len(target_display.flatten())], 
                                    target_display.flatten())[0, 1]
     
+    # Build title with optional audio filename
+    title_text = f'Audio → Expression Mapping - Window {window_idx}'
+    if audio_filename:
+        title_text = f'Audio → Expression Mapping - {audio_filename} (Window {window_idx})'
+
     fig.suptitle(
-        f'Audio → Expression Mapping - Window {window_idx}\n'
+        f'{title_text}\n'
         f'Mean Error: {mean_error:.4f} | Target-Pred Correlation: {correlation:.3f} | Audio-Expression Correlation: {audio_expr_corr:.3f}',
         fontsize=14,
         fontweight='bold'
