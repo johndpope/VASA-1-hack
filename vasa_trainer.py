@@ -1655,7 +1655,8 @@ class VASATrainer:
                             # Log visualizations before cleanup (every 5 batches)
                             if batch_idx % 5 == 0 and window_idx == 0:  # Only log first window
                                 if 'outputs' in locals():
-                                    self._log_visualizations(outputs, motion_data, self.global_step, metrics)
+                                    # Pass window for metadata (video_path/audio info)
+                                    self._log_visualizations(outputs, motion_data, self.global_step, metrics, window=window)
                                     # Gradient stats disabled for performance
                                     # self._log_gradient_stats(self.global_step)
                             
@@ -1750,7 +1751,12 @@ class VASATrainer:
                                 try:
                                     from thumbnail_generator import generate_window_thumbnail
                                     import random
-                                    
+
+                                    # Randomize batch item selection to show variety across different videos
+                                    B = motion_data['theta'].shape[0] if 'theta' in motion_data else 1
+                                    batch_item_idx = random.randint(0, B - 1) if B > 1 else 0
+                                    logger.info(f"🎲 Selected batch item {batch_item_idx}/{B-1} for thumbnail (randomized to show different videos)")
+
                                     # Generate just ONE frame for thumbnail to save memory
                                     single_frame_generated = None
                                     single_frame_target = None
@@ -1761,25 +1767,28 @@ class VASATrainer:
                                         T = original_frames.shape[1] if original_frames.dim() > 4 else 1
                                         frame_idx = random.randint(T//3, T-1) if T > 3 else 0
 
-                                        # Extract single original frame for "Target" panel
-                                        single_frame_target = original_frames[:, frame_idx:frame_idx+1] if T > 1 else original_frames[:, 0:1]
-                                        
+                                        # Extract single original frame for "Target" panel using random batch item
+                                        single_frame_target = original_frames[batch_item_idx:batch_item_idx+1, frame_idx:frame_idx+1] if T > 1 else original_frames[batch_item_idx:batch_item_idx+1, 0:1]
+
                                         # Generate just this one frame
                                         with torch.no_grad():
                                             try:
                                                 # Use high-quality identity image if available
                                                 if self.identity_image is not None:
-                                                    source_img = self.identity_image.repeat(B, 1, 1, 1).to(self.accelerator.device)
+                                                    # For static identity image, still show it (left panel), but use random video for target/predicted
+                                                    source_img = self.identity_image.to(self.accelerator.device)  # [1, C, H, W]
                                                 else:
-                                                    source_img = target_frames[:, 0]  # [B, C, H, W]
+                                                    # Use first frame of the randomly selected batch item
+                                                    source_img = target_frames[batch_item_idx:batch_item_idx+1, 0]  # [1, C, H, W]
                                                 
-                                                # Extract single frame motion params
+                                                # Extract single frame motion params using the same random batch item
                                                 single_motion = {}
                                                 if stored_outputs is not None:
                                                     device = self.accelerator.device
                                                     for key in stored_outputs:
                                                         if isinstance(stored_outputs[key], torch.Tensor) and stored_outputs[key].dim() > 2:
-                                                            single_motion[key] = stored_outputs[key][:, frame_idx:frame_idx+1].to(device)
+                                                            # Extract for random batch item and random frame
+                                                            single_motion[key] = stored_outputs[key][batch_item_idx:batch_item_idx+1, frame_idx:frame_idx+1].to(device)
                                                         else:
                                                             single_motion[key] = stored_outputs[key] if not isinstance(stored_outputs[key], torch.Tensor) else stored_outputs[key].to(device)
 
@@ -1808,8 +1817,10 @@ class VASATrainer:
                                     # Include identity frame for 3-panel view
                                     identity_for_thumbnail = None
                                     if self.identity_image is not None:
+                                        # For static identity image, we already have [1, C, H, W] from earlier, remove batch dimension
                                         identity_for_thumbnail = self.identity_image[0]  # Remove batch dimension
                                     elif source_img is not None and source_img.numel() > 0:
+                                        # source_img is already [1, C, H, W] from the random batch item selection above
                                         identity_for_thumbnail = source_img[0] if source_img.dim() > 3 else source_img
 
                                     # Get EMO frame from dataset if available
@@ -1821,11 +1832,11 @@ class VASATrainer:
                                             emo_indices = window['emo_keyframe_indices']
                                             logger.info(f"✅ Found EMO frames in window, shape: {emo_frames.shape}, indices shape: {emo_indices.shape}")
 
-                                            # Handle batched EMO frames - extract for current window
+                                            # Handle batched EMO frames - extract for the random batch item
                                             if emo_frames.dim() == 5:  # [B, num_keyframes, C, H, W]
-                                                emo_frames = emo_frames[window_idx]  # [num_keyframes, C, H, W]
+                                                emo_frames = emo_frames[batch_item_idx]  # [num_keyframes, C, H, W]
                                             if emo_indices.dim() == 2:  # [B, num_keyframes]
-                                                emo_indices = emo_indices[window_idx]  # [num_keyframes]
+                                                emo_indices = emo_indices[batch_item_idx]  # [num_keyframes]
 
                                             # Find the closest EMO keyframe to our selected frame
                                             closest_idx = 0
@@ -1845,17 +1856,19 @@ class VASATrainer:
                                             # Fallback: generate EMO frame on-the-fly (slower)
                                             logger.debug("No pre-generated EMO frames, generating on-the-fly...")
                                             with torch.no_grad():
-                                                # Get motion for this specific frame
+                                                # Get motion for this specific frame and batch item
                                                 frame_motion = {}
                                                 if 'theta' in stored_outputs and stored_outputs['theta'] is not None:
                                                     theta_tensor = stored_outputs['theta']
                                                     if theta_tensor.dim() >= 2 and frame_idx < theta_tensor.shape[1]:
-                                                        frame_motion['theta'] = theta_tensor[:, frame_idx:frame_idx+1].to(self.device)
+                                                        # Extract for the random batch item
+                                                        frame_motion['theta'] = theta_tensor[batch_item_idx:batch_item_idx+1, frame_idx:frame_idx+1].to(self.device)
 
                                                 if 'expression_embed' in stored_outputs and stored_outputs['expression_embed'] is not None:
                                                     expr_tensor = stored_outputs['expression_embed']
                                                     if expr_tensor.dim() >= 2 and frame_idx < expr_tensor.shape[1]:
-                                                        frame_motion['expression_embed'] = expr_tensor[:, frame_idx:frame_idx+1].to(self.device)
+                                                        # Extract for the random batch item
+                                                        frame_motion['expression_embed'] = expr_tensor[batch_item_idx:batch_item_idx+1, frame_idx:frame_idx+1].to(self.device)
 
                                                 # Only proceed if we have valid motion data
                                                 if frame_motion:
@@ -1891,11 +1904,19 @@ class VASATrainer:
                                     emotion_label_target = None
                                     emotion_label_pred = None
                                     if 'emotion_label' in window and window['emotion_label'] is not None:
-                                        # emotion_label is a list of strings for each frame
-                                        if isinstance(window['emotion_label'], list) and len(window['emotion_label']) > frame_idx:
-                                            emotion_label_target = window['emotion_label'][frame_idx]
-                                        elif isinstance(window['emotion_label'], str):
-                                            emotion_label_target = window['emotion_label']
+                                        # emotion_label could be batched [B, T] or just [T]
+                                        emotion_labels = window['emotion_label']
+                                        if isinstance(emotion_labels, list):
+                                            # Check if it's batched (list of lists)
+                                            if len(emotion_labels) > 0 and isinstance(emotion_labels[0], list):
+                                                # Batched: [B, T], extract for random batch item
+                                                if batch_item_idx < len(emotion_labels) and frame_idx < len(emotion_labels[batch_item_idx]):
+                                                    emotion_label_target = emotion_labels[batch_item_idx][frame_idx]
+                                            elif len(emotion_labels) > frame_idx:
+                                                # Not batched: [T], just use frame_idx
+                                                emotion_label_target = emotion_labels[frame_idx]
+                                        elif isinstance(emotion_labels, str):
+                                            emotion_label_target = emotion_labels
 
                                     # TODO: Add predicted emotion label when model outputs it
                                     # For now, emotion_label_pred remains None
@@ -1914,15 +1935,24 @@ class VASATrainer:
 
                                     # Log to wandb with more descriptive caption
                                     if thumbnail is not None:
+                                        # Get video name from metadata if available
+                                        video_name = "unknown"
+                                        if 'metadata' in window and 'video_path' in window['metadata']:
+                                            video_path = window['metadata']['video_path']
+                                            video_name = video_path.split('/')[-1] if '/' in video_path else video_path
+                                            # Truncate if too long
+                                            if len(video_name) > 40:
+                                                video_name = video_name[:37] + "..."
+
                                         if single_frame_generated is not None:
-                                            frame_info = f"Identity | Target | Predicted (frame {frame_idx} of T={stored_outputs['theta'].shape[1] if 'theta' in stored_outputs else 'unknown'})"
+                                            frame_info = f"Identity | Target | Predicted (batch_item={batch_item_idx}/{B-1}, frame={frame_idx}/T={stored_outputs['theta'].shape[1] if 'theta' in stored_outputs else '?'})"
                                         else:
                                             frame_info = f"Identity | Target | (generation failed)"
 
                                         wandb.log({
                                             "visuals/training_thumbnail": wandb.Image(
                                                 thumbnail,
-                                                caption=f"Epoch {self.current_epoch}, Batch {batch_idx}, {frame_info}"
+                                                caption=f"Epoch {self.current_epoch}, Batch {batch_idx}, Video: {video_name}\n{frame_info}"
                                             )
                                         }, step=self.global_step)
                                         logger.info(f"📸 Generated and logged training thumbnail for epoch {self.current_epoch}")
@@ -3354,8 +3384,16 @@ class VASATrainer:
             logger.error(traceback.format_exc())
             raise
 
-    def _log_visualizations(self, outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], step: int, metrics: Optional[Dict[str, Any]] = None):
-        """Log visualizations to WandB for training inspection."""
+    def _log_visualizations(self, outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], step: int, metrics: Optional[Dict[str, Any]] = None, window: Optional[Dict[str, Any]] = None):
+        """Log visualizations to WandB for training inspection.
+
+        Args:
+            outputs: Model outputs
+            targets: Target motion data
+            step: Current training step
+            metrics: Optional metrics dict
+            window: Optional window data containing metadata (video_path, etc.)
+        """
         if not self.config.wandb.enabled or not self.accelerator.is_local_main_process:
             return
         
@@ -3455,6 +3493,19 @@ class VASATrainer:
                         if 'phoneme_pred' in aux:
                             phoneme_pred = torch.argmax(aux['phoneme_pred'][0], dim=-1).detach().cpu()  # [8] predicted IDs
 
+                    # Extract audio filename from window metadata
+                    audio_filename = "unknown"
+                    if window is not None and 'metadata' in window and 'video_path' in window['metadata']:
+                        video_path = window['metadata']['video_path']
+                        # Extract filename from path (audio has same name as video)
+                        audio_filename = video_path.split('/')[-1] if '/' in video_path else video_path
+                        # Remove extension and add .wav (or keep original if already has audio ext)
+                        if audio_filename.endswith(('.mp4', '.avi', '.mov', '.mkv')):
+                            audio_filename = audio_filename.rsplit('.', 1)[0] + '.wav'
+                        # Truncate if too long
+                        if len(audio_filename) > 50:
+                            audio_filename = audio_filename[:47] + "..."
+
                     fig_audio_expr = create_audio_expression_visualization(
                         audio_features=targets['audio_features'][0],  # First batch item
                         target_expression=targets['expression_embed'][0],
@@ -3465,7 +3516,8 @@ class VASATrainer:
                         audio_projected=audio_projected[0] if audio_projected is not None else None,
                         use_perceiver=use_perceiver,
                         phoneme_gt=phoneme_gt,  # Add phoneme ground truth
-                        phoneme_pred=phoneme_pred  # Add phoneme predictions
+                        phoneme_pred=phoneme_pred,  # Add phoneme predictions
+                        audio_filename=audio_filename  # Add audio filename
                     )
                     wandb.log({"visuals/audio_to_expression": wandb.Image(fig_audio_expr)}, step=step)
                     plt.close(fig_audio_expr)

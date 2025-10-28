@@ -1121,11 +1121,27 @@ class VASALossModule:
                     logger.warning(f"   Original range: [{phoneme_gt.min().item()}, {phoneme_gt.max().item()}]")
                     logger.warning(f"   This suggests vocab_size mismatch. Consider updating phoneme_head output_dim.")
 
-            # Cross-entropy loss (flatten for CE)
+            # Cross-entropy loss with class weighting to prevent mode collapse
+            # Downweight <pad> (ID 0) which appears much more frequently than actual phonemes
+            # This encourages the model to learn actual phoneme features, not just predict <pad>
+
+            # Create class weights: lower weight for <pad>, higher for actual phonemes
+            if not hasattr(self, '_phoneme_class_weights'):
+                # Only create once and cache
+                weights = torch.ones(vocab_size, device=device)
+                weights[0] = 0.1   # <pad> - very common, low weight
+                weights[1] = 0.5   # <s> - sentence start, medium-low weight
+                weights[2] = 0.5   # </s> - sentence end, medium-low weight
+                weights[3] = 0.3   # <unk> - unknown, low weight
+                # All other phonemes (4+) keep weight 1.0 (higher priority)
+                self._phoneme_class_weights = weights
+                logger.info(f"📊 Phoneme class weights initialized: <pad>=0.1, <s>=0.5, </s>=0.5, <unk>=0.3, phonemes=1.0")
+
             # IMPORTANT: Don't keep references to intermediate tensors
             aux_phoneme_term = F.cross_entropy(
                 phoneme_pred.view(-1, vocab_size),  # [B*num_queries, vocab_size]
-                phoneme_gt_clamped.view(-1).long()  # [B*num_queries] - ensure long type
+                phoneme_gt_clamped.view(-1).long(), # [B*num_queries] - ensure long type
+                weight=self._phoneme_class_weights   # Class weighting to prevent mode collapse
             )
             losses['aux_phoneme'] = aux_phoneme_term
 

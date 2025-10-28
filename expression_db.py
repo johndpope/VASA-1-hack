@@ -115,6 +115,41 @@ class ExpressionDatabase:
         closest = torch.cat(closest_list, dim=0)
         return closest.view(B, T, D)
 
+    def append_embeddings(self, new_embeddings: np.ndarray):
+        """
+        Append new embeddings to the database (both in-memory and on disk).
+
+        Args:
+            new_embeddings: New embeddings to append [N, 128] numpy array
+        """
+        if new_embeddings.shape[1] != self.embedding_dim:
+            raise ValueError(f"Expected embeddings with dim {self.embedding_dim}, got {new_embeddings.shape[1]}")
+
+        # Convert to torch and normalize
+        new_embeddings_torch = torch.from_numpy(new_embeddings).float().to(self.device)
+        new_embeddings_torch = F.normalize(new_embeddings_torch, p=2, dim=1)
+
+        # Append to in-memory database
+        self.embeddings = torch.cat([self.embeddings, new_embeddings_torch], dim=0)
+        self.num_embeddings = len(self.embeddings)
+
+        logger.info(f"Appended {len(new_embeddings)} embeddings to database (now {self.num_embeddings} total)")
+
+        # Save updated database to disk
+        self._save_to_disk()
+
+    def _save_to_disk(self):
+        """Save the current database to disk."""
+        # Convert embeddings back to numpy (denormalize not needed, we keep normalized)
+        embeddings_np = self.embeddings.cpu().numpy()
+
+        with h5py.File(self.db_path, 'w') as f:
+            f.create_dataset('expression_embeddings', data=embeddings_np, compression='gzip')
+            f.attrs['num_embeddings'] = self.num_embeddings
+            f.attrs['embedding_dim'] = self.embedding_dim
+
+        logger.info(f"Saved database with {self.num_embeddings} embeddings to {self.db_path}")
+
     def __len__(self):
         return self.num_embeddings
 

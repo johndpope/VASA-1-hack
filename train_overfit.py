@@ -33,7 +33,7 @@ def main():
     # Initialize wandb for tracking
     wandb.init(
         project="vasa-overfitting",
-        name="overfit-test",
+        name="overfit-videotalk",
         config=OmegaConf.to_container(config, resolve=True)
     )
     

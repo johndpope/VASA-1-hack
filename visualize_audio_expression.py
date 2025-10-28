@@ -23,7 +23,8 @@ def create_audio_expression_visualization(
     audio_projected: Optional[torch.Tensor] = None,
     use_perceiver: bool = False,
     phoneme_gt: Optional[torch.Tensor] = None,
-    phoneme_pred: Optional[torch.Tensor] = None
+    phoneme_pred: Optional[torch.Tensor] = None,
+    audio_filename: Optional[str] = None
 ) -> plt.Figure:
     """
     Create visualization showing audio features and resulting expressions with phoneme labels.
@@ -40,6 +41,7 @@ def create_audio_expression_visualization(
         use_perceiver: Whether using TalkVid Perceiver (changes title/labels)
         phoneme_gt: Optional ground truth phoneme IDs [8] for 8 latent queries
         phoneme_pred: Optional predicted phoneme IDs [8] for 8 latent queries
+        audio_filename: Optional audio filename to display in title
 
     Returns:
         matplotlib figure with phoneme labels overlaid on audio visualization
@@ -266,8 +268,13 @@ def create_audio_expression_visualization(
     audio_expr_corr = np.corrcoef(audio_norm.flatten()[:len(target_display.flatten())], 
                                    target_display.flatten())[0, 1]
     
+    # Build title with optional audio filename
+    title_text = f'Audio → Expression Mapping - Window {window_idx}'
+    if audio_filename:
+        title_text = f'Audio → Expression Mapping - {audio_filename} (Window {window_idx})'
+
     fig.suptitle(
-        f'Audio → Expression Mapping - Window {window_idx}\n'
+        f'{title_text}\n'
         f'Mean Error: {mean_error:.4f} | Target-Pred Correlation: {correlation:.3f} | Audio-Expression Correlation: {audio_expr_corr:.3f}',
         fontsize=14,
         fontweight='bold'
