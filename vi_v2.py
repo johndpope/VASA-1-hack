@@ -1796,7 +1796,7 @@ if __name__ == "__main__":
                         help='Path to config file (default: overfit_config.yaml)')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='Path to checkpoint file (default: auto-detect from config)')
-    parser.add_argument('--input', type=str, default='./junk/videovideoeI2V8Bd5X9s-scene6_scene1.mp4',
+    parser.add_argument('--input', type=str, default='./s1/bbaf2n.mpg',
                         help='Input video path')
     parser.add_argument('--output', type=str, default=None,
                         help='Output video path (default: auto-generate)')

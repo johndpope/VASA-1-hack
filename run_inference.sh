@@ -38,6 +38,30 @@ case $choice in
 esac
 
 echo ""
+echo "Use ground truth theta for inference?"
+echo "1) No - predict theta from model (default)"
+echo "2) Yes - use GT theta from H5 cache (vi_v2.py)"
+echo ""
+read -p "Enter your choice (1-2): " theta_choice
+
+# Set inference script based on theta choice
+if [ "$theta_choice" = "2" ]; then
+    INFERENCE_SCRIPT="vi_v2.py"
+    USE_GT_THETA=true
+    echo "Will use ground truth theta from H5 cache..."
+    echo ""
+    read -p "Enter path to GT theta H5 file: " GT_THETA_H5
+    if [ ! -f "$GT_THETA_H5" ]; then
+        echo "Error: GT theta H5 file '$GT_THETA_H5' not found!"
+        exit 1
+    fi
+else
+    INFERENCE_SCRIPT="vi.py"
+    USE_GT_THETA=false
+    echo "Will predict theta from model..."
+fi
+
+echo ""
 echo "Select output mode:"
 echo "1) Generate video"
 echo "2) Generate visualizations"
@@ -46,14 +70,30 @@ read -p "Enter your choice (1-2): " mode_choice
 
 echo ""
 echo "Starting inference with config: $CONFIG_FILE"
+echo "Inference script: $INFERENCE_SCRIPT"
+if [ "$USE_GT_THETA" = true ]; then
+    echo "GT Theta H5: $GT_THETA_H5"
+fi
 echo "================================"
 echo ""
 
 # Run the inference script with the selected config and mode
-if [ "$mode_choice" = "2" ]; then
-    echo "Generating visualizations..."
-    python vi.py --config "$CONFIG_FILE" --visualize
+if [ "$USE_GT_THETA" = true ]; then
+    # Using vi_v2.py with GT theta
+    if [ "$mode_choice" = "2" ]; then
+        echo "Generating visualizations with GT theta..."
+        python "$INFERENCE_SCRIPT" --config "$CONFIG_FILE" --visualize --gt-theta-h5 "$GT_THETA_H5"
+    else
+        echo "Generating video with GT theta..."
+        python "$INFERENCE_SCRIPT" --config "$CONFIG_FILE" --gt-theta-h5 "$GT_THETA_H5"
+    fi
 else
-    echo "Generating video..."
-    python vi.py --config "$CONFIG_FILE"
+    # Using vi.py with predicted theta
+    if [ "$mode_choice" = "2" ]; then
+        echo "Generating visualizations..."
+        python "$INFERENCE_SCRIPT" --config "$CONFIG_FILE" --visualize
+    else
+        echo "Generating video..."
+        python "$INFERENCE_SCRIPT" --config "$CONFIG_FILE"
+    fi
 fi
