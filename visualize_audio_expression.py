@@ -24,7 +24,9 @@ def create_audio_expression_visualization(
     use_perceiver: bool = False,
     phoneme_gt: Optional[torch.Tensor] = None,
     phoneme_pred: Optional[torch.Tensor] = None,
-    audio_filename: Optional[str] = None
+    audio_filename: Optional[str] = None,
+    au_gt: Optional[torch.Tensor] = None,
+    au_pred: Optional[torch.Tensor] = None
 ) -> plt.Figure:
     """
     Create visualization showing audio features and resulting expressions with phoneme labels.
@@ -101,8 +103,12 @@ def create_audio_expression_visualization(
         expr_reduce_to = expr_dim
     
     # Create figure with GridSpec for better layout control
-    fig = plt.figure(figsize=(18, 12))
-    gs = gridspec.GridSpec(4, 2, height_ratios=[1.5, 1, 1, 0.5], hspace=0.3, wspace=0.2)
+    # Add extra row for AUs if available
+    has_aus = (au_gt is not None or au_pred is not None)
+    num_rows = 5 if has_aus else 4
+    height_ratios = [1.5, 1, 1, 0.8, 0.5] if has_aus else [1.5, 1, 1, 0.5]
+    fig = plt.figure(figsize=(18, 14 if has_aus else 12))
+    gs = gridspec.GridSpec(num_rows, 2, height_ratios=height_ratios, hspace=0.3, wspace=0.2)
     
     # === Top row: Audio Features (Wav2Vec) ===
     ax_audio = fig.add_subplot(gs[0, :])
@@ -237,10 +243,76 @@ def create_audio_expression_visualization(
     cbar_pred.set_label('Value', rotation=270, labelpad=15)
     
     ax_pred.grid(True, alpha=0.2, linewidth=0.5)
-    
-    # === Fourth row: Statistics ===
-    ax_stats1 = fig.add_subplot(gs[3, 0])
-    ax_stats2 = fig.add_subplot(gs[3, 1])
+
+    # === Fourth row (optional): Action Units (AU) GT vs Pred ===
+    if has_aus:
+        # AU names for labeling
+        AU_NAMES = [
+            'AU1', 'AU2', 'AU4', 'AU5', 'AU7', 'AU10',
+            'AU12', 'AU15', 'AU20', 'AU23', 'AU25', 'AU26',
+            'AU27', 'AU45', 'AU46', 'AU27'
+        ]
+
+        # Create AU subplots (GT on left, Pred on right)
+        ax_au_gt = fig.add_subplot(gs[3, 0])
+        ax_au_pred = fig.add_subplot(gs[3, 1])
+
+        if au_gt is not None:
+            au_gt_np = au_gt.detach().cpu().numpy() if isinstance(au_gt, torch.Tensor) else au_gt
+            # au_gt_np shape: [8, 16] - 8 queries, 16 AUs
+            im_au_gt = ax_au_gt.imshow(
+                au_gt_np.T,  # Transpose to [16, 8]
+                aspect='auto',
+                cmap='YlOrRd',
+                vmin=0,
+                vmax=1,
+                interpolation='nearest'
+            )
+            ax_au_gt.set_title('Ground Truth Action Units (16 AUs)', fontsize=11, fontweight='bold')
+            ax_au_gt.set_xlabel('Query Index', fontsize=10)
+            ax_au_gt.set_ylabel('AU Index', fontsize=10)
+            ax_au_gt.set_yticks(np.arange(16))
+            ax_au_gt.set_yticklabels(AU_NAMES, fontsize=8)
+            ax_au_gt.set_xticks(np.arange(8))
+            ax_au_gt.set_xticklabels(np.arange(8))
+            cbar_au_gt = plt.colorbar(im_au_gt, ax=ax_au_gt, fraction=0.046, pad=0.04)
+            cbar_au_gt.set_label('Intensity [0,1]', rotation=270, labelpad=15)
+            ax_au_gt.grid(True, alpha=0.2, linewidth=0.5, color='white')
+
+        if au_pred is not None:
+            au_pred_np = au_pred.detach().cpu().numpy() if isinstance(au_pred, torch.Tensor) else au_pred
+            # au_pred_np shape: [8, 16] - 8 queries, 16 AUs
+            im_au_pred = ax_au_pred.imshow(
+                au_pred_np.T,  # Transpose to [16, 8]
+                aspect='auto',
+                cmap='YlOrRd',
+                vmin=0,
+                vmax=1,
+                interpolation='nearest'
+            )
+            ax_au_pred.set_title('Predicted Action Units (16 AUs)', fontsize=11, fontweight='bold')
+            ax_au_pred.set_xlabel('Query Index', fontsize=10)
+            ax_au_pred.set_ylabel('AU Index', fontsize=10)
+            ax_au_pred.set_yticks(np.arange(16))
+            ax_au_pred.set_yticklabels(AU_NAMES, fontsize=8)
+            ax_au_pred.set_xticks(np.arange(8))
+            ax_au_pred.set_xticklabels(np.arange(8))
+            cbar_au_pred = plt.colorbar(im_au_pred, ax=ax_au_pred, fraction=0.046, pad=0.04)
+            cbar_au_pred.set_label('Intensity [0,1]', rotation=270, labelpad=15)
+            ax_au_pred.grid(True, alpha=0.2, linewidth=0.5, color='white')
+
+            # If both GT and Pred available, add MAE text
+            if au_gt is not None:
+                mae = np.mean(np.abs(au_gt_np - au_pred_np))
+                ax_au_pred.text(0.98, 0.02, f'MAE: {mae:.4f}',
+                              transform=ax_au_pred.transAxes,
+                              ha='right', va='bottom', fontsize=10,
+                              bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7))
+
+    # === Statistics row (row 4 if AUs present, row 3 otherwise) ===
+    stats_row = 4 if has_aus else 3
+    ax_stats1 = fig.add_subplot(gs[stats_row, 0])
+    ax_stats2 = fig.add_subplot(gs[stats_row, 1])
     
     # Audio statistics over time
     audio_energy = np.mean(np.abs(audio_reduced), axis=1)  # [T]

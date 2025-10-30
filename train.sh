@@ -3,6 +3,8 @@
 # VASA-1 Training Runner
 # Allows user to choose between different config files
 
+export TF_CPP_MIN_LOG_LEVEL=2
+
 echo "================================"
 echo "   VASA-1 Training Runner"
 echo "================================"

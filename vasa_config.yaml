@@ -226,6 +226,8 @@ loss:
   lambda_mouth_openness: 10.0  # Direct mouth openness to audio energy supervision weight
   lambda_aux_phoneme: 1.0      # Phoneme prediction (self-supervised) with class weighting to prevent mode collapse
   lambda_aux_au: 1.0           # Action Unit prediction (self-supervised) for fine-grained facial expression control
+  lambda_aux_au_frame: 0.5     # Frame-based AU loss (50 frames per window) - extracts AUs from generated frames
+  lambda_landmark: 1.0         # AU→Landmark VAE loss weight (reconstruction + KL divergence)
 
   # Expression-specific losses (CRITICAL FOR PREVENTING COLLAPSE)
   lambda_expression_l1: 0.0   # DISABLED - conflicts with L2, too weak (was 0.1)

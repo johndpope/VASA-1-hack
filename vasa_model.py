@@ -400,6 +400,17 @@ class EfficientConditionEmbedding(nn.Module):
         self.distance_proj = nn.Linear(1, 1)
         self.emotion_proj = nn.Linear(2, 2)
 
+        # AU projection for explicit AU conditioning (Option C - fallback)
+        self.au_proj = nn.Linear(16, 16)  # 16 AU channels
+
+        # AU→Landmark conditioning (Paper approach - primary method)
+        # 68 landmarks × 2 (x,y) = 136 dimensions
+        self.landmark_proj = nn.Sequential(
+            nn.Linear(68 * 2, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64)
+        )
+
         # Using DynamicTanh instead of LayerNorm to preserve variance (JoyVASA approach + DyT benefits)
         self.control_norm = DynamicTanh(config.projections.control_norm_dim)
 
@@ -410,9 +421,10 @@ class EfficientConditionEmbedding(nn.Module):
         )
 
         # Final projection to combine all features into model_dim
-        # Audio (512) + Controls (5) + Blink (32) = 549 -> 512
-        total_features = config.projections.audio.output_dim + 5 + config.projections.blink.output_dim
-        self.final_proj = nn.Linear(total_features, model_dim)
+        # Audio (512) + Controls (5) + Blink (32) + Landmarks (64) OR AU (16) = 613 or 565 -> 512
+        # We'll use max size to accommodate both paths
+        total_features_max = config.projections.audio.output_dim + 5 + config.projections.blink.output_dim + 64 + 16
+        self.final_proj = nn.Linear(total_features_max, model_dim)
 
         self.final_norm = DynamicTanh(model_dim)
 
@@ -606,7 +618,53 @@ class EfficientConditionEmbedding(nn.Module):
                 blink_tensor = torch.zeros(B, T, 3, device=device, dtype=dtype)
             blink_embedded = self.blink_embed(blink_tensor)
 
-            combined = torch.cat([audio_features, controls_features,  blink_embedded], dim=-1)
+            # Handle AU→Landmark conditioning (Paper approach - prioritized)
+            # Paper insight: Landmarks provide explicit geometric scaffolding
+            landmark_tensor = conditions.get('au_landmarks')
+            au_tensor = conditions.get('au_target')
+
+            if landmark_tensor is not None:
+                # Primary path: Use predicted landmarks from AU→Landmark VAE
+                landmark_tensor = self._ensure_float_tensor(landmark_tensor, dtype)
+                # Flatten landmarks: [B, T, 68, 2] → [B, T, 136]
+                landmark_flat = landmark_tensor.reshape(B, T, -1)
+                landmark_features = self.landmark_proj(landmark_flat)  # [B, T, 64]
+
+                # Also use AU features (both paths active)
+                if au_tensor is None:
+                    au_tensor = torch.zeros(B, T, 16, device=device, dtype=dtype)
+                else:
+                    au_tensor = self._ensure_float_tensor(au_tensor, dtype)
+                au_features = self.au_proj(au_tensor)  # [B, T, 16]
+
+                # Log once
+                if not hasattr(self, '_logged_landmark_features'):
+                    logger.info(f"✅ [AU→LANDMARK] Processing landmark features: shape={landmark_features.shape}, "
+                              f"mean={landmark_features.mean().item():.4f}, var={landmark_features.var().item():.4f}")
+                    self._logged_landmark_features = True
+
+                combined = torch.cat([audio_features, controls_features, blink_embedded, landmark_features, au_features], dim=-1)
+
+            elif au_tensor is not None:
+                # Fallback path: Use direct AU conditioning if landmarks not available
+                au_tensor = self._ensure_float_tensor(au_tensor, dtype)
+                au_features = self.au_proj(au_tensor)
+
+                # Pad with zeros to match expected size
+                zero_pad = torch.zeros(B, T, 64, device=device, dtype=dtype)
+
+                if not hasattr(self, '_logged_au_features'):
+                    logger.info(f"✅ [AU CONTROL] Processing AU features (fallback): shape={au_features.shape}, "
+                              f"mean={au_features.mean().item():.4f}, var={au_features.var().item():.4f}")
+                    self._logged_au_features = True
+
+                combined = torch.cat([audio_features, controls_features, blink_embedded, zero_pad, au_features], dim=-1)
+
+            else:
+                # No AU or landmark conditioning - use zeros
+                zero_landmarks = torch.zeros(B, T, 64, device=device, dtype=dtype)
+                zero_aus = torch.zeros(B, T, 16, device=device, dtype=dtype)
+                combined = torch.cat([audio_features, controls_features, blink_embedded, zero_landmarks, zero_aus], dim=-1)
 
             # Project combined features to model dimension
             # This maintains variance while fitting into model_dim
@@ -1436,7 +1494,9 @@ class VASAModel(nn.Module):
                 'nose': (B, T, 4, 3),
                 'blink_state': (B, T, 3),
                 'audio_features': (B, T, 768),  # CRITICAL: Must include audio_features!
-                'phoneme_gt': (B, 8)  # Phoneme ground truth for auxiliary loss (8 latent queries)
+                'phoneme_gt': (B, 8),  # Phoneme ground truth for auxiliary loss (8 latent queries)
+                'au_target': (B, T, 16),  # Action Unit control signal extracted from target frames (per-frame)
+                'au_landmarks': (B, T, 68, 2)  # Predicted 2D landmarks from AU→Landmark VAE (paper approach)
             }
 
             for key, expected_shape in expected_shapes.items():

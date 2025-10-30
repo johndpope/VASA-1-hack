@@ -12,8 +12,8 @@ MediaPipe: https://google.github.io/mediapipe/solutions/face_mesh
 import numpy as np
 import torch
 from typing import List, Dict, Optional
+from logger import logger  # Import logger first (handles MediaPipe log suppression)
 import mediapipe as mp
-from logger import logger
 
 
 # MediaPipe Face Mesh landmark indices (468 total landmarks)

@@ -2,6 +2,18 @@
 
 import logging
 import sys
+import os
+
+# Suppress MediaPipe's verbose C++ logs (GPU initialization spam)
+# These logs appear when MediaPipe initializes GPU context for face mesh processing
+os.environ['GLOG_minloglevel'] = '3'  # Suppress INFO, WARNING, ERROR from glog (MediaPipe C++)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow logs
+os.environ['MEDIAPIPE_DISABLE_GPU'] = '0'  # Keep GPU enabled, just suppress logs
+
+# Suppress protobuf warnings
+import warnings
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', message='.*Protobuf.*')
 
 # Create logger
 logger = logging.getLogger('vasa')

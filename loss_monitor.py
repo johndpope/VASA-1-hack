@@ -308,6 +308,38 @@ class LossRangeMonitor:
             'critical': 0.15,
             'description': 'AU temporal consistency loss (10% weight). Ensures smooth AU transitions across queries.'
         },
+        'aux_au_frame': {
+            'healthy': (0.001, 0.05),
+            'warning': 0.1,
+            'critical': 0.2,
+            'description': 'Frame-based AU loss (50 frames per window). Extracts AUs from generated frames via MediaPipe for per-frame supervision.'
+        },
+        'aux_au_frame_temporal': {
+            'healthy': (0.0001, 0.02),
+            'warning': 0.05,
+            'critical': 0.1,
+            'description': 'Frame-based AU temporal consistency (10% weight). Ensures smooth frame-to-frame AU transitions.'
+        },
+
+        # AU→Landmark VAE losses (Paper: "Talking Head Generation via AU-Guided Landmark Prediction")
+        'landmark_total': {
+            'healthy': (0.01, 0.1),
+            'warning': 0.2,
+            'critical': 0.5,
+            'description': 'AU→Landmark VAE total loss (reconstruction + KL). Predicts 68-point landmarks from audio+AUs for geometric grounding.'
+        },
+        'landmark_recon': {
+            'healthy': (0.005, 0.05),
+            'warning': 0.1,
+            'critical': 0.2,
+            'description': 'AU→Landmark reconstruction (MSE). Measures accuracy of predicted 2D landmarks vs ground truth from MediaPipe.'
+        },
+        'landmark_kl': {
+            'healthy': (5.0, 20.0),
+            'warning': 30.0,
+            'critical': 50.0,
+            'description': 'AU→Landmark KL divergence. Regularizes VAE latent space (weight: 0.0001). Higher values indicate more structured latent space.'
+        },
 
         # Aggregated losses
         'reconstruction': {
@@ -361,6 +393,14 @@ class LossRangeMonitor:
         'perceptual': 'lambda_perceptual',
         'mouth_perceptual': 'lambda_mouth_perceptual',
         'verification': 'lambda_verification',
+        'aux_phoneme': 'lambda_aux_phoneme',
+        'aux_au': 'lambda_aux_au',
+        'aux_au_temporal': 'lambda_aux_au',  # Same weight as aux_au
+        'aux_au_frame': 'lambda_aux_au_frame',
+        'aux_au_frame_temporal': 'lambda_aux_au_frame',  # Same weight as aux_au_frame
+        'landmark_total': 'lambda_landmark',  # Total AU→Landmark VAE loss
+        'landmark_recon': 'lambda_landmark',  # Part of landmark_total
+        'landmark_kl': 'lambda_landmark',  # Part of landmark_total (weighted separately in VAE)
     }
 
     def __init__(self, enable_warnings: bool = True, enable_critical: bool = True, history_size: int = 50, config=None):
