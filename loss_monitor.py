@@ -296,6 +296,18 @@ class LossRangeMonitor:
             'critical': 10.0,
             'description': 'Auxiliary phoneme prediction loss (self-supervised, 392 classes). Helps Perceiver extract phoneme cues for lip sync.'
         },
+        'aux_au': {
+            'healthy': (0.001, 0.1),
+            'warning': 0.15,
+            'critical': 0.3,
+            'description': 'Auxiliary Action Unit prediction MSE loss (self-supervised, 16 AUs). Provides fine-grained facial expression control with [0,1] intensity values.'
+        },
+        'aux_au_temporal': {
+            'healthy': (0.0001, 0.05),
+            'warning': 0.08,
+            'critical': 0.15,
+            'description': 'AU temporal consistency loss (10% weight). Ensures smooth AU transitions across queries.'
+        },
 
         # Aggregated losses
         'reconstruction': {

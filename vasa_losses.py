@@ -229,6 +229,7 @@ class VASALossModule:
         self.lambda_audio_lip = getattr(config.loss, 'lambda_audio_lip', 2.0)
         self.lambda_mouth_openness = getattr(config.loss, 'lambda_mouth_openness', 10.0)
         self.lambda_aux_phoneme = getattr(config.loss, 'lambda_aux_phoneme', 0.05)
+        self.lambda_aux_au = getattr(config.loss, 'lambda_aux_au', 1.0)  # Action Unit prediction loss weight
 
         # Flow-DPO loss weight (VideoReward framework - Liu et al., 2025)
         self.lambda_flow_dpo = getattr(config.loss, 'lambda_flow_dpo', 0.5)
@@ -1151,10 +1152,49 @@ class VASALossModule:
             if torch.rand(1).item() < 0.01:  # Log 1% of the time to reduce overhead
                 logger.debug(f"  ✅ Auxiliary phoneme loss: {aux_phoneme_term.item():.6f}")
 
+            # 12. Action Unit Prediction Loss (Self-Supervised Auxiliary Task)
+            # This helps the Perceiver learn fine-grained facial muscle movements
+            # which are critical for expression control and lip sync
+            aux_au_term = torch.tensor(0.0, device=device)
+
+            # HARD ASSERTION: Fail training if AU data is missing
+            assert 'aux_predictions' in outputs, \
+                "❌ FATAL: aux_predictions missing from model outputs! AU loss cannot be computed."
+
+            aux = outputs['aux_predictions']
+
+            assert 'au_pred' in aux, \
+                "❌ FATAL: au_pred missing from aux_predictions! Model not configured for AU prediction."
+
+            assert 'au_gt' in aux, \
+                "❌ FATAL: au_gt missing from aux_predictions! Cache does not have AU ground truth."
+
+            au_pred = aux['au_pred']  # [B, num_queries=8, 16]
+            au_gt = aux['au_gt']      # [B, num_queries=8, 16]
+
+            # MSE loss for AU intensity regression (values in [0, 1])
+            aux_au_term = F.mse_loss(au_pred, au_gt)
+            losses['aux_au'] = aux_au_term
+
+            # Optional: Add temporal consistency loss for smoother AU transitions
+            if au_pred.size(1) > 1:  # More than 1 query
+                # Compute differences between consecutive queries
+                au_diff_pred = au_pred[:, 1:] - au_pred[:, :-1]  # [B, num_queries-1, 16]
+                au_diff_gt = au_gt[:, 1:] - au_gt[:, :-1]        # [B, num_queries-1, 16]
+                au_temporal_term = F.mse_loss(au_diff_pred, au_diff_gt)
+                aux_au_term = aux_au_term + 0.1 * au_temporal_term  # Weight temporal consistency at 10%
+                losses['aux_au_temporal'] = au_temporal_term
+
+            # Clean up intermediate tensors to prevent memory accumulation
+            del au_pred, au_gt
+
+            if torch.rand(1).item() < 0.01:  # Log 1% of the time to reduce overhead
+                logger.debug(f"  ✅ Auxiliary AU loss: {aux_au_term.item():.6f}")
+
             # ASSERT: Log what keys are actually in targets for debugging
             logger.info(f"🔍 LOSS FUNCTION - Checking targets keys: {sorted(targets.keys())}")
 
-            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + warp_term + diversity_term + perceptual_term + mouth_perceptual_term + audio_lip_term + audio_expr_term + flow_dpo_term + aux_phoneme_term * self.lambda_aux_phoneme
+            total_loss = recon_term + verify_term + control_term + sync_term + disentangle_term + vel_smooth_term + warp_term + diversity_term + perceptual_term + mouth_perceptual_term + audio_lip_term + audio_expr_term + flow_dpo_term + aux_phoneme_term * self.lambda_aux_phoneme + aux_au_term * self.lambda_aux_au
             losses['total'] = total_loss
             logger.debug(f"Total loss (with perceptual): {total_loss.item():.6f}")
 

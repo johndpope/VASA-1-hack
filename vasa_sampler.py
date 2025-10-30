@@ -297,6 +297,8 @@ def create_window_sequence_collate_fn(context_size: int = 10):
             'emo_frames', 'emo_keyframe_indices',
             # Phoneme ground truth for auxiliary phoneme prediction loss
             'phoneme_gt',
+            # Action Unit ground truth for auxiliary AU prediction loss
+            'au_gt',
 
         ]
 

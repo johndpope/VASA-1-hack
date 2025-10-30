@@ -224,6 +224,8 @@ loss:
   lambda_smoothness: 0.0      # DISABLED to allow maximum expression variance
   lambda_audio_lip: 3.0       # REDUCED from 5.0 to 3.0 - balance with lip landmark loss (2.0)
   lambda_mouth_openness: 10.0  # Direct mouth openness to audio energy supervision weight
+  lambda_aux_phoneme: 1.0      # Phoneme prediction (self-supervised) with class weighting to prevent mode collapse
+  lambda_aux_au: 1.0           # Action Unit prediction (self-supervised) for fine-grained facial expression control
 
   # Expression-specific losses (CRITICAL FOR PREVENTING COLLAPSE)
   lambda_expression_l1: 0.0   # DISABLED - conflicts with L2, too weak (was 0.1)

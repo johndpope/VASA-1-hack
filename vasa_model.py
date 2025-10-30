@@ -155,6 +155,13 @@ class TalkVidAudioProjection(nn.Module):
         self.phoneme_head = nn.Linear(dim, 392)
         logger.info(f"   Added phoneme prediction head: {dim}D → 392 classes (self-supervised, wav2vec2 full vocab)")
 
+        # Auxiliary Action Unit prediction head (self-supervised)
+        # Predicts 16 AU intensities [0,1] per latent query
+        # AUs provide fine-grained facial expression control
+        self.au_head = nn.Linear(dim, 16)
+        self.au_activation = nn.Sigmoid()  # Ensure [0,1] range for intensities
+        logger.info(f"   Added AU prediction head: {dim}D → 16 AUs (sigmoid activation, [0,1] intensities)")
+
         self.to_latents_from_mean_pooled_seq = (
             nn.Sequential(
                 nn.LayerNorm(dim),
@@ -209,8 +216,12 @@ class TalkVidAudioProjection(nn.Module):
                 block_residual = latents  # Update residual for next block
 
         # Compute auxiliary phoneme prediction (before final projection)
-        # Predict per latent query [B, num_queries, vocab_size=50]
+        # Predict per latent query [B, num_queries, vocab_size=392]
         phoneme_pred = self.phoneme_head(latents)  # Use latents before proj_out for auxiliary task
+
+        # Compute auxiliary Action Unit prediction (before final projection)
+        # Predict 16 AU intensities [B, num_queries, 16] with sigmoid activation
+        au_pred = self.au_activation(self.au_head(latents))  # [0,1] range for AU intensities
 
         latents = self.proj_out(latents)
         output = self.norm_out(latents)
@@ -219,12 +230,16 @@ class TalkVidAudioProjection(nn.Module):
         if not hasattr(self, '_logged_output'):
             logger.info(f"🎵 TalkVidAudioProjection output:")
             logger.info(f"   Output shape: {output.shape} (batch_size, {self.num_queries} queries, {self.output_dim}D)")
-            logger.info(f"   Phoneme predictions shape: {phoneme_pred.shape} (batch_size, {self.num_queries} queries, 50 classes)")
+            logger.info(f"   Phoneme predictions shape: {phoneme_pred.shape} (batch_size, {self.num_queries} queries, 392 classes)")
+            logger.info(f"   AU predictions shape: {au_pred.shape} (batch_size, {self.num_queries} queries, 16 AUs)")
             logger.info(f"   ✅ Audio features projected and compressed via Perceiver attention")
             self._logged_output = True
 
         # Return both output and auxiliary predictions
-        aux_predictions = {'phoneme_pred': phoneme_pred}
+        aux_predictions = {
+            'phoneme_pred': phoneme_pred,
+            'au_pred': au_pred
+        }
         return output, aux_predictions
 
 
@@ -1546,8 +1561,8 @@ class VASAModel(nn.Module):
         if noise is not None:
             outputs['noise'] = noise
 
-        # Add phoneme_gt to aux_predictions if available (from conditions/targets)
-        # aux_predictions should already be in outputs from motion_transformer if phoneme head exists
+        # Add phoneme_gt and au_gt to aux_predictions if available (from conditions/targets)
+        # aux_predictions should already be in outputs from motion_transformer if prediction heads exist
         if 'aux_predictions' in outputs:
             # Add phoneme_gt from validated_conditions if available
             if validated_conditions is not None and 'phoneme_gt' in validated_conditions:
@@ -1555,6 +1570,13 @@ class VASAModel(nn.Module):
             # Also check raw conditions in case it wasn't validated
             elif conditions is not None and 'phoneme_gt' in conditions:
                 outputs['aux_predictions']['phoneme_gt'] = conditions['phoneme_gt']
+
+            # Add au_gt from validated_conditions if available
+            if validated_conditions is not None and 'au_gt' in validated_conditions:
+                outputs['aux_predictions']['au_gt'] = validated_conditions['au_gt']
+            # Also check raw conditions in case it wasn't validated
+            elif conditions is not None and 'au_gt' in conditions:
+                outputs['aux_predictions']['au_gt'] = conditions['au_gt']
 
         return outputs
 

@@ -1274,7 +1274,7 @@ class VASATrainer:
                             control_signals = {}
                             control_keys = ['gaze', 'head_distance', 'emotion', 'speed_bucket',
                                           'lips', 'right_eye', 'left_eye', 'jaw', 'nose',
-                                          'blink_state', 'audio_features', 'phoneme_gt']
+                                          'blink_state', 'audio_features', 'phoneme_gt', 'au_gt']
                             for key in control_keys:
                                 value = window.get(key)
                                 if value is not None:
@@ -3524,7 +3524,48 @@ class VASATrainer:
 
                     # Clean up phoneme tensors to free memory
                     del phoneme_gt, phoneme_pred
-            
+
+                # Log Action Unit visualization
+                if 'aux_predictions' in outputs:
+                    from visualize_au import create_au_visualization, create_au_summary_visualization
+                    from au_extractor import AU_NAMES
+
+                    aux = outputs['aux_predictions']
+                    au_gt = None
+                    au_pred = None
+
+                    if 'au_gt' in aux:
+                        au_gt = aux['au_gt'][0].detach().cpu()  # [8, 16] for first batch item
+                    if 'au_pred' in aux:
+                        au_pred = aux['au_pred'][0].detach().cpu()  # [8, 16]
+
+                    if au_gt is not None and au_pred is not None:
+                        # Create main 16-subplot AU visualization
+                        fig_au_main = create_au_visualization(
+                            au_gt=au_gt,
+                            au_pred=au_pred,
+                            au_names=AU_NAMES,
+                            window_idx=window_idx,
+                            audio_filename=audio_filename
+                        )
+                        wandb.log({"visuals/action_units": wandb.Image(fig_au_main)}, step=step)
+                        plt.close(fig_au_main)
+
+                        # Create compact AU heatmap summary
+                        fig_au_summary = create_au_summary_visualization(
+                            au_gt=au_gt,
+                            au_pred=au_pred,
+                            au_names=AU_NAMES,
+                            window_idx=window_idx
+                        )
+                        wandb.log({"visuals/action_units_heatmap": wandb.Image(fig_au_summary)}, step=step)
+                        plt.close(fig_au_summary)
+
+                        logger.info(f"   ✅ AU visualizations logged to WandB")
+
+                        # Clean up AU tensors to free memory
+                        del au_gt, au_pred
+
             # Log motion parameter comparison (skip if using ground truth)
             # When use_gt_theta/scale/rotation/translation are True, there's no prediction to compare
             use_gt_theta = getattr(self.config.train, 'use_gt_theta', False)
