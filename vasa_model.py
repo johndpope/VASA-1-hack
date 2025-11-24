@@ -155,6 +155,13 @@ class TalkVidAudioProjection(nn.Module):
         self.phoneme_head = nn.Linear(dim, 392)
         logger.info(f"   Added phoneme prediction head: {dim}D → 392 classes (self-supervised, wav2vec2 full vocab)")
 
+        # Auxiliary Action Unit prediction head (self-supervised)
+        # Predicts 16 AU intensities [0,1] per latent query
+        # AUs provide fine-grained facial expression control
+        self.au_head = nn.Linear(dim, 16)
+        self.au_activation = nn.Sigmoid()  # Ensure [0,1] range for intensities
+        logger.info(f"   Added AU prediction head: {dim}D → 16 AUs (sigmoid activation, [0,1] intensities)")
+
         self.to_latents_from_mean_pooled_seq = (
             nn.Sequential(
                 nn.LayerNorm(dim),
@@ -209,8 +216,12 @@ class TalkVidAudioProjection(nn.Module):
                 block_residual = latents  # Update residual for next block
 
         # Compute auxiliary phoneme prediction (before final projection)
-        # Predict per latent query [B, num_queries, vocab_size=50]
+        # Predict per latent query [B, num_queries, vocab_size=392]
         phoneme_pred = self.phoneme_head(latents)  # Use latents before proj_out for auxiliary task
+
+        # Compute auxiliary Action Unit prediction (before final projection)
+        # Predict 16 AU intensities [B, num_queries, 16] with sigmoid activation
+        au_pred = self.au_activation(self.au_head(latents))  # [0,1] range for AU intensities
 
         latents = self.proj_out(latents)
         output = self.norm_out(latents)
@@ -219,12 +230,16 @@ class TalkVidAudioProjection(nn.Module):
         if not hasattr(self, '_logged_output'):
             logger.info(f"🎵 TalkVidAudioProjection output:")
             logger.info(f"   Output shape: {output.shape} (batch_size, {self.num_queries} queries, {self.output_dim}D)")
-            logger.info(f"   Phoneme predictions shape: {phoneme_pred.shape} (batch_size, {self.num_queries} queries, 50 classes)")
+            logger.info(f"   Phoneme predictions shape: {phoneme_pred.shape} (batch_size, {self.num_queries} queries, 392 classes)")
+            logger.info(f"   AU predictions shape: {au_pred.shape} (batch_size, {self.num_queries} queries, 16 AUs)")
             logger.info(f"   ✅ Audio features projected and compressed via Perceiver attention")
             self._logged_output = True
 
         # Return both output and auxiliary predictions
-        aux_predictions = {'phoneme_pred': phoneme_pred}
+        aux_predictions = {
+            'phoneme_pred': phoneme_pred,
+            'au_pred': au_pred
+        }
         return output, aux_predictions
 
 
@@ -385,6 +400,17 @@ class EfficientConditionEmbedding(nn.Module):
         self.distance_proj = nn.Linear(1, 1)
         self.emotion_proj = nn.Linear(2, 2)
 
+        # AU projection for explicit AU conditioning (Option C - fallback)
+        self.au_proj = nn.Linear(16, 16)  # 16 AU channels
+
+        # AU→Landmark conditioning (Paper approach - primary method)
+        # 68 landmarks × 2 (x,y) = 136 dimensions
+        self.landmark_proj = nn.Sequential(
+            nn.Linear(68 * 2, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64)
+        )
+
         # Using DynamicTanh instead of LayerNorm to preserve variance (JoyVASA approach + DyT benefits)
         self.control_norm = DynamicTanh(config.projections.control_norm_dim)
 
@@ -395,9 +421,10 @@ class EfficientConditionEmbedding(nn.Module):
         )
 
         # Final projection to combine all features into model_dim
-        # Audio (512) + Controls (5) + Blink (32) = 549 -> 512
-        total_features = config.projections.audio.output_dim + 5 + config.projections.blink.output_dim
-        self.final_proj = nn.Linear(total_features, model_dim)
+        # Audio (512) + Controls (5) + Blink (32) + Landmarks (64) OR AU (16) = 613 or 565 -> 512
+        # We'll use max size to accommodate both paths
+        total_features_max = config.projections.audio.output_dim + 5 + config.projections.blink.output_dim + 64 + 16
+        self.final_proj = nn.Linear(total_features_max, model_dim)
 
         self.final_norm = DynamicTanh(model_dim)
 
@@ -591,7 +618,53 @@ class EfficientConditionEmbedding(nn.Module):
                 blink_tensor = torch.zeros(B, T, 3, device=device, dtype=dtype)
             blink_embedded = self.blink_embed(blink_tensor)
 
-            combined = torch.cat([audio_features, controls_features,  blink_embedded], dim=-1)
+            # Handle AU→Landmark conditioning (Paper approach - prioritized)
+            # Paper insight: Landmarks provide explicit geometric scaffolding
+            landmark_tensor = conditions.get('au_landmarks')
+            au_tensor = conditions.get('au_target')
+
+            if landmark_tensor is not None:
+                # Primary path: Use predicted landmarks from AU→Landmark VAE
+                landmark_tensor = self._ensure_float_tensor(landmark_tensor, dtype)
+                # Flatten landmarks: [B, T, 68, 2] → [B, T, 136]
+                landmark_flat = landmark_tensor.reshape(B, T, -1)
+                landmark_features = self.landmark_proj(landmark_flat)  # [B, T, 64]
+
+                # Also use AU features (both paths active)
+                if au_tensor is None:
+                    au_tensor = torch.zeros(B, T, 16, device=device, dtype=dtype)
+                else:
+                    au_tensor = self._ensure_float_tensor(au_tensor, dtype)
+                au_features = self.au_proj(au_tensor)  # [B, T, 16]
+
+                # Log once
+                if not hasattr(self, '_logged_landmark_features'):
+                    logger.info(f"✅ [AU→LANDMARK] Processing landmark features: shape={landmark_features.shape}, "
+                              f"mean={landmark_features.mean().item():.4f}, var={landmark_features.var().item():.4f}")
+                    self._logged_landmark_features = True
+
+                combined = torch.cat([audio_features, controls_features, blink_embedded, landmark_features, au_features], dim=-1)
+
+            elif au_tensor is not None:
+                # Fallback path: Use direct AU conditioning if landmarks not available
+                au_tensor = self._ensure_float_tensor(au_tensor, dtype)
+                au_features = self.au_proj(au_tensor)
+
+                # Pad with zeros to match expected size
+                zero_pad = torch.zeros(B, T, 64, device=device, dtype=dtype)
+
+                if not hasattr(self, '_logged_au_features'):
+                    logger.info(f"✅ [AU CONTROL] Processing AU features (fallback): shape={au_features.shape}, "
+                              f"mean={au_features.mean().item():.4f}, var={au_features.var().item():.4f}")
+                    self._logged_au_features = True
+
+                combined = torch.cat([audio_features, controls_features, blink_embedded, zero_pad, au_features], dim=-1)
+
+            else:
+                # No AU or landmark conditioning - use zeros
+                zero_landmarks = torch.zeros(B, T, 64, device=device, dtype=dtype)
+                zero_aus = torch.zeros(B, T, 16, device=device, dtype=dtype)
+                combined = torch.cat([audio_features, controls_features, blink_embedded, zero_landmarks, zero_aus], dim=-1)
 
             # Project combined features to model dimension
             # This maintains variance while fitting into model_dim
@@ -1421,7 +1494,9 @@ class VASAModel(nn.Module):
                 'nose': (B, T, 4, 3),
                 'blink_state': (B, T, 3),
                 'audio_features': (B, T, 768),  # CRITICAL: Must include audio_features!
-                'phoneme_gt': (B, 8)  # Phoneme ground truth for auxiliary loss (8 latent queries)
+                'phoneme_gt': (B, 8),  # Phoneme ground truth for auxiliary loss (8 latent queries)
+                'au_target': (B, T, 16),  # Action Unit control signal extracted from target frames (per-frame)
+                'au_landmarks': (B, T, 68, 2)  # Predicted 2D landmarks from AU→Landmark VAE (paper approach)
             }
 
             for key, expected_shape in expected_shapes.items():
@@ -1546,8 +1621,8 @@ class VASAModel(nn.Module):
         if noise is not None:
             outputs['noise'] = noise
 
-        # Add phoneme_gt to aux_predictions if available (from conditions/targets)
-        # aux_predictions should already be in outputs from motion_transformer if phoneme head exists
+        # Add phoneme_gt and au_gt to aux_predictions if available (from conditions/targets)
+        # aux_predictions should already be in outputs from motion_transformer if prediction heads exist
         if 'aux_predictions' in outputs:
             # Add phoneme_gt from validated_conditions if available
             if validated_conditions is not None and 'phoneme_gt' in validated_conditions:
@@ -1555,6 +1630,13 @@ class VASAModel(nn.Module):
             # Also check raw conditions in case it wasn't validated
             elif conditions is not None and 'phoneme_gt' in conditions:
                 outputs['aux_predictions']['phoneme_gt'] = conditions['phoneme_gt']
+
+            # Add au_gt from validated_conditions if available
+            if validated_conditions is not None and 'au_gt' in validated_conditions:
+                outputs['aux_predictions']['au_gt'] = validated_conditions['au_gt']
+            # Also check raw conditions in case it wasn't validated
+            elif conditions is not None and 'au_gt' in conditions:
+                outputs['aux_predictions']['au_gt'] = conditions['au_gt']
 
         return outputs
 

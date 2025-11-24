@@ -171,6 +171,9 @@ class WorkerState:
         self._phoneme_model = None  # wav2vec2 for phoneme recognition
         self._phoneme_processor = None  # phoneme processor
 
+        # Action Unit extraction properties
+        self._au_extractor = None  # AU extractor from MediaPipe landmarks
+
     @classmethod
     def get_instance(cls):
         """Get or create singleton instance for current process"""
@@ -273,6 +276,16 @@ class WorkerState:
             # Trigger phoneme model initialization which also sets processor
             _ = self.phoneme_model
         return self._phoneme_processor
+
+    @property
+    def au_extractor(self):
+        """Lazy initialization of Action Unit extractor"""
+        if self._au_extractor is None:
+            from au_extractor import ActionUnitExtractor
+            logger.info("Loading Action Unit extractor...")
+            self._au_extractor = ActionUnitExtractor()
+            logger.info("✅ Action Unit extractor loaded successfully")
+        return self._au_extractor
 
     @property
     def face_mesh(self):
@@ -2035,6 +2048,37 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             # Return zeros on error
             return torch.zeros(num_queries, dtype=torch.long)
 
+    def _extract_au_intensities(
+        self,
+        frames: List[np.ndarray],
+        num_queries: int = 8
+    ) -> torch.Tensor:
+        """
+        Extract Action Unit intensities from video frames using MediaPipe landmarks.
+
+        Args:
+            frames: List of RGB frames as numpy arrays [H, W, 3]
+            num_queries: Number of latent queries to align AUs to (default: 8)
+
+        Returns:
+            AU intensities tensor [num_queries, 16] - 16 AU values per query
+        """
+        try:
+            # Use the ActionUnitExtractor from worker state
+            au_tensor = self.worker_state.au_extractor.extract_aus_from_video(
+                frames=frames,
+                num_queries=num_queries
+            )
+
+            logger.debug(f"Extracted AU intensities: {au_tensor.shape} (num_queries={num_queries}, 16 AUs)")
+            return au_tensor  # [num_queries, 16]
+
+        except Exception as e:
+            logger.error(f"Error extracting AU intensities: {str(e)}")
+            logger.error(traceback.format_exc())
+            # Return zeros on error
+            return torch.zeros(num_queries, 16, dtype=torch.float32)
+
     def _preextract_all_audio(self):
         """Pre-extract audio with progress bar and error handling"""
         for i, video_path in enumerate(tqdm(self.video_paths, desc="Extracting audio")):
@@ -2994,6 +3038,27 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         num_queries=8
                     )
 
+                    # Extract Action Unit intensities from video frames
+                    # Convert frames to numpy arrays for AU extraction
+                    # frames is a list of PIL Images or tensors
+                    frames_np = []
+                    for frame in frames:
+                        if isinstance(frame, torch.Tensor):
+                            # Convert tensor to numpy [H, W, C]
+                            frame_np = frame.permute(1, 2, 0).cpu().numpy()
+                            # Denormalize if needed (assuming [0,1] range)
+                            if frame_np.max() <= 1.0:
+                                frame_np = (frame_np * 255).astype(np.uint8)
+                        else:
+                            # Assume PIL Image
+                            frame_np = np.array(frame)
+                        frames_np.append(frame_np)
+
+                    au_gt = self._extract_au_intensities(
+                        frames=frames_np,
+                        num_queries=8  # Match TalkVidAudioProjection's default
+                    )
+
                     # Process face attributes
                     gaze_angles = []
                     emotion_logits = []
@@ -3108,6 +3173,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
                         'audio_waveform': audio_segment.squeeze(0),  # [1, samples] -> [samples] - raw audio for legacy
                         'audio_mel_spec': mel_spec.squeeze(0),  # [1, T, 128] -> [T, 128] - mel spectrogram for Synchformer
                         'phoneme_gt': phoneme_gt,  # [num_queries=8] - phoneme IDs for self-supervised phoneme prediction
+                        'au_gt': au_gt,  # [num_queries=8, 16] - Action Unit intensities for facial expression control
                         'gaze': torch.tensor(np.stack(gaze_angles), dtype=torch.float32),
                         'emotion': torch.tensor(np.stack(emotion_logits), dtype=torch.float32),
                         'emotion_label': emotion_labels,  # List of strings like ["sad", "happy", "neutral", ...]
@@ -3410,6 +3476,7 @@ class VASAIntegratedDataset(Dataset, VASADatasetMixin):
             'audio_waveform': torch.zeros(self.sequence_length * 640),    # raw audio at 16kHz, ~40ms per frame
             'audio_mel_spec': torch.zeros((self.sequence_length, 128)),   # mel spectrogram for Synchformer
             'phoneme_gt': torch.zeros(8, dtype=torch.long),               # phoneme IDs for self-supervised phoneme prediction
+            'au_gt': torch.zeros(8, 16, dtype=torch.float32),            # AU intensities for facial expression control
             'gaze': torch.zeros((self.sequence_length, 2)),
             'head_distance': torch.zeros((self.sequence_length, 1)),
             'emotion': torch.zeros((self.sequence_length, 2)),

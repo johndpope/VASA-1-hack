@@ -1,3 +1,4 @@
+from logger import logger  # Import first to suppress MediaPipe/glog logs
 import h5py
 import torch
 from torch.cuda import amp
@@ -1274,7 +1275,7 @@ class VASATrainer:
                             control_signals = {}
                             control_keys = ['gaze', 'head_distance', 'emotion', 'speed_bucket',
                                           'lips', 'right_eye', 'left_eye', 'jaw', 'nose',
-                                          'blink_state', 'audio_features', 'phoneme_gt']
+                                          'blink_state', 'audio_features', 'phoneme_gt', 'au_gt']
                             for key in control_keys:
                                 value = window.get(key)
                                 if value is not None:
@@ -1328,6 +1329,113 @@ class VASATrainer:
 
                             # Also get original video frames for thumbnail visualization
                             original_frames = window.get('frames', None)  # Original video frames for visualization only
+
+                            # Extract AUs from target frames as control signal (Option C: AU as explicit conditioning)
+                            au_target = None
+                            if target_frames is not None:
+                                try:
+                                    from au_extractor import ActionUnitExtractor
+                                    if not hasattr(self, '_au_extractor'):
+                                        self._au_extractor = ActionUnitExtractor()
+
+                                    # target_frames shape: [B, T, C, H, W]
+                                    B_frames, T_frames = target_frames.shape[:2]
+
+                                    # Convert first batch item to numpy frames for AU extraction
+                                    frames_np = target_frames[0].detach().cpu().permute(0, 2, 3, 1).numpy()  # [T, H, W, C]
+
+                                    # Convert from [-1, 1] to [0, 255]
+                                    frames_np = ((frames_np + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
+
+                                    # Extract AUs from all frames (no pooling, keep all T frames)
+                                    au_target_single = self._au_extractor.extract_aus_from_video(
+                                        frames=[frames_np[i] for i in range(T_frames)],
+                                        num_queries=T_frames  # Keep all frames, no downsampling
+                                    )  # [T, 16]
+
+                                    # Expand to match batch size and move to device
+                                    au_target = au_target_single.unsqueeze(0).expand(B_frames, -1, -1).to(device)  # [B, T, 16]
+                                    logger.info(f"✅ [AU CONTROL] Extracted AU control signal: shape={au_target.shape}, mean={au_target.mean().item():.4f}")
+                                except Exception as e:
+                                    logger.warning(f"⚠️ Failed to extract AU control signal: {e}")
+                                    au_target = None
+
+                            # AU→Landmark prediction (Paper: "Talking Head Generation via AU-Guided Landmark Prediction")
+                            # Instead of directly conditioning on AUs, predict 2D landmarks for better geometric grounding
+                            predicted_landmarks = None
+                            landmark_targets = None
+                            landmark_loss_dict = {}
+
+                            if au_target is not None and target_frames is not None:
+                                try:
+                                    from au_to_landmark import AUToLandmarkVAE, extract_facial_landmarks_68pt, vae_loss
+
+                                    # Initialize AU→Landmark predictor (once)
+                                    if not hasattr(self, 'au_to_landmark_vae'):
+                                        self.au_to_landmark_vae = AUToLandmarkVAE(
+                                            audio_dim=768,
+                                            au_dim=16,
+                                            hidden_dim=256,
+                                            latent_dim=128,
+                                            num_landmarks=68,
+                                            num_layers=6
+                                        ).to(device)
+                                        logger.info("✅ [AU→LANDMARK] Initialized AU-to-Landmark VAE predictor")
+
+                                    # Extract ground truth landmarks from target frames for supervision
+                                    # This provides geometric grounding for the AU→landmark mapping
+                                    landmark_targets_single = extract_facial_landmarks_68pt(
+                                        frames_np,  # Already converted to uint8 RGB
+                                        use_mediapipe=True
+                                    )  # [T, 68, 2]
+
+                                    # Expand to batch size and move to device
+                                    landmark_targets = landmark_targets_single.unsqueeze(0).to(device)  # [1, T, 68, 2]
+
+                                    # Predict landmarks from audio + AUs using VAE
+                                    # This is the key contribution from the paper: explicit AU→landmark mapping
+                                    audio_features = control_signals['audio_features']  # [B, T, 768]
+
+                                    predicted_landmarks, mu, logvar = self.au_to_landmark_vae(
+                                        audio=audio_features,
+                                        aus=au_target,
+                                        deterministic=False  # Sample during training
+                                    )  # [B, T, 68, 2]
+
+                                    # Compute VAE loss
+                                    landmark_total_loss, landmark_recon_loss, landmark_kl_loss = vae_loss(
+                                        recon_landmarks=predicted_landmarks,
+                                        target_landmarks=landmark_targets,
+                                        mu=mu,
+                                        logvar=logvar,
+                                        kl_weight=0.0001
+                                    )
+
+                                    # Store for loss computation
+                                    landmark_loss_dict = {
+                                        'landmark_total': landmark_total_loss,
+                                        'landmark_recon': landmark_recon_loss,
+                                        'landmark_kl': landmark_kl_loss
+                                    }
+
+                                    logger.info(f"✅ [AU→LANDMARK] Predicted landmarks: shape={predicted_landmarks.shape}, "
+                                              f"recon_loss={landmark_recon_loss.item():.6f}, kl_loss={landmark_kl_loss.item():.6f}")
+
+                                except Exception as e:
+                                    logger.warning(f"⚠️ Failed AU→Landmark prediction: {e}")
+                                    import traceback
+                                    traceback.print_exc()
+                                    predicted_landmarks = None
+
+                            # Add landmark predictions to control signals (instead of raw AUs)
+                            # Paper insight: Landmarks provide explicit geometric scaffolding
+                            if predicted_landmarks is not None:
+                                control_signals['au_landmarks'] = predicted_landmarks  # [B, T, 68, 2]
+                                logger.info(f"✅ [AU→LANDMARK] Added predicted landmarks to control_signals with shape {predicted_landmarks.shape}")
+                            elif au_target is not None:
+                                # Fallback: use raw AUs if landmark prediction failed
+                                control_signals['au_target'] = au_target
+                                logger.info(f"✅ [AU CONTROL] Using fallback AU conditioning: shape={au_target.shape}")
 
                             # Generate frames if we have disentanglement losses enabled
                             # OPTIMIZATION: Only generate the 2 frames needed for disentanglement loss
@@ -1539,6 +1647,14 @@ class VASATrainer:
                                 source_identity=source_identity_for_loss,  # Pass high-quality identity
                                 dataset=self.train_loader.dataset  # Pass dataset for feature extraction
                             )
+
+                            # Add AU→Landmark VAE losses (if computed)
+                            if landmark_loss_dict:
+                                losses.update(landmark_loss_dict)
+                                metrics.update({k: v.item() if torch.is_tensor(v) else v for k, v in landmark_loss_dict.items()})
+                                # Add landmark loss to total loss
+                                losses['total'] = losses['total'] + losses['landmark_total']
+                                logger.debug(f"Added landmark loss to total: landmark_total={losses['landmark_total'].item():.6f}")
 
                             # Monitor loss ranges (every 100 steps, log summary)
                             if self.global_step % 100 == 0 and window_idx == 0:
@@ -3486,12 +3602,18 @@ class VASATrainer:
                     # IMPORTANT: Detach and move to CPU to prevent memory accumulation on GPU
                     phoneme_gt = None
                     phoneme_pred = None
+                    au_gt = None
+                    au_pred = None
                     if 'aux_predictions' in outputs:
                         aux = outputs['aux_predictions']
                         if 'phoneme_gt' in aux:
                             phoneme_gt = aux['phoneme_gt'][0].detach().cpu()  # [8] for first batch item
                         if 'phoneme_pred' in aux:
                             phoneme_pred = torch.argmax(aux['phoneme_pred'][0], dim=-1).detach().cpu()  # [8] predicted IDs
+                        if 'au_gt' in aux:
+                            au_gt = aux['au_gt'][0].detach().cpu()  # [8, 16] for first batch item
+                        if 'au_pred' in aux:
+                            au_pred = aux['au_pred'][0].detach().cpu()  # [8, 16] predicted AUs
 
                     # Extract audio filename from window metadata
                     audio_filename = "unknown"
@@ -3517,14 +3639,57 @@ class VASATrainer:
                         use_perceiver=use_perceiver,
                         phoneme_gt=phoneme_gt,  # Add phoneme ground truth
                         phoneme_pred=phoneme_pred,  # Add phoneme predictions
-                        audio_filename=audio_filename  # Add audio filename
+                        audio_filename=audio_filename,  # Add audio filename
+                        au_gt=au_gt,  # Add AU ground truth [8, 16]
+                        au_pred=au_pred  # Add AU predictions [8, 16]
                     )
                     wandb.log({"visuals/audio_to_expression": wandb.Image(fig_audio_expr)}, step=step)
                     plt.close(fig_audio_expr)
 
-                    # Clean up phoneme tensors to free memory
-                    del phoneme_gt, phoneme_pred
-            
+                    # Clean up phoneme and AU tensors to free memory
+                    del phoneme_gt, phoneme_pred, au_gt, au_pred
+
+                # Log Action Unit visualization
+                if 'aux_predictions' in outputs:
+                    from visualize_au import create_au_visualization, create_au_summary_visualization
+                    from au_extractor import AU_NAMES
+
+                    aux = outputs['aux_predictions']
+                    au_gt = None
+                    au_pred = None
+
+                    if 'au_gt' in aux:
+                        au_gt = aux['au_gt'][0].detach().cpu()  # [8, 16] for first batch item
+                    if 'au_pred' in aux:
+                        au_pred = aux['au_pred'][0].detach().cpu()  # [8, 16]
+
+                    if au_gt is not None and au_pred is not None:
+                        # Create main 16-subplot AU visualization
+                        fig_au_main = create_au_visualization(
+                            au_gt=au_gt,
+                            au_pred=au_pred,
+                            au_names=AU_NAMES,
+                            window_idx=window_idx,
+                            audio_filename=audio_filename
+                        )
+                        wandb.log({"visuals/action_units": wandb.Image(fig_au_main)}, step=step)
+                        plt.close(fig_au_main)
+
+                        # Create compact AU heatmap summary
+                        fig_au_summary = create_au_summary_visualization(
+                            au_gt=au_gt,
+                            au_pred=au_pred,
+                            au_names=AU_NAMES,
+                            window_idx=window_idx
+                        )
+                        wandb.log({"visuals/action_units_heatmap": wandb.Image(fig_au_summary)}, step=step)
+                        plt.close(fig_au_summary)
+
+                        logger.info(f"   ✅ AU visualizations logged to WandB")
+
+                        # Clean up AU tensors to free memory
+                        del au_gt, au_pred
+
             # Log motion parameter comparison (skip if using ground truth)
             # When use_gt_theta/scale/rotation/translation are True, there's no prediction to compare
             use_gt_theta = getattr(self.config.train, 'use_gt_theta', False)
