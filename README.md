@@ -58,6 +58,18 @@ The green outline in the VASA output shows facial landmark detection used for lo
 
 This visualization shows the audio-to-expression correlation during training, demonstrating how the model learns to map audio features to facial expressions for lip-sync.
 
+### Expression Prediction Target
+
+![Expression Comparison](assets/expression_comparison.png)
+
+This shows the **target expression parameters** that the model must learn to predict from audio alone. The expression embedding captures facial dynamics (mouth shape, eye openness, eyebrow position, etc.) frame-by-frame.
+
+### Successful Expression Transfer
+
+![Expression Success](assets/expression_success.png)
+
+When the model successfully predicts the expression parameters from audio, combined with the identity image, it recreates the target expression while preserving the source identity. This demonstrates the full pipeline working end-to-end.
+
 ---
 
 ## 🎯 Key Features
