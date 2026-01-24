@@ -4,6 +4,17 @@
 **Import Task Master's development workflow commands and guidelines, treat as if import is in the main CLAUDE.md file.**
 @./.taskmaster/CLAUDE.md
 
+## Documentation
+
+All project documentation is stored in the `/docs` folder. Key documents include:
+- `docs/AUDIT_TOOL_README.md` - Expression audit tool documentation
+- `docs/LOSS_AUDIT.md` - Loss function audit and configuration
+- `docs/LOSS_CLEANUP_SUMMARY.md` - Loss cleanup history
+- `docs/vasa_model_documentation.md` - VASA model architecture docs
+- `docs/vasa-prd.md` - Product requirements document
+
+When creating new documentation, place `.md` files in `/docs` folder (except README.md and CLAUDE.md which stay in root).
+
 ## VASA-1 Project Status and Findings
 
 ### Current Training Status
@@ -95,7 +106,7 @@ python audit_expressions.py \
 - `expression_comparison.png` - Visualization with 3 subplots showing L2 distances over time
 - `expression_metrics.csv` - Per-frame metrics for detailed analysis
 
-See `AUDIT_TOOL_README.md` for full documentation.
+See `docs/AUDIT_TOOL_README.md` for full documentation.
 
 ### Known Issues
 
@@ -164,7 +175,7 @@ The project uses `loss_monitor.py` to track loss values and warn when they're ou
 
 2. **Removing a loss**:
    - Remove or comment out the entry in `LOSS_RANGES`
-   - Update any documentation in `LOSS_AUDIT.md` if it exists
+   - Update any documentation in `docs/LOSS_AUDIT.md` if it exists
 
 3. **Finding healthy ranges**:
    - Run training and observe typical values in WandB
@@ -179,25 +190,25 @@ The project uses `loss_monitor.py` to track loss values and warn when they're ou
 - Moved audio-lip correlation from early section to control losses (after landmark extraction)
 - Now uses extracted lips from generated frames instead of dataset targets
 - Also updated mouth_openness_direct to use extracted lips
-- See `AUDIO_LIP_REFACTOR_PLAN.md` for details
+- See `docs/AUDIO_LIP_REFACTOR_PLAN.md` for details
 
 **Blink Loss Implementation (2025-10-03)**:
 - Implemented previously stubbed `_compute_blink_loss()` function
 - Computes eye openness loss (channels 1-2) and blink phase loss (channel 0)
 - Extracts blink states from generated frames using MediaPipe
-- See `BLINK_LOSS_IMPLEMENTATION.md` for details
+- See `docs/BLINK_LOSS_IMPLEMENTATION.md` for details
 
 **Loss Cleanup (Previous)**:
 - Disabled conflicting losses (L1 vs L2, redundant smoothness losses)
 - Reduced conflicting weights (audio_expr_coupling, audio_lip)
 - Added real-time monitoring with warnings/critical alerts
-- See `LOSS_CLEANUP_SUMMARY.md` and `LOSS_AUDIT.md` for details
+- See `docs/LOSS_CLEANUP_SUMMARY.md` and `docs/LOSS_AUDIT.md` for details
 
 **Temporal Stabilization (2025-10-03)**:
 - Added Gaussian smoothing to motion parameters before frame generation
 - Fixes severe geometric distortions (warping, shearing, tilting) in generated frames
 - Applied automatically for sequences with 4+ frames (sigma=1.0 default)
-- See `TEMPORAL_STABILIZATION.md` for details
+- See `docs/TEMPORAL_STABILIZATION.md` for details
 
 
 
