@@ -2,6 +2,16 @@
 
 This repository contains the VASA implementation separated from EMOPortraits, with all components properly configured for standalone training.
 
+## Related Projects
+
+| Project | Description | Status |
+|---------|-------------|--------|
+| [**IMTalker**](https://github.com/johndpope/IMTalker/tree/feat/imf-documentation) | Built on my recreated Microsoft IMF paper - **most promising direction**, active development focused here | Active |
+| [**IMF**](https://github.com/johndpope/IMF) | Training code for Implicit Motion Function (Microsoft paper recreation) | Training |
+| [**OmniTransfer-hack**](https://github.com/johndpope/omnitransfer-hack) | LTX2 / OmniTransfer implementation ([paper](https://pangzecheung.github.io/OmniTransfer/)) | Experimental |
+
+---
+
 ## Support This Project
 
 Training video models requires significant GPU compute. If you find this work useful, please consider donating [Vast.ai](https://vast.ai) credits to help continue development.
