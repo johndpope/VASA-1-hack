@@ -2,6 +2,27 @@
 
 This repository contains the VASA implementation separated from EMOPortraits, with all components properly configured for standalone training.
 
+## Support This Project
+
+Training video models requires significant GPU compute. If you find this work useful, please consider donating [Vast.ai](https://vast.ai) credits to help continue development.
+
+**Send Vast.ai credits to:** `jp@bellgeorge.com`
+
+```
+vastai transfer credit jp@bellgeorge.com <AMOUNT>
+```
+
+| Tier | Suggested Amount | What It Helps With |
+|------|------------------|-------------------|
+| **Buy Me a Coffee** | $5-10 | Quick experiments, bug fixes |
+| **Mates Rates** | $25-50 | A few hours of A100 training |
+| **Supporter** | $100-250 | Full training run (10k steps) |
+| **Enterprise** | $500+ | Multi-stage training, new features |
+
+Every contribution helps push this research forward. Thank you!
+
+---
+
 ## 🎬 Training Progress
 
 **Live Training Dashboard**: [wandb.ai/snoozie/vasa-overfitting](https://wandb.ai/snoozie/vasa-overfitting/runs/8mq2bmob?nw=nwusersnoozie)
