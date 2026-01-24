@@ -2,6 +2,33 @@
 
 This repository contains the VASA implementation separated from EMOPortraits, with all components properly configured for standalone training.
 
+## 🎬 Training Progress
+
+**Live Training Dashboard**: [wandb.ai/snoozie/vasa-overfitting](https://wandb.ai/snoozie/vasa-overfitting/runs/8mq2bmob?nw=nwusersnoozie)
+
+### Expression Transfer Visualization
+
+![Training Thumbnail](assets/training_thumbnail.png)
+
+The training visualization shows four panels demonstrating the expression transfer pipeline:
+
+| Panel | Description |
+|-------|-------------|
+| **Identity (Source)** | The source identity image - the person whose appearance we want to preserve |
+| **Target** | The driving video frame - provides the expression/pose we want to transfer |
+| **EMO Generated** | Output from the EMOPortraits volumetric avatar model (baseline) |
+| **VASA Generated** | Output from our VASA diffusion model - learns to predict motion parameters that drive expression transfer while preserving source identity |
+
+The green outline in the VASA output shows facial landmark detection used for loss computation. The goal is for VASA Generated to match the Target's expression while maintaining the Identity's appearance.
+
+### Audio-to-Expression Mapping
+
+![Audio to Expression](assets/audio_to_expression.png)
+
+This visualization shows the audio-to-expression correlation during training, demonstrating how the model learns to map audio features to facial expressions for lip-sync.
+
+---
+
 ## 🎯 Key Features
 
 - **Clean separation** of VASA motion generation from EMOPortraits volumetric rendering
